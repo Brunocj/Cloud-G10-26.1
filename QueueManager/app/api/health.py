@@ -6,6 +6,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from app.core.config import settings
+from app.services.nats_client import nats_manager
 
 logger = logging.getLogger(__name__)
 
@@ -17,8 +18,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             self._respond(404, {"status": "not_found"})
             return
 
-        from app.services.queue_client import queue_client
-        connected = queue_client.is_connected()
+        connected = nats_manager.is_connected()
         body   = {"status": "ok" if connected else "degraded", "nats": connected}
         status = 200 if connected else 503
         self._respond(status, body)

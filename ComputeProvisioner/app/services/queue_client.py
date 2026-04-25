@@ -1,128 +1,108 @@
 """
-Cliente Redis para el módulo de colas.
+Cliente NATS para el Compute Provisioner.
+Reemplaza al cliente Redis anterior.
 
-Responsabilidades:
-- Consumir mensajes de las queues de entrada (deploy / destroy).
-- Publicar resultados a la queue de salida.
-- Persistir el estado de VMs desplegadas por slice (para poder destruirlas luego).
+El Compute Provisioner actúa como servidor de requests NATS:
+- Escucha requests en compute.deploy y compute.destroy
+- Responde directamente al Queue Manager en el mismo request
+- Persiste el estado de VMs en NATS KV para el destroy
 """
 
 import json
 import logging
-from typing import List, Optional
+from typing import Optional, List
 
-import redis
+import nats
+from nats.aio.client import Client as NATSClient
+from nats.js import JetStreamContext
+from nats.js.kv import KeyValue
 
 from app.core.config import settings
-from app.models.schemas import DeploySliceResponse, DestroySliceResponse
 
 logger = logging.getLogger(__name__)
 
-# Clave Redis donde se persisten las VMs de un slice desplegado
-_SLICE_VMS_KEY = "deployed_vms:{slice_id}"
+_SLICE_VMS_KEY = "compute-vms:{slice_id}"
 
 
-class QueueClient:
+class NATSQueueClient:
 
     def __init__(self):
-        self._redis = redis.Redis(
-            host=settings.REDIS_HOST,
-            port=settings.REDIS_PORT,
-            db=settings.REDIS_DB,
-            decode_responses=True,
+        self._nc: Optional[NATSClient]       = None
+        self._js: Optional[JetStreamContext]  = None
+        self._kv: Optional[KeyValue]          = None
+
+    async def connect(self) -> None:
+        self._nc = await nats.connect(
+            settings.NATS_URL,
+            name=settings.SERVICE_NAME,
+            reconnect_time_wait=2,
+            max_reconnect_attempts=-1,
         )
+        self._js = self._nc.jetstream()
+        await self._setup_kv()
+        logger.info(f"Conectado a NATS: {settings.NATS_URL}")
 
-    # ── Consumo ─────────────────────────────────────────────────────────────
+    async def disconnect(self) -> None:
+        if self._nc:
+            await self._nc.drain()
 
-    def consume_deploy(self, timeout: int = 5) -> Optional[dict]:
-        """
-        Bloquea hasta recibir un mensaje de la queue de deploy.
-        Retorna el payload como dict, o None si timeout.
-        """
-        return self._blpop(settings.QUEUE_DEPLOY, timeout)
-
-    def consume_destroy(self, timeout: int = 5) -> Optional[dict]:
-        """
-        Bloquea hasta recibir un mensaje de la queue de destroy.
-        Retorna el payload como dict, o None si timeout.
-        """
-        return self._blpop(settings.QUEUE_DESTROY, timeout)
-
-    # ── Publicación de resultados ────────────────────────────────────────────
-
-    def publish_deploy_result(self, response: DeploySliceResponse) -> None:
-        """
-        Publica el resultado del despliegue al módulo de colas.
-        También persiste las VMs exitosas para futuros destroy.
-        """
-        payload = response.model_dump()
-        payload["event"] = "DEPLOY_RESULT"
-        self._rpush(settings.QUEUE_RESULT, payload)
-        logger.info(
-            f"[slice={response.slice_id}] Resultado deploy publicado: "
-            f"status={response.status}"
-        )
-
-        # Persistir VMs desplegadas exitosamente para poder destruirlas luego
-        if response.vms:
-            self._save_slice_vms(response.slice_id, [
-                {
-                    "vm_id":     vm.vm_id,
-                    "worker_ip": vm.worker_ip,
-                    "pid":       vm.pid,
-                    "vnc_port":  vm.vnc_port,
-                }
-                for vm in response.vms
-            ])
-
-    def publish_destroy_result(self, response: DestroySliceResponse) -> None:
-        """Publica el resultado de la destrucción al módulo de colas."""
-        payload = response.model_dump()
-        payload["event"] = "DESTROY_RESULT"
-        self._rpush(settings.QUEUE_RESULT, payload)
-        logger.info(
-            f"[slice={response.slice_id}] Resultado destroy publicado: "
-            f"status={response.status}"
-        )
-
-        # Limpiar estado persistido si todo fue destruido
-        if response.status in ("success", "partial"):
-            self._delete_slice_vms(response.slice_id)
-
-    # ── Persistencia de estado ───────────────────────────────────────────────
-
-    def _save_slice_vms(self, slice_id: str, vms: List[dict]) -> None:
-        """Guarda el mapa VM→worker de un slice en Redis."""
-        key = _SLICE_VMS_KEY.format(slice_id=slice_id)
-        self._redis.set(key, json.dumps(vms))
-        logger.debug(f"Estado de VMs guardado para slice {slice_id}")
-
-    def get_slice_vms(self, slice_id: str) -> Optional[List[dict]]:
-        """Recupera el mapa VM→worker de un slice desde Redis."""
-        key = _SLICE_VMS_KEY.format(slice_id=slice_id)
-        raw = self._redis.get(key)
-        if raw:
-            return json.loads(raw)
-        return None
-
-    def _delete_slice_vms(self, slice_id: str) -> None:
-        key = _SLICE_VMS_KEY.format(slice_id=slice_id)
-        self._redis.delete(key)
-
-    # ── Helpers ──────────────────────────────────────────────────────────────
-
-    def _blpop(self, queue: str, timeout: int) -> Optional[dict]:
-        result = self._redis.blpop(queue, timeout=timeout)
-        if result:
-            _, raw = result
-            return json.loads(raw)
-        return None
-
-    def _rpush(self, queue: str, payload: dict) -> None:
-        self._redis.rpush(queue, json.dumps(payload))
-
-    def ping(self) -> bool:
+    async def _setup_kv(self) -> None:
         try:
-            return self._redis.ping()
+            self._kv = await self._js.key_value(settings.NATS_KV_BUCKET)
         except Exception:
-            return False
+            self._kv = await self._js.create_key_value(
+                bucket=settings.NATS_KV_BUCKET,
+                ttl=3600,
+            )
+            logger.info(f"KV bucket '{settings.NATS_KV_BUCKET}' creado")
+
+    # ── Suscripción a requests ────────────────────────────────────────────────
+
+    async def subscribe_deploy(self, handler) -> None:
+        """Suscribe al subject compute.deploy para recibir requests del Queue Manager."""
+        await self._nc.subscribe(settings.QUEUE_DEPLOY, cb=handler)
+        logger.info(f"Suscrito a '{settings.QUEUE_DEPLOY}'")
+
+    async def subscribe_destroy(self, handler) -> None:
+        """Suscribe al subject compute.destroy para recibir requests del Queue Manager."""
+        await self._nc.subscribe(settings.QUEUE_DESTROY, cb=handler)
+        logger.info(f"Suscrito a '{settings.QUEUE_DESTROY}'")
+
+    # ── Respuesta al Queue Manager ────────────────────────────────────────────
+
+    async def reply(self, reply_subject: str, payload: dict) -> None:
+        """Responde al Queue Manager con el resultado de la operación."""
+        data = json.dumps(payload).encode()
+        await self._nc.publish(reply_subject, data)
+        logger.debug(f"Respuesta enviada a '{reply_subject}'")
+
+    # ── Persistencia de estado en KV ──────────────────────────────────────────
+
+    async def save_slice_vms(self, slice_id: str, vms: List[dict]) -> None:
+        """Persiste las VMs desplegadas para poder destruirlas luego."""
+        key = _SLICE_VMS_KEY.format(slice_id=slice_id)
+        await self._kv.put(key, json.dumps(vms).encode())
+
+    async def get_slice_vms(self, slice_id: str) -> Optional[List[dict]]:
+        """Recupera las VMs desplegadas de un slice."""
+        try:
+            key = _SLICE_VMS_KEY.format(slice_id=slice_id)
+            entry = await self._kv.get(key)
+            return json.loads(entry.value.decode())
+        except Exception:
+            return None
+
+    async def delete_slice_vms(self, slice_id: str) -> None:
+        """Elimina el estado de VMs de un slice."""
+        try:
+            key = _SLICE_VMS_KEY.format(slice_id=slice_id)
+            await self._kv.delete(key)
+        except Exception:
+            pass
+
+    def is_connected(self) -> bool:
+        return self._nc is not None and self._nc.is_connected
+
+
+# Instancia global
+queue_client = NATSQueueClient()

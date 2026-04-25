@@ -1,8 +1,8 @@
 # Compute Provisioner
 
 Microservicio encargado del aprovisionamiento computacional del sistema de slices.
-Recibe órdenes del módulo de colas, crea y destruye VMs en los workers via SSH+QEMU/KVM,
-y publica el resultado de vuelta al encolador.
+Recibe órdenes del Queue Manager via NATS JetStream, crea y destruye VMs en los
+workers via SSH+QEMU/KVM, y responde el resultado de vuelta al Queue Manager.
 
 ---
 
@@ -13,7 +13,7 @@ y publica el resultado de vuelta al encolador.
 - Asignar puertos VNC de forma centralizada, garantizando que no haya colisiones.
 - Destruir VMs y sus discos cuando se elimina un slice.
 - Reintentar ante fallos transitorios.
-- Notificar el resultado (éxito / error / parcial) al módulo de colas.
+- Responder el resultado al Queue Manager via NATS request/reply.
 
 **No** decide en qué worker va cada VM — eso es responsabilidad del VM Placement.  
 **No** configura red, no crea TAP interfaces, no gestiona VLANs ni OVS — eso es responsabilidad del Network Orchestrator.  
@@ -28,7 +28,7 @@ main.py
  ├── api/health.py              → GET /health (healthcheck HTTP)
  ├── core/
  │    ├── config.py             → Variables de entorno (Settings)
- │    ├── worker.py             → Loop principal: consume queue → despacha
+ │    ├── worker.py             → Loop async: suscribe handlers NATS
  │    └── logging_config.py    → Configuración de logs
  ├── models/
  │    └── schemas.py            → Contratos de entrada/salida (Pydantic)
@@ -37,7 +37,7 @@ main.py
  │    ├── qemu_executor.py      → Comandos QEMU/KVM sobre el worker
  │    ├── ssh_client.py         → Wrapper SSH con llave PEM en memoria (Paramiko)
  │    ├── vnc_port_manager.py   → Asignación thread-safe de puertos VNC por worker
- │    └── queue_client.py       → Consumo/publicación Redis
+ │    └── queue_client.py       → Cliente NATS (subscribe, reply, KV)
  └── utils/
       └── image_resolver.py    → Resolución de rutas de imágenes (adaptable a BD)
 ```
@@ -47,9 +47,9 @@ main.py
 ## Flujo de mensajes
 
 ```
-Módulo de Colas
+Queue Manager
     │
-    │  queue:compute:deploy
+    │  NATS request → compute.deploy
     │  { slice_id, request_id, vms: [{vm_id, worker_ip, ssh_user,
     │    ssh_private_key, vcpus, ram_mb, image_name, priority}] }
     ▼
@@ -60,19 +60,19 @@ Compute Provisioner
     ├─ SSH → workerN: qemu-system-x86_64 -enable-kvm -name vm-X ... -daemonize
     └─ SSH → workerN: pgrep -f "name vm-X" → obtener PID
     │
-    │  queue:compute:result
+    │  NATS reply → Queue Manager
     │  { slice_id, request_id, status, vms: [{vm_id, worker_ip, pid, vnc_port}] }
     ▼
-Módulo de Colas  →  Slice Manager
+Queue Manager
 ```
 
-Para destroy, el flujo es análogo usando `queue:compute:destroy`.
+Para destroy, el flujo es análogo usando `compute.destroy`.
 
 ---
 
 ## Formato de mensajes
 
-### Entrada: DEPLOY_SLICE
+### Entrada: compute.deploy
 
 El puerto VNC **no viene en el mensaje** — es asignado internamente por este módulo.
 
@@ -83,19 +83,19 @@ El puerto VNC **no viene en el mensaje** — es asignado internamente por este m
   "vms": [
     {
       "vm_id": "vm-1",
-      "worker_ip": "192.168.1.101",
+      "worker_ip": "10.0.10.2",
       "ssh_user": "ubuntu",
       "ssh_private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----",
-      "vcpus": 2,
-      "ram_mb": 1024,
-      "image_name": "ubuntu-22.04.qcow2",
+      "vcpus": 1,
+      "ram_mb": 256,
+      "image_name": "cirros-0.5.1-x86_64-disk.img",
       "priority": 0
     }
   ]
 }
 ```
 
-### Entrada: DESTROY_SLICE
+### Entrada: compute.destroy
 
 ```json
 {
@@ -104,35 +104,17 @@ El puerto VNC **no viene en el mensaje** — es asignado internamente por este m
 }
 ```
 
-### Salida: resultado deploy (éxito)
+### Salida: respuesta deploy (éxito)
 
 ```json
 {
-  "event": "DEPLOY_RESULT",
   "slice_id": "slice-abc123",
   "request_id": "req-xyz789",
   "status": "success",
   "vms": [
-    { "vm_id": "vm-1", "worker_ip": "192.168.1.101", "pid": 14823, "vnc_port": 5901 }
+    { "vm_id": "vm-1", "worker_ip": "10.0.10.2", "pid": 14823, "vnc_port": 5901 }
   ],
   "failed_vms": []
-}
-```
-
-### Salida: resultado deploy (error parcial)
-
-```json
-{
-  "event": "DEPLOY_RESULT",
-  "slice_id": "slice-abc123",
-  "request_id": "req-xyz789",
-  "status": "partial",
-  "vms": [
-    { "vm_id": "vm-1", "worker_ip": "192.168.1.101", "pid": 14823, "vnc_port": 5901 }
-  ],
-  "failed_vms": [
-    { "vm_id": "vm-2", "worker_ip": "192.168.1.102", "pid": null, "vnc_port": null, "error": "qemu process did not start" }
-  ]
 }
 ```
 
@@ -167,11 +149,10 @@ Copiar `.env.example` a `.env` y ajustar:
 
 | Variable | Default | Descripción |
 |----------|---------|-------------|
-| `REDIS_HOST` | `redis` | Host del broker Redis |
-| `REDIS_PORT` | `6379` | Puerto Redis |
-| `QUEUE_DEPLOY` | `queue:compute:deploy` | Queue de entrada para deploy |
-| `QUEUE_DESTROY` | `queue:compute:destroy` | Queue de entrada para destroy |
-| `QUEUE_RESULT` | `queue:compute:result` | Queue de salida de resultados |
+| `NATS_URL` | `nats://nats:4222` | URL del servidor NATS |
+| `NATS_KV_BUCKET` | `compute-state` | Bucket KV para persistir VMs desplegadas |
+| `QUEUE_DEPLOY` | `compute.deploy` | Subject de entrada para deploy |
+| `QUEUE_DESTROY` | `compute.destroy` | Subject de entrada para destroy |
 | `SSH_TIMEOUT` | `30` | Timeout de conexión SSH (segundos) |
 | `SSH_MAX_RETRIES` | `3` | Reintentos por VM ante fallo |
 | `SSH_RETRY_DELAY` | `5` | Segundos entre reintentos |
@@ -189,20 +170,25 @@ Antes de desplegar, cada worker debe tener:
 
 1. **QEMU/KVM instalado**
    ```bash
-   apt install -y qemu-system-x86 qemu-utils
+   sudo apt install -y qemu-system-x86 qemu-utils
    ```
 
-2. **Acceso SSH con llave PEM** — la llave privada viene en cada mensaje desde
-   el Slice Manager. La llave pública debe estar en `~/.ssh/authorized_keys` del worker.
+2. **Acceso SSH con llave PEM** — la llave privada viene en cada mensaje.
+   La llave pública debe estar en `~/.ssh/authorized_keys` del worker.
 
-3. **Directorios creados**
+3. **sudo sin contraseña** para el usuario SSH
    ```bash
-   mkdir -p /images /vms
+   echo "ubuntu ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/ubuntu-nopasswd
    ```
 
-4. **Imágenes base presentes** en `/images/`
+4. **Directorios creados**
    ```bash
-   ls /images/ubuntu-22.04.qcow2
+   sudo mkdir -p /images /vms
+   ```
+
+5. **Imágenes base presentes** en `/images/`
+   ```bash
+   sudo wget -P /images http://download.cirros-cloud.net/0.5.1/cirros-0.5.1-x86_64-disk.img
    ```
 
 ---
@@ -218,11 +204,15 @@ docker compose up -d
 
 # 3. Verificar
 curl http://localhost:8081/health
-# → {"status": "ok", "redis": true}
+# → {"status": "ok", "nats": true}
 
 # 4. Logs
 docker compose logs -f compute-provisioner
 ```
+
+> **Nota:** Si el Queue Manager ya tiene NATS corriendo, no levantes el NATS
+> del docker-compose del Compute Provisioner — apunta `NATS_URL` al mismo NATS
+> compartido y levanta solo el servicio `compute-provisioner`.
 
 ---
 
@@ -234,7 +224,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 cp .env.example .env
-# Ajustar REDIS_HOST=localhost si Redis corre localmente
+# Ajustar NATS_URL=nats://localhost:4222
 
 python main.py
 ```
@@ -248,7 +238,7 @@ pip install pytest pytest-mock
 pytest tests/ -v
 ```
 
-Los tests usan mocks para SSH, Redis y VNCPortManager — no requieren workers reales ni broker activo.
+Los tests usan mocks para SSH, NATS y VNCPortManager — no requieren workers reales ni broker activo.
 
 ---
 
@@ -263,8 +253,7 @@ El resto del código no cambia.
 
 ## Identificación de procesos en los workers
 
-Cada proceso QEMU se nombra con el patrón `{vm_id}-{slice_id}`, por ejemplo:
-`vm-1-slice-abc123`. Esto permite buscarlo manualmente:
+Cada proceso QEMU se nombra con el patrón `{vm_id}-{slice_id}`. Para buscarlo manualmente:
 
 ```bash
 pgrep -f "name vm-1-slice-abc123"
