@@ -1,0 +1,17 @@
+services:
+  slice-manager:
+    build: .
+    container_name: slice-manager
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # Usamos los nombres de los otros contenedores para la comunicación
+      - NATS_URL=nats://nats:4222
+      - VM_PLACEMENT_URL=http://vm-placement:8080/placement
+    networks:
+      - pucp_cloud_net
+
+networks:
+  pucp_cloud_net:
+    external: true
