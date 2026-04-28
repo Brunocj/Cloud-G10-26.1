@@ -15,9 +15,9 @@ Flujo de destroy por VM:
   3. Eliminar disco QCOW2
 """
 
-import asyncio
 import logging
-from typing import List, Tuple
+import time
+from typing import List, Optional
 
 from app.core.config import settings
 from app.models.schemas import (
@@ -26,7 +26,6 @@ from app.models.schemas import (
     VMResult, VMSpec,
 )
 from app.services.qemu_executor import QEMUExecutor
-from app.services.queue_client import QueueClient
 from app.services.ssh_client import SSHClient
 from app.services.vnc_port_manager import VNCPortManager
 
@@ -43,18 +42,16 @@ class Provisioner:
     # Deploy
     # ------------------------------------------------------------------
 
-    async def deploy(self, request: DeployRequest) -> DeployReply:
+    def deploy(self, request: DeployRequest) -> DeployReply:
         logger.info(
             "Deploy slice=%s, request=%s, vms=%d",
             request.slice_id, request.request_id, len(request.vms),
         )
 
-        sem = asyncio.Semaphore(settings.MAX_CONCURRENT_WORKERS)
-        tasks = [
-            self._deploy_vm(vm, request.slice_id, sem)
+        results: List[VMResult] = [
+            self._deploy_vm_sync(vm, request.slice_id)
             for vm in request.vms
         ]
-        results: List[VMResult] = await asyncio.gather(*tasks)
 
         ok     = [r for r in results if r.error is None]
         failed = [r for r in results if r.error is not None]
@@ -66,7 +63,7 @@ class Provisioner:
         else:
             status = DeployStatus.PARTIAL
 
-        reply = DeployReply(
+        return DeployReply(
             slice_id=request.slice_id,
             request_id=request.request_id,
             status=status,
@@ -74,25 +71,8 @@ class Provisioner:
             failed_vms=failed,
         )
 
-        # Persistir VMs desplegadas para poder destruirlas luego
-        if ok:
-            await QueueClient()._save_slice_vms(request.slice_id, request.vms)
-
-        return reply
-
-    async def _deploy_vm(
-        self,
-        vm: VMSpec,
-        slice_id: str,
-        sem: asyncio.Semaphore,
-    ) -> VMResult:
-        async with sem:
-            return await asyncio.get_event_loop().run_in_executor(
-                None, self._deploy_vm_sync, vm, slice_id
-            )
-
     def _deploy_vm_sync(self, vm: VMSpec, slice_id: str) -> VMResult:
-        vnc_port: int | None = None
+        vnc_port: Optional[int] = None
 
         for attempt in range(1, settings.SSH_MAX_RETRIES + 1):
             try:
@@ -142,17 +122,21 @@ class Provisioner:
                         worker_ip=vm.worker_ip,
                         error=str(exc),
                     )
-                import time; time.sleep(settings.SSH_RETRY_DELAY)
+                time.sleep(settings.SSH_RETRY_DELAY)
 
     # ------------------------------------------------------------------
     # Destroy
     # ------------------------------------------------------------------
 
-    async def destroy(self, request: DestroyRequest) -> DestroyReply:
-        logger.info("Destroy slice=%s", request.slice_id)
+    def destroy(self, request: DestroyRequest, vm_records: List[dict]) -> DestroyReply:
+        """
+        Destruye las VMs de un slice.
+        vm_records: lista de dicts con vm_id, worker_ip, ssh_user, ssh_private_key,
+                    y tap_interfaces (si aplica). Viene del KV via worker.py.
+        """
+        logger.info("Destroy slice=%s, vms=%d", request.slice_id, len(vm_records))
 
-        vms = await QueueClient()._load_deployed_vms(request.slice_id)
-        if not vms:
+        if not vm_records:
             logger.warning("No hay VMs registradas para slice=%s", request.slice_id)
             return DestroyReply(
                 slice_id=request.slice_id,
@@ -160,12 +144,10 @@ class Provisioner:
                 status=DeployStatus.SUCCESS,
             )
 
-        sem = asyncio.Semaphore(settings.MAX_CONCURRENT_WORKERS)
-        tasks = [
-            self._destroy_vm(vm, request.slice_id, sem)
-            for vm in vms
+        errors = [
+            self._destroy_vm_sync(record, request.slice_id)
+            for record in vm_records
         ]
-        errors = await asyncio.gather(*tasks)
         errors = [e for e in errors if e]
 
         if errors:
@@ -176,40 +158,35 @@ class Provisioner:
                 error="; ".join(errors),
             )
 
-        await QueueClient()._delete_slice_vms(request.slice_id)
         return DestroyReply(
             slice_id=request.slice_id,
             request_id=request.request_id,
             status=DeployStatus.SUCCESS,
         )
 
-    async def _destroy_vm(
-        self,
-        vm: VMSpec,
-        slice_id: str,
-        sem: asyncio.Semaphore,
-    ):
-        async with sem:
-            return await asyncio.get_event_loop().run_in_executor(
-                None, self._destroy_vm_sync, vm, slice_id
-            )
+    def _destroy_vm_sync(self, record: dict, slice_id: str) -> Optional[str]:
+        vm_id      = record["vm_id"]
+        worker_ip  = record["worker_ip"]
+        ssh_user   = record["ssh_user"]
+        ssh_key    = record["ssh_private_key"]
+        tap_ifaces = record.get("tap_interfaces", [])
 
-    def _destroy_vm_sync(self, vm: VMSpec, slice_id: str):
         try:
-            with SSHClient(vm.worker_ip, vm.ssh_user, vm.ssh_private_key) as ssh:
+            with SSHClient(worker_ip, ssh_user, ssh_key) as ssh:
                 executor = QEMUExecutor(ssh)
 
-                # Orden: matar proceso → limpiar TAPs → eliminar disco
-                executor.kill_vm(vm.vm_id, slice_id)
+                executor.kill_vm(vm_id, slice_id)
 
-                if vm.tap_interfaces:
-                    executor.destroy_tap_interfaces(vm.tap_interfaces)
+                if tap_ifaces:
+                    from app.models.schemas import TapInterface
+                    taps = [TapInterface(**t) for t in tap_ifaces]
+                    executor.destroy_tap_interfaces(taps)
 
-                executor.delete_disk(vm.vm_id, slice_id)
+                executor.delete_disk(vm_id, slice_id)
 
-            logger.info("VM %s destruida correctamente", vm.vm_id)
+            logger.info("VM %s destruida correctamente", vm_id)
             return None
 
         except Exception as exc:
-            logger.error("Error destruyendo VM %s: %s", vm.vm_id, exc)
+            logger.error("Error destruyendo VM %s: %s", vm_id, exc)
             return str(exc)

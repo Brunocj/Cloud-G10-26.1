@@ -12,12 +12,12 @@ from nats.aio.msg import Msg
 
 from app.core.config import settings
 from app.models.schemas import DeployRequest, DestroyRequest
-from app.services.provisioner import ComputeProvisioner
+from app.services.provisioner import Provisioner
 from app.services.queue_client import queue_client
 
 logger = logging.getLogger(__name__)
 
-_provisioner = ComputeProvisioner()
+_provisioner = Provisioner()
 
 
 async def handle_deploy(msg: Msg) -> None:
@@ -26,7 +26,7 @@ async def handle_deploy(msg: Msg) -> None:
         payload = json.loads(msg.data.decode())
         logger.info(f"[deploy] Mensaje recibido: slice={payload.get('slice_id')} reply={msg.reply}")
 
-        request = DeploySliceRequest(**payload)
+        request = DeployRequest(**payload)
 
         response = await asyncio.get_running_loop().run_in_executor(
             None, _provisioner.deploy, request
@@ -73,7 +73,7 @@ async def handle_destroy(msg: Msg) -> None:
         payload = json.loads(msg.data.decode())
         logger.info(f"[destroy] Mensaje recibido: slice={payload.get('slice_id')} reply={msg.reply}")
 
-        request = DestroySliceRequest(**payload)
+        request = DestroyRequest(**payload)
 
         vm_records = await queue_client.get_slice_vms(request.slice_id) or []
         logger.info(f"[destroy] VMs en KV: {len(vm_records)}")
