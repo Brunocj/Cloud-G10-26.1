@@ -10,12 +10,12 @@ Responsabilidades:
 """
 
 import logging
-from typing import List, Optional, Tuple
+from typing import List
 
 from app.core.config import settings
-from app.models.schemas import TapInterface, VMSpec
+from app.models.schemas import TapInterface
 from app.services.ssh_client import SSHClient
-from app.utils.image_resolver import get_image_path
+from app.utils.image_resolver import get_image_path, get_vm_disk_path
 
 logger = logging.getLogger(__name__)
 
@@ -29,19 +29,28 @@ class QEMUExecutor:
     def __init__(self, ssh: SSHClient):
         self._ssh = ssh
 
+    def _exec_checked(self, command: str) -> str:
+        """Ejecuta un comando y lanza excepción si el exit code != 0."""
+        code, out, err = self._ssh.exec(command)
+        if code != 0:
+            raise RuntimeError(
+                f"Comando falló (exit {code}):\n  cmd: {command}\n  stderr: {err}"
+            )
+        return out
+
     # ------------------------------------------------------------------
     # Deploy
     # ------------------------------------------------------------------
 
-    def create_disk(self, vm_id: str, slice_id: str, image_name: str) -> str:
+    def create_disk(self, vm_id: str, slice_id: str, image_name: str, worker_ip: str) -> str:
         """
         Crea un disco QCOW2 con thin provisioning (backing file).
         Returns: ruta absoluta del disco creado en el worker.
         """
-        image_path = get_image_path(image_name)
-        disk_path  = f"{settings.VMS_BASE_DIR}/{vm_id}-{slice_id}.qcow2"
+        image_path = get_image_path(image_name, worker_ip)
+        disk_path  = get_vm_disk_path(vm_id, slice_id)
 
-        self._ssh.run_checked(
+        self._exec_checked(
             f"sudo qemu-img create -f qcow2 -b {image_path} -F qcow2 {disk_path}"
         )
         logger.info("Disco creado: %s", disk_path)
@@ -61,19 +70,9 @@ class QEMUExecutor:
         for iface in tap_interfaces:
             tap = iface.tap_name
             logger.info("Creando TAP %s → %s", tap, bridge)
-
-            # Crear la interfaz TAP
-            self._ssh.run_checked(
-                f"sudo ip tuntap add dev {tap} mode tap"
-            )
-            # Conectar al bridge OVS
-            self._ssh.run_checked(
-                f"sudo ovs-vsctl add-port {bridge} {tap}"
-            )
-            # Levantar la interfaz
-            self._ssh.run_checked(
-                f"sudo ip link set {tap} up"
-            )
+            self._exec_checked(f"sudo ip tuntap add dev {tap} mode tap")
+            self._exec_checked(f"sudo ovs-vsctl add-port {bridge} {tap}")
+            self._exec_checked(f"sudo ip link set {tap} up")
             logger.info("TAP %s conectada a OVS bridge %s", tap, bridge)
 
     def launch_vm(
@@ -91,9 +90,7 @@ class QEMUExecutor:
         Lanza el proceso QEMU/KVM en el worker.
         Returns: PID del proceso QEMU.
         """
-        name = f"{vm_id}-{slice_id}"
-
-        # Construir argumentos de red: una NIC por TAP interface
+        name    = f"{vm_id}-{slice_id}"
         net_args = _build_net_args(tap_interfaces)
 
         cmd = (
@@ -109,14 +106,13 @@ class QEMUExecutor:
             f"-daemonize"
         )
 
-        self._ssh.run_checked(cmd)
-
+        self._exec_checked(cmd)
         pid = self._get_pid(name)
         logger.info("VM %s lanzada, PID=%d, VNC=:%d", name, pid, vnc_display)
         return pid
 
     def _get_pid(self, vm_name: str) -> int:
-        out = self._ssh.run_checked(f"pgrep -f 'name {vm_name}'")
+        out = self._exec_checked(f"pgrep -f 'name {vm_name}'")
         try:
             return int(out.splitlines()[0])
         except (ValueError, IndexError) as exc:
@@ -131,19 +127,19 @@ class QEMUExecutor:
     def kill_vm(self, vm_id: str, slice_id: str) -> None:
         """Mata el proceso QEMU de la VM si está corriendo."""
         name = f"{vm_id}-{slice_id}"
-        code, _, _ = self._ssh.run(f"pgrep -f 'name {name}'")
+        code, _, _ = self._ssh.exec(f"pgrep -f 'name {name}'")
         if code == 0:
-            self._ssh.run(f"sudo pkill -f 'name {name}'")
+            self._ssh.exec(f"sudo pkill -f 'name {name}'")
             logger.info("VM %s terminada", name)
         else:
             logger.warning("VM %s no encontrada (ya estaba muerta)", name)
 
     def delete_disk(self, vm_id: str, slice_id: str) -> None:
         """Elimina el disco QCOW2 de la VM."""
-        disk_path = f"{settings.VMS_BASE_DIR}/{vm_id}-{slice_id}.qcow2"
-        code, _, _ = self._ssh.run(f"test -f {disk_path}")
+        disk_path = get_vm_disk_path(vm_id, slice_id)
+        code, _, _ = self._ssh.exec(f"test -f {disk_path}")
         if code == 0:
-            self._ssh.run_checked(f"sudo rm -f {disk_path}")
+            self._exec_checked(f"sudo rm -f {disk_path}")
             logger.info("Disco eliminado: %s", disk_path)
         else:
             logger.warning("Disco no encontrado (ya eliminado): %s", disk_path)
@@ -162,16 +158,13 @@ class QEMUExecutor:
             tap = iface.tap_name
             logger.info("Eliminando TAP %s de %s", tap, bridge)
 
-            # Verificar que la TAP existe antes de intentar eliminarla
-            code, _, _ = self._ssh.run(f"ip link show {tap}")
+            code, _, _ = self._ssh.exec(f"ip link show {tap}")
             if code != 0:
                 logger.warning("TAP %s no encontrada, omitiendo", tap)
                 continue
 
-            # Quitar del bridge OVS
-            self._ssh.run(f"sudo ovs-vsctl del-port {bridge} {tap}")
-            # Eliminar la interfaz TAP
-            self._ssh.run(f"sudo ip tuntap del dev {tap} mode tap")
+            self._ssh.exec(f"sudo ovs-vsctl del-port {bridge} {tap}")
+            self._ssh.exec(f"sudo ip tuntap del dev {tap} mode tap")
             logger.info("TAP %s eliminada", tap)
 
 
@@ -190,7 +183,6 @@ def _build_net_args(tap_interfaces: List[TapInterface]) -> str:
       -device virtio-net-pci,netdev=net1,mac=52:54:00:A3:C7:01
     """
     if not tap_interfaces:
-        # Sin interfaces de red: modo usuario por defecto (útil en pruebas)
         return "-netdev user,id=net0 -device virtio-net-pci,netdev=net0 "
 
     parts = []

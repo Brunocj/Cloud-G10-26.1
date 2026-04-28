@@ -1,13 +1,14 @@
 """Punto de entrada del Queue Manager."""
 
 import asyncio
+import logging
 import signal
 
-from app.core.logging_config import setup_logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
 
-setup_logging()
-
-import logging
 from app.api.health import start_health_server
 from app.core.config import settings
 from app.services.nats_client import nats_manager

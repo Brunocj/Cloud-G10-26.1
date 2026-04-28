@@ -80,11 +80,11 @@ class Provisioner:
                     executor = QEMUExecutor(ssh)
 
                     # 1. Puerto VNC
-                    vnc_display = self._vnc.acquire_port(vm.worker_ip, ssh)
-                    vnc_port    = settings.VNC_PORT_MIN - 1 + vnc_display
+                    vnc_port    = self._vnc.assign_port(vm.worker_ip, vm.ssh_user, vm.ssh_private_key)
+                    vnc_display = vnc_port - 5900
 
                     # 2. Disco
-                    disk_path = executor.create_disk(vm.vm_id, slice_id, vm.image_name)
+                    disk_path = executor.create_disk(vm.vm_id, slice_id, vm.image_name, vm.worker_ip)
 
                     # 3. TAP interfaces (si las hay)
                     if vm.tap_interfaces:
