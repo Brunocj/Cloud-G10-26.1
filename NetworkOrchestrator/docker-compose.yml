@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  network-orchestrator:
+    build: .
+    container_name: network-orchestrator
+    restart: unless-stopped
+    environment:
+      NATS_URL:        nats://nats:4222
+      LOG_LEVEL:       DEBUG
+    ports:
+      - "8084:8084" # Mapeamos el nuevo puerto
+    networks:
+      - queuemanager_default # ¡Nos unimos a la red del equipo!
+
+networks:
+  queuemanager_default:
+    external: true
