@@ -11,7 +11,7 @@ import signal
 from nats.aio.msg import Msg
 
 from app.core.config import settings
-from app.models.schemas import DeploySliceRequest, DestroySliceRequest
+from app.models.schemas import DeployRequest, DestroyRequest
 from app.services.provisioner import ComputeProvisioner
 from app.services.queue_client import queue_client
 
