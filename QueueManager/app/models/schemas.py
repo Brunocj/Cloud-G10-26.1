@@ -62,16 +62,34 @@ class VMResult(BaseModel):
 # ---------------------------------------------------------------------------
 # Mensajes de entrada: desde el Slice Manager
 # ---------------------------------------------------------------------------
+class SecurityRule(BaseModel):
+    allow_port: int
+    protocol: str  # "tcp" o "udp"
+
+class NetworkLink(BaseModel):
+    connection_id: str
+    vlan_id: int
+    # Datos del extremo 1
+    vm1_id: str
+    vm1_worker_ip: str
+    vm1_tap: str
+    vm1_ssh_user: str
+    vm1_ssh_private_key: str
+    vm1_security_rules: List[SecurityRule] = Field(default_factory=list)
+    # Datos del extremo 2
+    vm2_id: str
+    vm2_worker_ip: str
+    vm2_tap: str
+    vm2_ssh_user: str
+    vm2_ssh_private_key: str
+    vm2_security_rules: List[SecurityRule] = Field(default_factory=list)
+
 
 class DeploySliceRequest(BaseModel):
-    """
-    Mensaje que publica el Slice Manager para desplegar un slice.
-    NATS subject: slice.deploy
-    """
-    slice_id:   str          = Field(...)
-    request_id: str          = Field(...)
+    slice_id:   str
+    request_id: str
     vms:        List[VMSpec] = Field(..., min_length=1)
-
+    links:      List[NetworkLink] = Field(default_factory=list) # <--- AGREGAR ESTO
 
 class DestroySliceRequest(BaseModel):
     """

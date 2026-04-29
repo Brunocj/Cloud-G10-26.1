@@ -36,9 +36,8 @@ class Orchestrator:
 
         Pasos actuales:
             1. Compute Provisioner → levantar VMs
-
-        Pasos futuros (solo agregar aquí):
             2. Network Orchestrator → configurar red
+            
         """
         logger.info(f"[slice={request.slice_id}] Iniciando deploy")
 
@@ -51,6 +50,7 @@ class Orchestrator:
         await self._save_state(state)
 
         # ── Paso 1: Compute ──────────────────────────────────────────────────
+        logger.info(f"[slice={request.slice_id}] Paso 1: Solicitando aprovisionamiento de cómputo...")
         compute_result = await self._step_compute_deploy(request)
         logger.info(f"[slice={request.slice_id}] Respuesta compute: {compute_result}")
 
@@ -80,14 +80,17 @@ class Orchestrator:
             f"{len(successful)} VMs levantadas"
         )
 
-        # ── Paso 2: Network (futuro) ─────────────────────────────────────────
-        # TODO: descomentar cuando el Network Orchestrator esté implementado
-        # network_result = await self._step_network_deploy(request, successful)
-        # if network_result is None:
-        #     return await self._fail_deploy(state, "Timeout: Network Orchestrator no respondió")
-        # state.completed_steps.append(OperationStep.NETWORK)
-        # await self._save_state(state)
+        network_result = await self._step_network_deploy(request)
+        if network_result is None:
+            return await self._fail_deploy(state, "Timeout: Network Orchestrator no respondió")
+            
+        # NUEVO: Validar que el status de red no sea error
+        if network_result.get("status") != "success":
+            return await self._fail_deploy(state, "Error en Network Orchestrator al configurar VLANs")
 
+        state.completed_steps.append(OperationStep.NETWORK)
+        await self._save_state(state)
+        logger.info(f"[slice={request.slice_id}] Network completado exitosamente")
         # ── Resultado final ──────────────────────────────────────────────────
         await self._delete_state(state.slice_id)
 
@@ -112,9 +115,8 @@ class Orchestrator:
 
         Pasos actuales:
             1. Compute Provisioner → destruir VMs
-
-        Pasos futuros (en orden inverso al deploy):
             0. Network Orchestrator → desconfigurar red (antes del compute)
+  
         """
         logger.info(f"[slice={request.slice_id}] Iniciando destroy")
 
@@ -183,6 +185,11 @@ class Orchestrator:
             timeout=settings.COMPUTE_TIMEOUT,
         )
 
+    async def _step_network_destroy(self, request: DestroySliceRequest) -> Optional[dict]:
+        """Llama al Network Orchestrator para borrar puertos OVS y VLANs"""
+        payload = {"slice_id": request.slice_id, "request_id": request.request_id}
+        return await nats_manager.request(settings.SUBJECT_NETWORK_DESTROY, payload, timeout=settings.NETWORK_TIMEOUT)
+
     # ── Notificación al Slice Manager ─────────────────────────────────────────
 
     async def _notify_slice_manager(self, payload: dict) -> None:
@@ -232,3 +239,14 @@ class Orchestrator:
         )
         await self._notify_slice_manager(response.model_dump())
         return response
+    async def _step_network_deploy(self, request: DeploySliceRequest) -> Optional[dict]:
+        """Llama al Network Orchestrator para configurar VLANs y OVS"""
+        payload = {
+            "slice_id":   request.slice_id,
+            "request_id": request.request_id,
+            "links":      [link.model_dump() for link in request.links]
+        }
+        
+        logger.info(f"[slice={request.slice_id}] Solicitando configuración de red...")
+        # Cambiar el timeout si tus scripts de OVS son lentos (ej. 60s)
+        return await nats_manager.request("network.deploy", payload, timeout=60)
