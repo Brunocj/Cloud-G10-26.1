@@ -1193,18 +1193,15 @@ Este proyecto es parte de **Cloud-G10-26.1**, un proyecto académico de PUCP (Po
 ## 👥 Autores
 
 - **Equipo Cloud-G10-26.1** - Desarrollo y mantenimiento.
-- **Alex Torres** - Contribuciones iniciales.
-- **Resto del equipo PUCP** - Revisión y feedback.
-
 ---
 
 ## 📞 Soporte y Contacto
 
 Para reportar bugs o solicitar features, abre un issue en el repositorio o contacta al equipo de desarrollo.
 
-**Correo:** cloud-team@pucp.edu.pe  
+**Correo:** (proximamente xd)  
 **Slack:** #cloud-g10-26-1
 
 ---
 
-**Última actualización:** Abril 2026
+**Última actualización:** 29 de Abril del 2026
