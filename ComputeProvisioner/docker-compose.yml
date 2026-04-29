@@ -11,8 +11,8 @@ services:
     ports:
       - "8081:8080"
     networks:
-      - queuemanager_default
+      - pucp_cloud_net
 
 networks:
-  queuemanager_default:
+  pucp_cloud_net:
     external: true

@@ -50,6 +50,26 @@ class NATSProducer:
         except Exception as e:
             logger.error(f"❌ Error publicando en NATS: {str(e)}")
             return False
+        
+    async def publish_destroy(self, payload: dict):
+        """
+        Publica el mensaje en el canal 'slice.destroy' para desmantelar la infraestructura.
+        """
+        if not self.js:
+            logger.error("JetStream no está inicializado. No se pudo enviar el mensaje de destrucción.")
+            return False
+            
+        try:
+            subject = "slice.destroy"
+            data = json.dumps(payload).encode()
+            
+            # Publicamos en el stream de JetStream
+            ack = await self.js.publish(subject, data)
+            logger.info(f"💣 Orden de destrucción publicada en '{subject}'. Secuencia NATS: {ack.seq}")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Error publicando destrucción en NATS: {str(e)}")
+            return False
 
 # Instancia global para usarla en todo el proyecto
 nats_producer = NATSProducer()

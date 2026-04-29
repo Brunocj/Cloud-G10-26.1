@@ -10,9 +10,10 @@ PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://localhost:9090")
 
 # Este es tu inventario de servidores físicos (ajusta las IPs a tu laboratorio)
 WORKERS_CONFIG = [
-    {"worker_id": "server-1", "instance": "10.0.10.2:9100"},
-    {"worker_id": "server-2", "instance": "10.0.10.3:9100"},
-    # {"worker_id": "server-3", "instance": "10.0.10.4:9100"},
+    {"worker_id": "server-1", "instance": "10.0.10.1:9100"},
+    {"worker_id": "server-2", "instance": "10.0.10.2:9100"},
+    {"worker_id": "server-3", "instance": "10.0.10.3:9100"},
+    {"worker_id": "server-4", "instance": "10.0.10.4:9100"}
 ]
 
 async def get_real_worker_metrics():
