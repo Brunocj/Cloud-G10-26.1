@@ -1,6 +1,8 @@
 import asyncio
 import httpx
 import logging
+import hashlib
+import time
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Depends
 from sqlalchemy.orm import Session
 from contextlib import asynccontextmanager
@@ -108,45 +110,100 @@ async def process_placement_worker():
                 logger.info(f"[{slice_id}] Placement REAL exitoso: {placement_map}")
                 
                 # --- NUEVA LÓGICA: DICCIONARIO DE INFRAESTRUCTURA ---
-                # El QueueManager necesita IPs y Credenciales, cosas que el VM Placement no sabe.
-                # En tu versión final, esto saldrá de la base de datos de tu inventario físico.
                 server_inventory = {
                     "server-1": {"ip": "10.0.10.2", "user": "ubuntu", "key": "-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----"},
                     "server-2": {"ip": "10.0.10.3", "user": "ubuntu", "key": "-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----"}
                 }
 
-                # Construimos la lista de VMSpec que exige el Queue Manager
-                vms_payload = []
-                for mapping in placement_map:
-                    vm_id = mapping["vm_id"]
-                    worker_id = mapping["worker_id"]
+                vms_dict = {vm["vm_id"]: vm for vm in dynamic_vms}
+                vm_tap_counters = {vm["vm_id"]: 0 for vm in dynamic_vms}
+                vlan_counter = 100
+                global_mac_counter = 0
+
+                # Identificador único del slice para generar MACs determinísticas
+                slice_hash = hashlib.sha256(str(slice_id).encode()).hexdigest()
+                mac_prefix = f"52:54:00:{slice_hash[:2]}:{slice_hash[2:4]}"
+
+                network_links = []
+
+                # 2. Iteramos sobre los cables dibujados por el alumno
+                for edge in edges:
+                    vm1_id = edge["source"]
+                    vm2_id = edge["target"]
                     
-                    # Buscamos las credenciales del servidor asignado
+                    if vm1_id not in vms_dict or vm2_id not in vms_dict:
+                        continue
+
+                    # Recuperamos a qué servidor físico fue asignada cada VM
+                    worker1_id = next(w["worker_id"] for w in placement_map if w["vm_id"] == vm1_id)
+                    worker2_id = next(w["worker_id"] for w in placement_map if w["vm_id"] == vm2_id)
+                    
+                    # Recuperamos credenciales de los servidores
+                    worker1 = server_inventory.get(worker1_id, {})
+                    worker2 = server_inventory.get(worker2_id, {})
+
+                    # Generamos los nombres de los puertos virtuales (TAPs)
+                    tap1 = f"tap-{vm1_id}-{vm_tap_counters[vm1_id]}"
+                    tap2 = f"tap-{vm2_id}-{vm_tap_counters[vm2_id]}"
+                    
+                    # Generamos las MACs
+                    mac1 = f"{mac_prefix}:{global_mac_counter:02x}".upper()
+                    global_mac_counter += 1
+                    mac2 = f"{mac_prefix}:{global_mac_counter:02x}".upper()
+                    global_mac_counter += 1
+
+                    # Inyectamos el TAP en la memoria de la VM (Para el Compute Provisioner)
+                    vms_dict[vm1_id].setdefault("tap_interfaces", []).append({"tap_name": tap1, "mac": mac1})
+                    vms_dict[vm2_id].setdefault("tap_interfaces", []).append({"tap_name": tap2, "mac": mac2})
+
+                    # Armamos el enlace lógico (Para el Network Orchestrator)
+                    network_links.append({
+                        "connection_id": f"{vm1_id}-{vm2_id}-{vlan_counter}",
+                        "vlan_id": vlan_counter,
+                        "vm1_id": vm1_id,
+                        "vm1_worker_ip": worker1.get("ip"),
+                        "vm1_tap": tap1,
+                        "vm1_ssh_user": worker1.get("user"),
+                        "vm1_ssh_private_key": worker1.get("key"),
+                        "vm1_security_rules": [], 
+                        "vm2_id": vm2_id,
+                        "vm2_worker_ip": worker2.get("ip"),
+                        "vm2_tap": tap2,
+                        "vm2_ssh_user": worker2.get("user"),
+                        "vm2_ssh_private_key": worker2.get("key"),
+                        "vm2_security_rules": []
+                    })
+                    
+                    vm_tap_counters[vm1_id] += 1
+                    vm_tap_counters[vm2_id] += 1
+                    vlan_counter += 1
+
+                # 3. Construimos la lista final de VMs enriquecidas con sus TAPs
+                vms_payload = []
+                for vm_id, original_vm in vms_dict.items():
+                    worker_id = next(w["worker_id"] for w in placement_map if w["vm_id"] == vm_id)
                     server_info = server_inventory.get(worker_id, {})
                     
-                    # Buscamos los recursos originales extraídos del JSON
-                    # (dynamic_vms es la lista que extrajimos de topology_json pasos atrás)
-                    original_vm = next((v for v in dynamic_vms if v["vm_id"] == vm_id), None)
-                    
-                    if original_vm and server_info:
-                        vms_payload.append({
-                            "vm_id": vm_id,
-                            "worker_ip": server_info.get("ip"),
-                            "ssh_user": server_info.get("user"),
-                            "ssh_private_key": server_info.get("key"),
-                            "vcpus": original_vm.get("vcpus"),
-                            "ram_mb": original_vm.get("ram_mb"),
-                            "image_name": "ubuntu-22.04.qcow2", # Podría venir del frontend
-                            "priority": 0
-                        })
+                    vms_payload.append({
+                        "vm_id": vm_id,
+                        "worker_ip": server_info.get("ip"),
+                        "ssh_user": server_info.get("user"),
+                        "ssh_private_key": server_info.get("key"),
+                        "vcpus": original_vm.get("vcpus"),
+                        "ram_mb": original_vm.get("ram_mb"),
+                        "image_name": "ubuntu-22.04.qcow2",
+                        "tap_interfaces": original_vm.get("tap_interfaces", []), # <--- AQUI INYECTAMOS LOS TAPS
+                        "priority": 0
+                    })
 
-                # Armamos el contrato final DeploySliceRequest
+                # 4. Armamos el contrato final DeploySliceRequest
                 queue_manager_payload = {
                     "slice_id": str(slice_id),
-                    "request_id": f"req-{uuid.uuid4().hex[:8]}", # Generamos un ID de correlación
-                    "vms": vms_payload
+                    "request_id": f"req-{uuid.uuid4().hex[:8]}",
+                    "vms": vms_payload,
+                    "links": network_links  # <--- AQUI INYECTAMOS LOS CABLES
                 }
-
+                
                 # Publicamos en NATS (¡El inicio de la Saga!)
                 published = await nats_producer.publish_deploy(queue_manager_payload)
                 
