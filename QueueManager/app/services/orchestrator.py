@@ -1,9 +1,16 @@
 """
-Orquestador de operaciones de slice.
+Orquestador del Queue Manager.
+Coordina los pasos de deploy/destroy entre módulos internos.
+
+Pasos actuales:
+    1. Compute Provisioner → levantar / destruir VMs
+
+Pasos futuros (solo agregar aquí):
+    2. Network Orchestrator → configurar / desconfigurar red
 """
 
 import logging
-from typing import Optional
+from typing import List, Optional
 
 from app.core.config import settings
 from app.models.schemas import (
@@ -24,6 +31,14 @@ class Orchestrator:
     # ── Deploy ────────────────────────────────────────────────────────────────
 
     async def deploy(self, request: DeploySliceRequest) -> DeploySliceResponse:
+        """
+        Orquesta el despliegue de un slice.
+
+        Pasos actuales:
+            1. Compute Provisioner → levantar VMs
+            2. Network Orchestrator → configurar red
+            
+        """
         logger.info(f"[slice={request.slice_id}] Iniciando deploy")
 
         state = OperationState(
@@ -35,6 +50,7 @@ class Orchestrator:
         await self._save_state(state)
 
         # ── Paso 1: Compute ──────────────────────────────────────────────────
+        logger.info(f"[slice={request.slice_id}] Paso 1: Solicitando aprovisionamiento de cómputo...")
         compute_result = await self._step_compute_deploy(request)
         logger.info(f"[slice={request.slice_id}] Respuesta compute: {compute_result}")
 
@@ -64,12 +80,17 @@ class Orchestrator:
             f"{len(successful)} VMs levantadas"
         )
 
-        # ── Paso 2: Network (futuro) ─────────────────────────────────────────
-        # TODO: descomentar cuando el Network Orchestrator esté implementado
-        # network_result = await self._step_network_deploy(request, successful)
-        # state.completed_steps.append(OperationStep.NETWORK)
-        # await self._save_state(state)
+        network_result = await self._step_network_deploy(request)
+        if network_result is None:
+            return await self._fail_deploy(state, "Timeout: Network Orchestrator no respondió")
+            
+        # NUEVO: Validar que el status de red no sea error
+        if network_result.get("status") != "success":
+            return await self._fail_deploy(state, "Error en Network Orchestrator al configurar VLANs")
 
+        state.completed_steps.append(OperationStep.NETWORK)
+        await self._save_state(state)
+        logger.info(f"[slice={request.slice_id}] Network completado exitosamente")
         # ── Resultado final ──────────────────────────────────────────────────
         await self._delete_state(state.slice_id)
 
@@ -89,6 +110,14 @@ class Orchestrator:
     # ── Destroy ───────────────────────────────────────────────────────────────
 
     async def destroy(self, request: DestroySliceRequest) -> DestroySliceResponse:
+        """
+        Orquesta la destrucción de un slice.
+
+        Pasos actuales:
+            1. Compute Provisioner → destruir VMs
+            0. Network Orchestrator → desconfigurar red (antes del compute)
+  
+        """
         logger.info(f"[slice={request.slice_id}] Iniciando destroy")
 
         state = OperationState(
@@ -98,8 +127,8 @@ class Orchestrator:
         )
         await self._save_state(state)
 
+        # ── Paso 1: Compute ──────────────────────────────────────────────────
         compute_result = await self._step_compute_destroy(request)
-        logger.info(f"[slice={request.slice_id}] Respuesta compute destroy: {compute_result}")
 
         if compute_result is None:
             return await self._fail_destroy(
@@ -127,12 +156,16 @@ class Orchestrator:
     # ── Pasos internos ────────────────────────────────────────────────────────
 
     async def _step_compute_deploy(self, request: DeploySliceRequest) -> Optional[dict]:
+        """
+        Envía el deploy al Compute Provisioner via core NATS request/reply.
+        tap_interfaces viaja automáticamente dentro de cada VMSpec serializado.
+        """
         payload = {
             "slice_id":   request.slice_id,
             "request_id": request.request_id,
             "vms":        [vm.model_dump() for vm in request.vms],
         }
-        logger.info(f"[slice={request.slice_id}] Enviando request a '{settings.SUBJECT_COMPUTE_DEPLOY}'")
+        logger.debug(f"[slice={request.slice_id}] Enviando a {settings.SUBJECT_COMPUTE_DEPLOY}")
         return await nats_manager.request(
             settings.SUBJECT_COMPUTE_DEPLOY,
             payload,
@@ -140,27 +173,46 @@ class Orchestrator:
         )
 
     async def _step_compute_destroy(self, request: DestroySliceRequest) -> Optional[dict]:
+        """Envía el destroy al Compute Provisioner y espera respuesta."""
         payload = {
             "slice_id":   request.slice_id,
             "request_id": request.request_id,
         }
-        logger.info(f"[slice={request.slice_id}] Enviando request a '{settings.SUBJECT_COMPUTE_DESTROY}'")
+        logger.debug(f"[slice={request.slice_id}] Enviando a {settings.SUBJECT_COMPUTE_DESTROY}")
         return await nats_manager.request(
             settings.SUBJECT_COMPUTE_DESTROY,
             payload,
             timeout=settings.COMPUTE_TIMEOUT,
         )
 
+    async def _step_network_destroy(self, request: DestroySliceRequest) -> Optional[dict]:
+        """Llama al Network Orchestrator para borrar puertos OVS y VLANs"""
+        payload = {"slice_id": request.slice_id, "request_id": request.request_id}
+        return await nats_manager.request(settings.SUBJECT_NETWORK_DESTROY, payload, timeout=settings.NETWORK_TIMEOUT)
+
     # ── Notificación al Slice Manager ─────────────────────────────────────────
 
     async def _notify_slice_manager(self, payload: dict) -> None:
+        """Publica el resultado final en el subject que escucha el Slice Manager."""
         await nats_manager.publish(settings.SUBJECT_RESULT, payload)
-        logger.info(f"Resultado publicado en '{settings.SUBJECT_RESULT}'")
+        logger.debug(f"Resultado publicado en {settings.SUBJECT_RESULT}")
 
-    # ── Manejo de errores ─────────────────────────────────────────────────────
+    # ── Helpers de estado ─────────────────────────────────────────────────────
 
-    async def _fail_deploy(self, state: OperationState, reason: str,
-                           failed_vms=None) -> DeploySliceResponse:
+    async def _save_state(self, state: OperationState) -> None:
+        key = _STATE_KEY.format(slice_id=state.slice_id)
+        await nats_manager.kv_put(key, state.model_dump())
+
+    async def _delete_state(self, slice_id: str) -> None:
+        key = _STATE_KEY.format(slice_id=slice_id)
+        await nats_manager.kv_delete(key)
+
+    async def _fail_deploy(
+        self,
+        state: OperationState,
+        reason: str,
+        failed_vms: Optional[List[VMResult]] = None,
+    ) -> DeploySliceResponse:
         logger.error(f"[slice={state.slice_id}] Deploy fallido: {reason}")
         await self._delete_state(state.slice_id)
         response = DeploySliceResponse(
@@ -172,8 +224,11 @@ class Orchestrator:
         await self._notify_slice_manager(response.model_dump())
         return response
 
-    async def _fail_destroy(self, state: OperationState,
-                            reason: str) -> DestroySliceResponse:
+    async def _fail_destroy(
+        self,
+        state: OperationState,
+        reason: str,
+    ) -> DestroySliceResponse:
         logger.error(f"[slice={state.slice_id}] Destroy fallido: {reason}")
         await self._delete_state(state.slice_id)
         response = DestroySliceResponse(
@@ -184,13 +239,14 @@ class Orchestrator:
         )
         await self._notify_slice_manager(response.model_dump())
         return response
-
-    # ── Estado en KV ──────────────────────────────────────────────────────────
-
-    async def _save_state(self, state: OperationState) -> None:
-        key = _STATE_KEY.format(slice_id=state.slice_id)
-        await nats_manager.kv_put(key, state.model_dump())
-
-    async def _delete_state(self, slice_id: str) -> None:
-        key = _STATE_KEY.format(slice_id=slice_id)
-        await nats_manager.kv_delete(key)
+    async def _step_network_deploy(self, request: DeploySliceRequest) -> Optional[dict]:
+        """Llama al Network Orchestrator para configurar VLANs y OVS"""
+        payload = {
+            "slice_id":   request.slice_id,
+            "request_id": request.request_id,
+            "links":      [link.model_dump() for link in request.links]
+        }
+        
+        logger.info(f"[slice={request.slice_id}] Solicitando configuración de red...")
+        # Cambiar el timeout si tus scripts de OVS son lentos (ej. 60s)
+        return await nats_manager.request("network.deploy", payload, timeout=60)

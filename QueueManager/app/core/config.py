@@ -22,14 +22,16 @@ class Settings(BaseSettings):
     SUBJECT_COMPUTE_DEPLOY:  str = "compute.deploy"
     SUBJECT_COMPUTE_DESTROY: str = "compute.destroy"
     SUBJECT_COMPUTE_RESULT:  str = "compute.result"
-
+    SUBJECT_NETWORK_DEPLOY: str = "network.deploy"
+    SUBJECT_NETWORK_DESTROY: str = "network.destroy"
+    SUBJECT_NETWORK_RESULT: str = "network.result"
     # JetStream: nombre del stream y KV bucket para estado
     JS_STREAM_NAME:  str = "SLICES"
     JS_KV_BUCKET:    str = "slice-state"
 
     # ── Timeouts ─────────────────────────────────────────────────────────────
     COMPUTE_TIMEOUT: int = 300   # segundos — tiempo máximo para que compute responda
-
+    NETWORK_TIMEOUT: int = 60
     # ── Healthcheck ──────────────────────────────────────────────────────────
     HEALTH_PORT: int = 8080
 
