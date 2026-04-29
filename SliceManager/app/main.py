@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from contextlib import asynccontextmanager
 
 from app.utils import extract_vms_for_placement, validate_topology_graph
+from app.telemetry import get_real_worker_metrics
 
 import uuid # Para generar el request_id
 from app.nats_producer import nats_producer # Importamos nuestro cliente
@@ -82,19 +83,29 @@ async def process_placement_worker():
             }
             
 
-            # --- SIMULACIÓN DEL MÓDULO DE VM PLACEMENT ---
-            logger.info(f"[{slice_id}] Esperando 2 segundos simulando red...")
-            await asyncio.sleep(2) # Simulamos que la petición tarda en ir y volver
+            # --- CONEXIÓN REAL AL MÓDULO DE VM PLACEMENT ---
+            logger.info(f"[{slice_id}] Solicitando Placement a: {VM_PLACEMENT_URL}")
+            
+            try:
+                # Realizamos el POST HTTP síncrono/asíncrono hacia el contenedor de VM Placement. El timeout es importante para no dejar colgado el worker.
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.post(VM_PLACEMENT_URL, json=payload)
+                    response.raise_for_status() # Lanza error si responde 4xx o 5xx
+                    
+                    # Extraemos el JSON de respuesta que estructuró el módulo de VM Placement
+                    placement_result = response.json()
+                    
+            except httpx.RequestError as exc:
+                logger.error(f"[{slice_id}] Falló la red hacia VM Placement: {exc}")
+                placement_result = {"status": "FAILED"}
+            except httpx.HTTPStatusError as exc:
+                logger.error(f"[{slice_id}] VM Placement devolvió error HTTP {exc.response.status_code}")
+                placement_result = {"status": "FAILED"}
 
-            # Simulamos que el VMPlacement nos responde un JSON exitoso
-            simulated_response = {
-                "status": "SUCCESS",
-                "placement_map": [{"vm_id": "vm-1", "worker_id": "server-1"}]
-            }
-
-            if simulated_response["status"] == "SUCCESS":
-                placement_map = simulated_response['placement_map']
-                logger.info(f"[{slice_id}] Placement SIMULADO exitoso: {placement_map}")
+            # --- VALIDACIÓN DEL RESULTADO ---
+            if placement_result.get("status") == "SUCCESS":
+                placement_map = placement_result.get("placement_map", [])
+                logger.info(f"[{slice_id}] Placement REAL exitoso: {placement_map}")
                 
                 # --- NUEVA LÓGICA: DICCIONARIO DE INFRAESTRUCTURA ---
                 # El QueueManager necesita IPs y Credenciales, cosas que el VM Placement no sabe.

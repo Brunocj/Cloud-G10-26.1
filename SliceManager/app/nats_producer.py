@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import nats
 from nats.js import JetStreamContext
 from nats.errors import ConnectionClosedError, TimeoutError, NoServersError
@@ -13,6 +14,8 @@ class NATSProducer:
 
     async def connect(self, nats_url: str = "nats://localhost:4222"):
         """Establece la conexión con el servidor NATS y activa JetStream"""
+        # Leemos la variable del docker-compose. Si no existe, usamos localhost por defecto.
+        nats_url = os.getenv("NATS_URL", "nats://localhost:4222")
         try:
             self.nc = await nats.connect(nats_url)
             self.js = self.nc.jetstream()
