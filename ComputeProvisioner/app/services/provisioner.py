@@ -114,6 +114,22 @@ class Provisioner:
                     "VM %s intento %d/%d falló: %s",
                     vm.vm_id, attempt, settings.SSH_MAX_RETRIES, exc,
                 )
+                
+                # --- INICIO DEL ROLLBACK DE LIMPIEZA ---
+                logger.info("Iniciando rollback de limpieza para VM %s...", vm.vm_id)
+                try:
+                    # Abrimos una nueva conexión SSH rápida solo para limpiar la basura
+                    with SSHClient(vm.worker_ip, vm.ssh_user, vm.ssh_private_key) as ssh_cleanup:
+                        exec_cleanup = QEMUExecutor(ssh_cleanup)
+                        # Borrar TAPs si existen
+                        if vm.tap_interfaces:
+                            exec_cleanup.destroy_tap_interfaces(vm.tap_interfaces)
+                        # Borrar disco si existe
+                        exec_cleanup.delete_disk(vm.vm_id, slice_id)
+                except Exception as cleanup_exc:
+                    logger.error("El rollback de la VM %s también falló: %s", vm.vm_id, cleanup_exc)
+                # --- FIN DEL ROLLBACK ---
+
                 if attempt == settings.SSH_MAX_RETRIES:
                     if vnc_port:
                         self._vnc.release_port(vm.worker_ip, vnc_port)

@@ -109,14 +109,15 @@ class Orchestrator:
 
     # ── Destroy ───────────────────────────────────────────────────────────────
 
+# ── Destroy ───────────────────────────────────────────────────────────────
+
     async def destroy(self, request: DestroySliceRequest) -> DestroySliceResponse:
         """
         Orquesta la destrucción de un slice.
 
         Pasos actuales:
-            1. Compute Provisioner → destruir VMs
             0. Network Orchestrator → desconfigurar red (antes del compute)
-  
+            1. Compute Provisioner → destruir VMs
         """
         logger.info(f"[slice={request.slice_id}] Iniciando destroy")
 
@@ -127,7 +128,14 @@ class Orchestrator:
         )
         await self._save_state(state)
 
+        # ── Paso 0: Network (Limpieza de red primero) ────────────────────────
+        logger.info(f"[slice={request.slice_id}] Paso 0: Limpiando red física...")
+        network_result = await self._step_network_destroy(request)
+        if not network_result:
+             logger.warning(f"[slice={request.slice_id}] Network Orchestrator no respondió al destroy, continuando...")
+
         # ── Paso 1: Compute ──────────────────────────────────────────────────
+        logger.info(f"[slice={request.slice_id}] Paso 1: Destruyendo VMs...")
         compute_result = await self._step_compute_destroy(request)
 
         if compute_result is None:

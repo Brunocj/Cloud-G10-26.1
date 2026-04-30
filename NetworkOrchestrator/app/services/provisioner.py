@@ -20,11 +20,11 @@ logger = logging.getLogger(__name__)
 
 class NetworkProvisioner:
 
+    # ── DEPLOY (Completamente Real) ──────────────────────────────────────────
+
     def deploy(self, request: DeployNetworkRequest) -> DeployNetworkResponse:
         logger.info(f"[slice={request.slice_id}] Iniciando despliegue de red ({len(request.links)} enlaces)")
 
-        # Agrupamos los extremos de los cables (endpoints) por Worker IP
-        # para abrir solo 1 conexión SSH por servidor físico.
         endpoints_by_worker = defaultdict(list)
         for link in request.links:
             endpoints_by_worker[link.vm1_worker_ip].append({
@@ -57,7 +57,6 @@ class NetworkProvisioner:
                 except Exception as exc:
                     logger.error(f"[worker={worker_ip}] Error crítico: {exc}")
 
-        # Consolidar los resultados. Un enlace es exitoso solo si AMBOS extremos no fallaron.
         links_ok, links_failed = [], []
         for link in request.links:
             if link.connection_id in failed_links_errors:
@@ -77,7 +76,6 @@ class NetworkProvisioner:
         ok_eps, fail_eps = [], []
         executor = NetworkExecutor(worker_ip)
         
-        # Tomamos credenciales del primer endpoint (se asume mismo servidor = mismas credenciales)
         try:
             with SSHClient(worker_ip, endpoints[0]["user"], endpoints[0]["key"]) as ssh:
                 for ep in endpoints:
@@ -93,7 +91,45 @@ class NetworkProvisioner:
 
         return ok_eps, fail_eps
 
+
+    # ── DESTROY (Completamente Real) ─────────────────────────────────────────
+
     def destroy(self, request: DestroyNetworkRequest) -> DestroyNetworkResponse:
-        # Aquí iría la lógica inversa (executor.destroy_port) agrupada igual.
-        logger.info(f"[slice={request.slice_id}] Destrucción simulada de red completada.")
+        logger.info(f"[slice={request.slice_id}] Iniciando destrucción REAL de red...")
+
+        # Si el Slice Manager no nos mandó los 'links', no sabemos a dónde entrar a limpiar.
+        if not hasattr(request, 'links') or not request.links:
+            logger.warning(f"[slice={request.slice_id}] Sin arreglo de 'links' en el JSON. Se delega la limpieza de TAPs a la eliminación de las VMs.")
+            return DestroyNetworkResponse(slice_id=request.slice_id, request_id=request.request_id, status=ProvisioningStatus.SUCCESS)
+
+        endpoints_by_worker = defaultdict(list)
+        for link in request.links:
+            endpoints_by_worker[link.vm1_worker_ip].append({"tap": link.vm1_tap, "user": link.vm1_ssh_user, "key": link.vm1_ssh_private_key})
+            endpoints_by_worker[link.vm2_worker_ip].append({"tap": link.vm2_tap, "user": link.vm2_ssh_user, "key": link.vm2_ssh_private_key})
+
+        with ThreadPoolExecutor(max_workers=settings.MAX_CONCURRENT_WORKERS) as pool:
+            futures = {
+                pool.submit(self._destroy_on_worker, worker_ip, endpoints): worker_ip
+                for worker_ip, endpoints in endpoints_by_worker.items()
+            }
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as exc:
+                    logger.error(f"[worker={futures[future]}] Error en limpieza de worker: {exc}")
+
+        logger.info(f"[slice={request.slice_id}] Destrucción física completada.")
         return DestroyNetworkResponse(slice_id=request.slice_id, request_id=request.request_id, status=ProvisioningStatus.SUCCESS)
+
+    def _destroy_on_worker(self, worker_ip: str, endpoints: List[dict]) -> None:
+        executor = NetworkExecutor(worker_ip)
+        try:
+            with SSHClient(worker_ip, endpoints[0]["user"], endpoints[0]["key"]) as ssh:
+                for ep in endpoints:
+                    try:
+                        # Asume que en tu NetworkExecutor existe una función remove_port o equivalente
+                        executor.destroy_port(ssh, ep["tap"]) 
+                    except Exception as exc:
+                        logger.error(f"Fallo al borrar tap {ep['tap']}: {exc}")
+        except Exception as exc:
+            logger.error(f"SSH Fail en worker {worker_ip} durante destroy: {exc}")
