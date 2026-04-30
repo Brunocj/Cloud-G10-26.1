@@ -43,6 +43,7 @@ async def handle_deploy(msg: Msg) -> None:
                     "vnc_port":        vm.vnc_port,
                     "ssh_user":        specs_by_id[vm.vm_id].ssh_user,
                     "ssh_private_key": specs_by_id[vm.vm_id].ssh_private_key,
+                    "tap_interfaces":  [t.model_dump() for t in specs_by_id[vm.vm_id].tap_interfaces],
                 }
                 for vm in response.vms
             ]

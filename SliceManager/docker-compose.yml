@@ -15,3 +15,6 @@ services:
       - ./keys:/app/keys:ro
     networks:
       - pucp_cloud_net
+networks:
+  pucp_cloud_net:
+    external: true
