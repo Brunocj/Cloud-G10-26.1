@@ -1,0 +1,22 @@
+services:
+  api-gateway:
+    build: .
+    container_name: api-gateway
+    restart: unless-stopped
+    environment:
+      SLICE_MANAGER_URL: http://slice-manager:8000
+      FORWARD_TIMEOUT:   30.0
+      LOG_LEVEL:         INFO
+      # ── JWT (desactivado — activar cuando Keycloak esté listo) ──
+      JWT_ENABLED:       "false"
+      JWT_JWKS_URL:      ""
+      JWT_ISSUER:        ""
+      JWT_AUDIENCE:      ""
+    ports:
+      - "8082:8080"
+    networks:
+      - pucp_cloud_net
+
+networks:
+  pucp_cloud_net:
+    external: true
