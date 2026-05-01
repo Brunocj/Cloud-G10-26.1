@@ -4,6 +4,7 @@ import logging
 import hashlib
 import time
 import os
+import json
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Depends
 from sqlalchemy.orm import Session
 from contextlib import asynccontextmanager
@@ -133,7 +134,6 @@ async def process_placement_worker():
                 }
 
                 # 1. Recuperamos los cables del diseño original
-                import json
                 topology = db_slice.topology_json
                 
                 # Blindaje para SQLite: Si es un string, lo convertimos a diccionario
