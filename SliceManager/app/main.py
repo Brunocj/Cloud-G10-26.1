@@ -127,10 +127,10 @@ async def process_placement_worker():
                     
                 # --- DICCIONARIO DE INFRAESTRUCTURA ---
                 server_inventory = {
-                    "server-1": {"ip": "10.0.10.1", "user": "ubuntu", "key": get_ssh_key("keys/worker1.pem")},
-                    "server-2": {"ip": "10.0.10.2", "user": "ubuntu", "key": get_ssh_key("keys/worker2.pem")},
-                    "server-3": {"ip": "10.0.10.3", "user": "ubuntu", "key": get_ssh_key("keys/worker3.pem")},
-                    "server-4": {"ip": "10.0.10.4", "user": "ubuntu", "key": get_ssh_key("keys/worker4.pem")}
+                    "server-1": {"ip": "10.0.10.1", "user": "ubuntu", "key_path": "keys/worker1.pem"},
+                    "server-2": {"ip": "10.0.10.2", "user": "ubuntu", "key_path": "keys/worker2.pem"},
+                    "server-3": {"ip": "10.0.10.3", "user": "ubuntu", "key_path": "keys/worker3.pem"},
+                    "server-4": {"ip": "10.0.10.4", "user": "ubuntu", "key_path": "keys/worker4.pem"}
                 }
 
                 # 1. Recuperamos los cables del diseño original
@@ -218,9 +218,9 @@ async def process_placement_worker():
                         "ssh_private_key": get_ssh_key(server_info.get("key_path", "")),
                         "vcpus": original_vm.get("vcpus"),
                         "ram_mb": original_vm.get("ram_mb"),
-                        "image_name": "ubuntu-22.04.qcow2",
+                        "image_name": "cirros-0.5.1-x86_64-disk.img",
                         "tap_interfaces": original_vm.get("tap_interfaces", []),
-                        "priority": 0
+                        #"priority": 0
                     })
 
                 # 4. Armamos el contrato final DeploySliceRequest
@@ -386,7 +386,10 @@ async def nats_result_listener():
             db_slice = db.query(Slice).filter(Slice.id == slice_id).first()
             if db_slice:
                 if status == "success":
-                    db_slice.state = SliceState.ACTIVE
+                    # Si el estado actual NO es TERMINATED, lo pasamos a ACTIVE.
+                    # Si ya era TERMINATED (por el endpoint DELETE), lo dejamos en paz.
+                    if db_slice.state != SliceState.TERMINATED:
+                        db_slice.state = SliceState.ACTIVE
                 else:
                     db_slice.state = SliceState.FAILED
                 
