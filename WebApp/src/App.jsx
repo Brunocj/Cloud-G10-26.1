@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react"; // <-- Importa useEffect
 
 // --- TOKENS ------------------------------------------------------------------
 const T = {
@@ -65,14 +65,16 @@ const Lbl = ({ children, style: s }) => (
     <div style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 5, ...s }}>{children}</div>
 );
 
-// --- BADGE --------------------------------------------------------------------
 const Badge = ({ status }) => {
     const map = {
-        Active: [T.accent, T.accentLight],
-        Draft: [T.textMuted, T.surfaceElevated],
-        Failed: [T.red, T.redLight],
+        ACTIVE: [T.accent, T.accentLight],
+        DRAFT: [T.textMuted, T.surfaceElevated],
+        PROVISIONING: ["#1976d2", "#e3f2fd"], // Azul
+        PENDING_APPROVAL: [T.yellow, T.yellowLight], // Naranja
+        FAILED: [T.red, T.redLight],
+        TERMINATED: ["#616161", "#eeeeee"] // Gris oscuro
     };
-    const [c, bg] = map[status] || map.Draft;
+    const [c, bg] = map[status] || map.DRAFT;
     return (
         <span style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 9px", borderRadius: 20, fontSize: 10, fontWeight: 700, color: c, background: bg, border: `1px solid ${c}33`, textTransform: "uppercase", letterSpacing: "0.05em" }}>
             <span style={{ width: 5, height: 5, borderRadius: "50%", background: c }} />{status}
@@ -84,26 +86,27 @@ const Badge = ({ status }) => {
 const NodeEditor = ({ node, onSave, onDelete, onClose }) => {
     const [f, setF] = useState({ ...node });
     const u = (k, v) => setF(p => ({ ...p, [k]: v }));
+    // Si el status existe y no es Draft, bloqueamos la edición
+    const isReadOnly = sliceStatus && sliceStatus !== "DRAFT";
     return (
         <div style={{ position: "absolute", right: 12, top: 12, width: 268, zIndex: 300, background: T.surface, borderRadius: 14, border: `1.5px solid ${T.accentMid}55`, boxShadow: T.shadowMd, overflow: "hidden" }}>
             <div style={{ background: T.accentLight, padding: "11px 14px", borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                <span style={{ fontSize: 12, fontWeight: 800, color: T.accent }}>? Node Properties</span>
+                <span style={{ fontSize: 12, fontWeight: 800, color: T.accent }}>
+                    {isReadOnly ? "⚙️ Control de Nodo" : "🛠️ Node Properties"}
+                </span>
                 <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: T.textMuted, fontSize: 18, lineHeight: 1 }}>×</button>
             </div>
+
             <div style={{ padding: "14px 14px 12px", display: "flex", flexDirection: "column", gap: 11 }}>
-                <div><Lbl>VM Name</Lbl><input value={f.label} onChange={e => u("label", e.target.value)} style={inp} /></div>
+                <div><Lbl>VM Name</Lbl><input value={f.label} disabled={isReadOnly} onChange={e => u("label", e.target.value)} style={inp} /></div>
+
                 <div>
                     <Lbl>OS Image</Lbl>
-                    <select value={f.image} onChange={e => u("image", e.target.value)} style={inp}>
-                        {IMAGES.map(i => <option key={i}>{i}</option>)}
+                    <select value={f.image} disabled={isReadOnly} onChange={e => u("image", e.target.value)} style={inp}>
+                        {availableImages?.map(i => <option key={i}>{i}</option>)}
                     </select>
                 </div>
-                <div>
-                    <Lbl>Worker / Host</Lbl>
-                    <select value={f.worker} onChange={e => u("worker", e.target.value)} style={inp}>
-                        {WORKERS.map(w => <option key={w}>{w}</option>)}
-                    </select>
-                </div>
+
                 <div style={{ background: T.surfaceElevated, borderRadius: 9, padding: "11px 12px", border: `1px solid ${T.border}` }}>
                     <Lbl>Resources</Lbl>
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
@@ -111,18 +114,35 @@ const NodeEditor = ({ node, onSave, onDelete, onClose }) => {
                             <div key={k}>
                                 <div style={{ fontSize: 9, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 3 }}>{l}</div>
                                 <input type="number" value={f[k]} min={mn} max={mx} step={st}
+                                    disabled={isReadOnly}
                                     onChange={e => u(k, Number(e.target.value))}
                                     style={{ ...inp, padding: "6px 4px", textAlign: "center", fontWeight: 800, color: T.accent, fontSize: 13 }} />
                             </div>
                         ))}
                     </div>
                 </div>
-                <div style={{ display: "flex", gap: 8 }}>
-                    <button onClick={() => { onSave(f); onClose(); }}
-                        style={btnBase({ flex: 1, background: T.accent, color: "#fff", border: "none" })}>? Save</button>
-                    <button onClick={() => { onDelete(node.id); onClose(); }}
-                        style={btnBase({ background: T.redLight, color: T.red, border: `1px solid ${T.red}33` })}>??</button>
-                </div>
+
+                {/* BOTONES DINÁMICOS SEGÚN EL ESTADO */}
+                {isReadOnly ? (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
+                        {/* REQ-US-11: Botón de Consola Web */}
+                        <button
+                            onClick={() => window.open(`http://${node.worker_ip || 'localhost'}:${node.vnc_port || '5900'}`, '_blank')}
+                            disabled={sliceStatus !== "ACTIVE"}
+                            style={btnBase({ width: "100%", background: T.text, color: "#fff", border: "none", padding: "8px 0", opacity: sliceStatus === "ACTIVE" ? 1 : 0.5 })}>
+                            🖥️ Abrir Consola Web
+                        </button>
+                        {/* REQ-US-12: Botón de Telemetría */}
+                        <button style={btnBase({ width: "100%", background: T.surface, color: T.accent, border: `1px solid ${T.accent}` })}>
+                            📊 Ver Telemetría
+                        </button>
+                    </div>
+                ) : (
+                    <div style={{ display: "flex", gap: 8 }}>
+                        <button onClick={() => { onSave(f); onClose(); }} style={btnBase({ flex: 1, background: T.accent, color: "#fff", border: "none" })}>💾 Save</button>
+                        <button onClick={() => { onDelete(node.id); onClose(); }} style={btnBase({ background: T.redLight, color: T.red, border: `1px solid ${T.red}33` })}>🗑️</button>
+                    </div>
+                )}
             </div>
         </div>
     );
@@ -248,7 +268,7 @@ const Canvas = ({ nodes, edges, setNodes, setEdges }) => {
 
             {/* Mode bar */}
             <div style={{ padding: "8px 14px", borderBottom: `1px solid ${T.border}`, background: T.surfaceElevated, display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-                {[["select", "? Select & Move"], ["link", "?? Link Nodes"]].map(([m, lbl]) => (
+                {[["select", "? Select & Move"], ["link", "🔗 Link Nodes"]].map(([m, lbl]) => (
                     <button key={m} onClick={() => switchMode(m)}
                         style={btnBase({
                             padding: "5px 13px", fontSize: 11, boxShadow: "none",
@@ -267,7 +287,7 @@ const Canvas = ({ nodes, edges, setNodes, setEdges }) => {
                 <div style={{ flex: 1 }} />
                 <button onClick={() => { setNodes([]); setEdges([]); setLinkFrom(null); setEditId(null); }}
                     style={btnBase({ boxShadow: "none", fontSize: 11, padding: "5px 12px", color: T.red, border: `1px solid ${T.red}33`, background: T.redLight })}>
-                    ?? Clear
+                    🗑️ Clear
                 </button>
             </div>
 
@@ -340,7 +360,7 @@ const Canvas = ({ nodes, edges, setNodes, setEdges }) => {
                                 <rect x="-28" y="-24" width="56" height="8" rx="12" fill={isLinkSrc ? T.accent : T.accentMid} />
                                 <rect x="-28" y="-18" width="56" height="4" fill={isLinkSrc ? T.accent : T.accentMid} />
                                 {/* Icon */}
-                                <text textAnchor="middle" dominantBaseline="middle" y="-5" style={{ fontSize: 17 }}>???</text>
+                                <text textAnchor="middle" dominantBaseline="middle" y="-5" style={{ fontSize: 17 }}>🖥️</text>
                                 {/* Worker */}
                                 <rect x="-22" y="5" width="44" height="12" rx="3" fill={T.accentLight} />
                                 <text x="0" y="11" textAnchor="middle" dominantBaseline="middle"
@@ -363,7 +383,7 @@ const Canvas = ({ nodes, edges, setNodes, setEdges }) => {
                 {/* Empty hint */}
                 {nodes.length === 0 && (
                     <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", pointerEvents: "none", gap: 8 }}>
-                        <div style={{ fontSize: 44, opacity: 0.2 }}>???</div>
+                        <div style={{ fontSize: 44, opacity: 0.2 }}>🖥️</div>
                         <div style={{ color: T.textMuted, fontSize: 13, fontWeight: 600 }}>Drag VMs here or drop a template from the sidebar</div>
                         <div style={{ color: T.textFaint, fontSize: 11 }}>Double-click any node to edit it</div>
                     </div>
@@ -372,9 +392,12 @@ const Canvas = ({ nodes, edges, setNodes, setEdges }) => {
                 {/* Node editor overlay */}
                 {editingNode && (
                     <NodeEditor node={editingNode}
+                        availableImages={imageList}
+                        sliceStatus={activeSlice ? activeSlice.status : "DRAFT"} // <-- Pasamos el estado para saber si bloquear la edición
                         onSave={updated => setNodes(prev => prev.map(n => n.id === updated.id ? updated : n))}
                         onDelete={id => { setNodes(p => p.filter(n => n.id !== id)); setEdges(p => p.filter(e => e.from !== id && e.to !== id)); }}
-                        onClose={() => setEditId(null)} />
+                        onClose={() => setEditId(null)}
+                    />
                 )}
             </div>
 
@@ -407,7 +430,7 @@ const TemplatePicker = () => {
         <div style={{ padding: "14px 16px 12px", borderBottom: `1px solid ${T.border}` }}>
             <Lbl>Templates — drag to canvas</Lbl>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {[{ id: "linear", icon: "??", name: "Linear Chain" }, { id: "ring", icon: "??", name: "Ring" }].map(tpl => (
+                {[{ id: "linear", icon: "⛓️", name: "Linear Chain" }, { id: "ring", icon: "⭕", name: "Ring" }].map(tpl => (
                     <div key={tpl.id} style={{ border: `1px solid ${T.border}`, borderRadius: 10, overflow: "hidden", background: T.surface, boxShadow: T.shadow }}>
                         <div style={{ padding: "7px 10px", borderBottom: `1px solid ${T.border}`, background: T.surfaceElevated, display: "flex", alignItems: "center", gap: 8 }}>
                             <span style={{ fontSize: 12, fontWeight: 700, color: T.text, flex: 1 }}>{tpl.icon} {tpl.name}</span>
@@ -423,7 +446,7 @@ const TemplatePicker = () => {
                             onDragStart={e => { e.dataTransfer.setData("templateType", tpl.id); e.dataTransfer.setData("templateCount", counts[tpl.id]); setDraggingTpl(tpl.id); }}
                             onDragEnd={() => setDraggingTpl(null)}
                             style={{ padding: "9px 10px", display: "flex", alignItems: "center", gap: 10, cursor: "grab", background: draggingTpl === tpl.id ? T.accentLight : "transparent", transition: "background 0.15s" }}>
-                            <span style={{ fontSize: 20 }}>{tpl.id === "linear" ? "??" : "??"}</span>
+                            <span style={{ fontSize: 20 }}>{tpl.id === "linear" ? "⛓️" : "⭕"}</span>
                             <div>
                                 <div style={{ fontSize: 11, fontWeight: 600, color: T.text }}>{counts[tpl.id]} nodes · drag to place</div>
                                 <div style={{ fontSize: 10, color: T.textMuted }}>Adds to existing topology</div>
@@ -446,7 +469,7 @@ const SliceCard = ({ slice, active, onClick, onDestroy, onDeploy }) => (
             </div>
             <button onClick={e => { e.stopPropagation(); onDestroy(slice.id); }}
                 style={{ background: "none", border: "none", cursor: "pointer", color: T.textMuted, padding: 4, fontSize: 15 }}
-                title="Destroy slice">??</button>
+                title="Destroy slice">🗑️</button>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 5, marginTop: 6 }}>
             {[["VMs", slice.nodeCount], ["Links", slice.edgeCount], ["vCPU", slice.vcpus], ["RAM", slice.ramLabel]].map(([l, v]) => (
@@ -478,7 +501,7 @@ const SaveDraftModal = ({ nodes, edges, onSave, onClose }) => {
     return (
         <Overlay>
             <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: 28, maxWidth: 380, width: "90%", boxShadow: T.shadowMd }}>
-                <div style={{ fontSize: 17, fontWeight: 800, color: T.text, marginBottom: 4 }}>?? Save as Draft</div>
+                <div style={{ fontSize: 17, fontWeight: 800, color: T.text, marginBottom: 4 }}>💾 Save as Draft</div>
                 <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 18 }}>Your topology will be saved. You can deploy it later.</div>
                 <Lbl>Slice Name</Lbl>
                 <input value={name} onChange={e => setName(e.target.value)} style={inp} />
@@ -486,7 +509,7 @@ const SaveDraftModal = ({ nodes, edges, onSave, onClose }) => {
                     <button onClick={onClose} style={btnBase({ flex: 1 })}>Cancel</button>
                     <button onClick={() => onSave(name)} disabled={!name.trim()}
                         style={btnBase({ flex: 2, background: T.accent, color: "#fff", border: "none", opacity: !name.trim() ? 0.5 : 1 })}>
-                        ?? Save Draft
+                        💾 Save Draft
                     </button>
                 </div>
             </div>
@@ -501,7 +524,7 @@ const DeployModal = ({ nodes, edges, onDeploy, onClose }) => {
     return (
         <Overlay>
             <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 16, padding: 28, maxWidth: 400, width: "90%", boxShadow: T.shadowMd }}>
-                <div style={{ fontSize: 17, fontWeight: 800, color: T.text, marginBottom: 4 }}>?? Deploy Slice</div>
+                <div style={{ fontSize: 17, fontWeight: 800, color: T.text, marginBottom: 4 }}>🚀 Deploy Slice</div>
                 <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 20 }}>Name your slice and confirm deployment.</div>
                 <Lbl>Slice Name</Lbl>
                 <input value={name} onChange={e => setName(e.target.value)} style={inp} />
@@ -528,12 +551,12 @@ const DeployModal = ({ nodes, edges, onDeploy, onClose }) => {
 const ConfirmModal = ({ title, msg, onOk, onCancel }) => (
     <Overlay>
         <div style={{ background: T.surface, border: `1px solid ${T.red}33`, borderRadius: 14, padding: 26, maxWidth: 380, width: "90%", boxShadow: T.shadowMd }}>
-            <div style={{ fontSize: 15, fontWeight: 800, color: T.text, marginBottom: 8 }}>?? {title}</div>
+            <div style={{ fontSize: 15, fontWeight: 800, color: T.text, marginBottom: 8 }}>🗑️ {title}</div>
             <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 22, lineHeight: 1.6 }}>{msg}</div>
             <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
                 <button onClick={onCancel} style={btnBase()}>Cancel</button>
                 <button onClick={onOk} style={btnBase({ background: T.redLight, color: T.red, border: `1px solid ${T.red}44` })}>
-                    ?? Yes, Destroy
+                    💥 Yes, Destroy
                 </button>
             </div>
         </div>
@@ -542,7 +565,7 @@ const ConfirmModal = ({ title, msg, onOk, onCancel }) => (
 
 const Toast = ({ msg, type }) => (
     <div style={{ position: "fixed", bottom: 24, right: 24, zIndex: 9999, background: type === "error" ? T.redLight : T.accentLight, border: `1px solid ${type === "error" ? T.red : T.accent}44`, color: type === "error" ? T.red : T.accent, padding: "10px 18px", borderRadius: 10, fontSize: 13, fontWeight: 600, boxShadow: T.shadowMd }}>
-        {type === "error" ? "??" : "?"} {msg}
+        {type === "error" ? "❌" : "✅"} {msg}
     </div>
 );
 
@@ -568,7 +591,35 @@ const INIT_SLICES = [
 
 // --- ROOT ---------------------------------------------------------------------
 export default function App() {
-    const [slices, setSlices] = useState(INIT_SLICES);
+    const [slices, setSlices] = useState([]);
+    // Dentro de export default function App() { ...
+    const [imageList, setImageList] = useState(["Cargando imágenes..."]);
+    useEffect(() => {
+        const fetchSlices = async () => {
+            try {
+                const res = await fetch("http://localhost:8005/api/v1/slices");
+                if (res.ok) {
+                    const data = await res.json();
+                    setSlices(data);
+                }
+            } catch (error) {
+                console.error("Error cargando slices:", error);
+            }
+        };
+        const fetchImages = async () => {
+            try {
+                const res = await fetch("http://localhost:8000/api/v1/slices/utils/images");
+                if (res.ok) {
+                    const data = await res.json();
+                    setImageList(data.map(img => img.name));
+                }
+            } catch (error) {
+                console.error("Error cargando imágenes:", error);
+            }
+        };
+        fetchSlices();
+        fetchImages();
+    }, []);
     const [activeId, setActiveId] = useState(null);
 
     // Designer state (for new slices)
@@ -592,39 +643,123 @@ export default function App() {
         setModal({
             type: "confirm",
             title: "Destroy Slice",
-            msg: `Are you sure you want to destroy "${sl?.name}"? All VMs and network resources will be permanently deleted.`,
-            onOk: () => {
-                setSlices(p => p.filter(s => s.id !== id));
-                if (activeId === id) setActiveId(null);
-                setModal(null);
-                flash("Slice destroyed", "error");
+            msg: `Are you sure you want to destroy "${sl?.name}"?`,
+            onOk: async () => {
+                try {
+                    const res = await fetch(`http://localhost:8000/api/v1/slices/${id}`, { method: "DELETE" });
+                    if (!res.ok) throw new Error("Fallo al destruir");
+
+                    updateSlice(id, { status: "TERMINATED" }); // O filtrarlo para que desaparezca
+                    if (activeId === id) setActiveId(null);
+                    setModal(null);
+                    flash("Orden de destrucción enviada", "success");
+                } catch (e) {
+                    flash("Error al eliminar", "error");
+                }
             },
         });
     };
 
-    // Deploy from designer
-    const deployFromDesigner = (name) => {
-        const totalRam = nodes.reduce((s, n) => s + n.ram, 0);
-        const sl = mkSlice(name, "Active", [...nodes], [...edges]);
-        setSlices(p => [sl, ...p]);
-        setNodes([]); setEdges([]);
-        setModal(null);
-        flash(`"${name}" deployed successfully!`);
+    const deployFromDesigner = async (name) => {
+        try {
+            // PASO 1: Guardamos el lienzo en la BD (como si fuera un draft)
+            const payloadDraft = {
+                name: name,
+                slice_json: { nodes: nodes, edges: edges }
+            };
+
+            const resDraft = await fetch("http://localhost:8085/api/v1/slices/draft", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payloadDraft)
+            });
+
+            if (!resDraft.ok) throw new Error("Fallo al guardar la topología en BD");
+            const draftData = await resDraft.json();
+            const newSliceId = draftData.slice_id;
+
+            // PASO 2: Mandamos a desplegar ese ID que acabamos de crear
+            const payloadDeploy = {
+                availability_zone: "Linux Cluster", // Opcional: hacerlo dinámico luego
+                ttl_hours: 4,
+                motivo: "Despliegue directo desde Canvas"
+            };
+
+            const resDeploy = await fetch(`http://localhost:8085/api/v1/slices/${newSliceId}/deploy`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payloadDeploy)
+            });
+
+            if (!resDeploy.ok) throw new Error("Fallo al solicitar el despliegue");
+
+            // PASO 3: Actualizamos la UI
+            const sl = mkSlice(name, "PENDING_APPROVAL", [...nodes], [...edges]);
+            sl.id = newSliceId;
+            setSlices(p => [sl, ...p]);
+            setNodes([]); setEdges([]);
+            setModal(null);
+            flash(`"${name}" enviado a validación de recursos!`);
+
+        } catch (error) {
+            flash("Error de conexión con el servidor", "error");
+        }
     };
 
     // Save draft from designer
-    const saveDraft = (name) => {
-        const sl = mkSlice(name, "Draft", [...nodes], [...edges]);
-        setSlices(p => [sl, ...p]);
-        setNodes([]); setEdges([]);
-        setModal(null);
-        flash(`"${name}" saved as draft`);
+    const saveDraft = async (name) => {
+        try {
+            // 1. Armamos el payload según tu esquema Pydantic DraftSaveRequest
+            const payload = {
+                name: name,
+                slice_json: { nodes: nodes, edges: edges }
+            };
+
+            // 2. Disparamos al API Gateway
+            const response = await fetch("http://localhost:8085/api/v1/slices/draft", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            });
+
+            if (!response.ok) throw new Error("Fallo al guardar el borrador");
+
+            const data = await response.json();
+
+            // 3. Actualizamos la vista local
+            const sl = mkSlice(name, "Draft", [...nodes], [...edges]);
+            sl.id = data.slice_id; // Usamos el ID real de la BD!
+            setSlices(p => [sl, ...p]);
+            setNodes([]); setEdges([]);
+            setModal(null);
+            flash(`"${name}" saved as draft`);
+
+        } catch (error) {
+            flash("Error de conexión con el servidor", "error");
+        }
     };
 
-    // Deploy an existing draft
-    const deployDraft = (id) => {
-        updateSlice(id, { status: "Active" });
-        flash("Slice deployed successfully!");
+    const deployDraft = async (id) => {
+        try {
+            const payload = {
+                availability_zone: "Linux Cluster", // O saca esto del modal
+                ttl_hours: 4,
+                motivo: "Despliegue desde la UI"
+            };
+
+            const res = await fetch(`http://localhost:8000/api/v1/slices/${id}/deploy`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            });
+
+            if (!res.ok) throw new Error("Fallo al desplegar");
+
+            updateSlice(id, { status: "PENDING_APPROVAL" }); // Actualiza la UI
+            flash("Solicitud de despliegue encolada con éxito");
+        } catch (error) {
+            flash("Error al solicitar despliegue", "error");
+        }
     };
 
     // Setters that update in-place when viewing a slice
@@ -639,7 +774,7 @@ export default function App() {
 
                 {/* Logo */}
                 <div style={{ padding: "16px 16px 14px", borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center", gap: 12 }}>
-                    <div style={{ width: 38, height: 38, borderRadius: 10, background: T.accentLight, border: `1.5px solid ${T.accent}44`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22 }}>??</div>
+                    <div style={{ width: 38, height: 38, borderRadius: 10, background: T.accentLight, border: `1.5px solid ${T.accent}44`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22 }}>☁️</div>
                     <div>
                         <div style={{ fontSize: 15, fontWeight: 800, color: T.text, letterSpacing: "-0.02em" }}>PUCP Cloud</div>
                         <div style={{ fontSize: 9, color: T.textMuted, letterSpacing: "0.08em", textTransform: "uppercase" }}>Orchestrator</div>
@@ -652,7 +787,7 @@ export default function App() {
                         <Lbl>Drag VM to canvas</Lbl>
                         <div draggable onDragStart={e => e.dataTransfer.setData("nodeType", "vm")}
                             style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", background: T.surfaceElevated, border: `1.5px dashed ${T.borderHover}`, borderRadius: 10, cursor: "grab" }}>
-                            <span style={{ fontSize: 22 }}>???</span>
+                            <span style={{ fontSize: 22 }}>🖥️</span>
                             <div>
                                 <div style={{ fontSize: 12, fontWeight: 700, color: T.text }}>Virtual Machine</div>
                                 <div style={{ fontSize: 10, color: T.textMuted }}>Configurable node</div>
@@ -705,7 +840,7 @@ export default function App() {
                             )}
                             <button onClick={() => destroySlice(activeSlice.id)}
                                 style={btnBase({ fontSize: 12, padding: "6px 14px", background: T.redLight, color: T.red, border: `1px solid ${T.red}33`, boxShadow: "none" })}>
-                                ?? Destroy
+                                💥 Destroy
                             </button>
                         </>
                     ) : (
@@ -716,7 +851,7 @@ export default function App() {
                             {nodes.length > 0 && (
                                 <button onClick={() => setModal("draft")}
                                     style={btnBase({ fontSize: 12, padding: "6px 14px", background: T.surfaceElevated, color: T.textMuted, boxShadow: "none" })}>
-                                    ?? Save Draft
+                                    💾 Save Draft
                                 </button>
                             )}
                             <button onClick={() => nodes.length > 0 ? setModal("deploy") : flash("Add at least one VM first", "error")}
