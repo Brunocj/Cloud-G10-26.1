@@ -27,8 +27,8 @@ let _nid = 200;
 const mkNode = (x, y, label, defaultImg) => ({
     id: `n${_nid++}`, x, y,
     label: label || `VM-${_nid - 200}`,
-    vcores: 2, ram: 1024, disk: 20,
-    // 🔥 FIX: Asignamos la imagen por defecto desde el inicio
+    // 🔥 Bajamos los valores por defecto aquí
+    vcores: 1, ram: 256, disk: 1,
     image: defaultImg?.name || "Cirros",
     image_id: defaultImg?.id || null
 });
@@ -131,7 +131,7 @@ const NodeEditor = ({ node, availableImages, sliceStatus, onSave, onDelete, onCl
                 <div style={{ background: T.surfaceElevated, borderRadius: 9, padding: "11px 12px", border: `1px solid ${T.border}` }}>
                     <Lbl>Resources</Lbl>
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
-                        {[["vcores", "vCPU", 1, 16, 1], ["ram", "RAM MB", 512, 16384, 512], ["disk", "Disk GB", 5, 500, 5]].map(([k, l, mn, mx, st]) => (
+                        {[["vcores", "vCPU", 1, 16, 1], ["ram", "RAM MB", 128, 16384, 128], ["disk", "Disk GB", 1, 500, 1]].map(([k, l, mn, mx, st]) => (
                             <div key={k}>
                                 <div style={{ fontSize: 9, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 3 }}>{l}</div>
                                 <input type="number" value={f[k]} min={mn} max={mx} step={st}
@@ -275,7 +275,9 @@ const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlice }) =>
             setEdges(prev => [...prev, ...built.edges]);
             return;
         }
-        if (e.dataTransfer.getData("nodeType")) setNodes(prev => [...prev, mkNode(p.x, p.y)]);
+        if (e.dataTransfer.getData("nodeType")) {
+            setNodes(prev => [...prev, mkNode(p.x, p.y, undefined, imageList[0])]);
+        }
     };
 
     const switchMode = m => { setMode(m); setLinkFrom(null); setEditId(null); };
@@ -488,9 +490,14 @@ const SliceCard = ({ slice, active, onClick, onDestroy, onDeploy }) => (
                 <div style={{ fontSize: 13, fontWeight: 700, color: T.text, marginBottom: 4 }}>{slice.name}</div>
                 <Badge status={slice.status} />
             </div>
-            <button onClick={e => { e.stopPropagation(); onDestroy(slice.id); }}
-                style={{ background: "none", border: "none", cursor: "pointer", color: T.textMuted, padding: 4, fontSize: 15 }}
-                title="Destroy slice">🗑️</button>
+
+            {/* 🔥 FIX: Solo mostramos la basura si NO está terminado */}
+            {slice.status !== "TERMINATED" && (
+                <button onClick={e => { e.stopPropagation(); onDestroy(slice.id); }}
+                    style={{ background: "none", border: "none", cursor: "pointer", color: T.textMuted, padding: 4, fontSize: 15 }}
+                    title="Destroy slice">🗑️</button>
+            )}
+
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 5, marginTop: 6 }}>
             {[["VMs", slice.nodeCount], ["Links", slice.edgeCount], ["vCPU", slice.vcpus], ["RAM", slice.ramLabel]].map(([l, v]) => (
@@ -692,10 +699,17 @@ export default function App() {
 
     const deployFromDesigner = async (name) => {
         try {
-            // PASO 1: Guardamos el lienzo en la BD (como si fuera un draft)
+            // 🔥 PRE-PROCESAMIENTO: Si alguna VM no tiene imagen, le asignamos la primera de la lista
+            const defaultImg = imageList.length > 0 ? imageList[0] : { id: 1, name: "Cirros" };
+            const processedNodes = nodes.map(n => ({
+                ...n,
+                image_id: n.image_id || defaultImg.id,
+                image: n.image || defaultImg.name
+            }));
+            // Usamos processedNodes en lugar de nodes
             const payloadDraft = {
                 name: name,
-                slice_json: { nodes: nodes, edges: edges }
+                slice_json: { nodes: processedNodes, edges: edges }
             };
 
             const resDraft = await fetch("http://localhost:8085/api/v1/slices/draft", {
@@ -739,13 +753,18 @@ export default function App() {
     // Save draft from designer
     const saveDraft = async (name) => {
         try {
-            // 1. Armamos el payload según tu esquema Pydantic DraftSaveRequest
+            // 🔥 PRE-PROCESAMIENTO IDÉNTICO
+            const defaultImg = imageList.length > 0 ? imageList[0] : { id: 1, name: "Cirros" };
+            const processedNodes = nodes.map(n => ({
+                ...n,
+                image_id: n.image_id || defaultImg.id,
+                image: n.image || defaultImg.name
+            }));
             const payload = {
                 name: name,
-                slice_json: { nodes: nodes, edges: edges }
+                slice_json: { nodes: processedNodes, edges: edges }
             };
 
-            // 2. Disparamos al API Gateway
             const response = await fetch("http://localhost:8085/api/v1/slices/draft", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -857,21 +876,26 @@ export default function App() {
                 <div style={{ padding: "0 20px", height: 54, borderBottom: `1px solid ${T.border}`, background: T.surface, display: "flex", alignItems: "center", gap: 12, flexShrink: 0, boxShadow: "0 2px 8px rgba(20,50,22,0.05)" }}>
                     {activeSlice ? (
                         <>
-                            <button onClick={() => setActiveId(null)} style={btnBase({ padding: "5px 12px", fontSize: 11, boxShadow: "none" })}>? Back</button>
+                            <button onClick={() => setActiveId(null)} style={btnBase({ padding: "5px 12px", fontSize: 11, boxShadow: "none" })}>⬅ Back</button>
                             <div style={{ width: 1, height: 22, background: T.border }} />
                             <span style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{activeSlice.name}</span>
                             <Badge status={activeSlice.status} />
                             <div style={{ flex: 1 }} />
+
                             {activeSlice.status === "DRAFT" && (
                                 <button onClick={() => deployDraft(activeSlice.id)}
                                     style={btnBase({ fontSize: 12, padding: "6px 16px", background: T.accent, color: "#fff", border: "none", boxShadow: `0 3px 12px ${T.accent}44` })}>
                                     🚀 Deploy
                                 </button>
                             )}
-                            <button onClick={() => destroySlice(activeSlice.id)}
-                                style={btnBase({ fontSize: 12, padding: "6px 14px", background: T.redLight, color: T.red, border: `1px solid ${T.red}33`, boxShadow: "none" })}>
-                                💥 Destroy
-                            </button>
+
+                            {/* 🔥 FIX: Ocultamos el Destroy de la barra principal si está muerto */}
+                            {activeSlice.status !== "TERMINATED" && (
+                                <button onClick={() => destroySlice(activeSlice.id)}
+                                    style={btnBase({ fontSize: 12, padding: "6px 14px", background: T.redLight, color: T.red, border: `1px solid ${T.red}33`, boxShadow: "none" })}>
+                                    💥 Destroy
+                                </button>
+                            )}
                         </>
                     ) : (
                         <>
