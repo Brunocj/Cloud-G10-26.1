@@ -83,10 +83,15 @@ const Badge = ({ status }) => {
 };
 
 // --- NODE EDITOR --------------------------------------------------------------
-const NodeEditor = ({ node, onSave, onDelete, onClose }) => {
-    const [f, setF] = useState({ ...node });
+const NodeEditor = ({ node, availableImages, sliceStatus, onSave, onDelete, onClose }) => {
+    const validImage = availableImages?.includes(node.image)
+        ? node.image
+        : (availableImages?.[0] || node.image);
+
+    // Inicializamos el estado usando la imagen validada
+    const [f, setF] = useState({ ...node, image: validImage });
+
     const u = (k, v) => setF(p => ({ ...p, [k]: v }));
-    // Si el status existe y no es Draft, bloqueamos la edición
     const isReadOnly = sliceStatus && sliceStatus !== "DRAFT";
     return (
         <div style={{ position: "absolute", right: 12, top: 12, width: 268, zIndex: 300, background: T.surface, borderRadius: 14, border: `1.5px solid ${T.accentMid}55`, boxShadow: T.shadowMd, overflow: "hidden" }}>
@@ -155,7 +160,7 @@ const NodeEditor = ({ node, onSave, onDelete, onClose }) => {
 // elements — instead we track which node was hit via a ref, so both the
 // background and nodes funnel through the same onPointerDown on the SVG.
 //
-const Canvas = ({ nodes, edges, setNodes, setEdges }) => {
+const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlice }) => {
     const svgRef = useRef();
     const [mode, setMode] = useState("select");
 
@@ -268,7 +273,7 @@ const Canvas = ({ nodes, edges, setNodes, setEdges }) => {
 
             {/* Mode bar */}
             <div style={{ padding: "8px 14px", borderBottom: `1px solid ${T.border}`, background: T.surfaceElevated, display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-                {[["select", "? Select & Move"], ["link", "🔗 Link Nodes"]].map(([m, lbl]) => (
+                {[["select", "🖱️ Select & Move"], ["link", "🔗 Link Nodes"]].map(([m, lbl]) => (
                     <button key={m} onClick={() => switchMode(m)}
                         style={btnBase({
                             padding: "5px 13px", fontSize: 11, boxShadow: "none",
@@ -540,7 +545,7 @@ const DeployModal = ({ nodes, edges, onDeploy, onClose }) => {
                     <button onClick={onClose} style={btnBase({ flex: 1 })}>Cancel</button>
                     <button onClick={() => onDeploy(name)} disabled={!name.trim() || nodes.length === 0}
                         style={btnBase({ flex: 2, background: T.accent, color: "#fff", border: "none", opacity: (!name.trim() || nodes.length === 0) ? 0.5 : 1 })}>
-                        ? Deploy Now
+                        🚀 Deploy Now
                     </button>
                 </div>
             </div>
@@ -597,7 +602,7 @@ export default function App() {
     useEffect(() => {
         const fetchSlices = async () => {
             try {
-                const res = await fetch("http://localhost:8005/api/v1/slices");
+                const res = await fetch("http://localhost:8085/api/v1/slices");
                 if (res.ok) {
                     const data = await res.json();
                     setSlices(data);
@@ -608,7 +613,7 @@ export default function App() {
         };
         const fetchImages = async () => {
             try {
-                const res = await fetch("http://localhost:8000/api/v1/slices/utils/images");
+                const res = await fetch("http://localhost:8085/api/v1/slices/utils/images");
                 if (res.ok) {
                     const data = await res.json();
                     setImageList(data.map(img => img.name));
@@ -646,7 +651,7 @@ export default function App() {
             msg: `Are you sure you want to destroy "${sl?.name}"?`,
             onOk: async () => {
                 try {
-                    const res = await fetch(`http://localhost:8000/api/v1/slices/${id}`, { method: "DELETE" });
+                    const res = await fetch(`http://localhost:8085/api/v1/slices/${id}`, { method: "DELETE" });
                     if (!res.ok) throw new Error("Fallo al destruir");
 
                     updateSlice(id, { status: "TERMINATED" }); // O filtrarlo para que desaparezca
@@ -747,7 +752,7 @@ export default function App() {
                 motivo: "Despliegue desde la UI"
             };
 
-            const res = await fetch(`http://localhost:8000/api/v1/slices/${id}/deploy`, {
+            const res = await fetch(`http://localhost:8085/api/v1/slices/${id}/deploy`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(payload)
@@ -856,7 +861,7 @@ export default function App() {
                             )}
                             <button onClick={() => nodes.length > 0 ? setModal("deploy") : flash("Add at least one VM first", "error")}
                                 style={btnBase({ fontSize: 13, fontWeight: 700, padding: "7px 20px", background: T.accent, color: "#fff", border: "none", boxShadow: `0 4px 16px ${T.accent}44` })}>
-                                ? Deploy Slice
+                                🚀 Deploy Slice
                             </button>
                         </>
                     )}
@@ -865,8 +870,8 @@ export default function App() {
                 {/* Canvas */}
                 <div style={{ flex: 1, overflow: "hidden", display: "flex" }}>
                     {activeSlice
-                        ? <Canvas nodes={activeSlice.nodes} edges={activeSlice.edges} setNodes={setSliceNodes} setEdges={setSliceEdges} />
-                        : <Canvas nodes={nodes} edges={edges} setNodes={setNodes} setEdges={setEdges} />
+                        ? <Canvas nodes={activeSlice.nodes} edges={activeSlice.edges} setNodes={setSliceNodes} setEdges={setSliceEdges} imageList={imageList} activeSlice={activeSlice} />
+                        : <Canvas nodes={nodes} edges={edges} setNodes={setNodes} setEdges={setEdges} imageList={imageList} activeSlice={activeSlice} />
                     }
                 </div>
             </div>
