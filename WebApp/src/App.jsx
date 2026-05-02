@@ -21,15 +21,16 @@ const T = {
     shadowMd: "0 4px 16px rgba(20,50,22,0.12), 0 8px 28px rgba(20,50,22,0.07)",
 };
 
-const WORKERS = ["server1", "server2", "server3", "server4"];
-const IMAGES = ["Ubuntu 22.04 LTS", "Ubuntu 20.04 LTS", "Alpine 3.18", "Debian 12", "RouterOS 7.x"];
 
 let _nid = 200;
-const mkNode = (x, y, label) => ({
+// Añade defaultImg como parámetro
+const mkNode = (x, y, label, defaultImg) => ({
     id: `n${_nid++}`, x, y,
     label: label || `VM-${_nid - 200}`,
     vcores: 2, ram: 1024, disk: 20,
-    image: IMAGES[0], worker: WORKERS[0],
+    // 🔥 FIX: Asignamos la imagen por defecto desde el inicio
+    image: defaultImg?.name || "Cirros",
+    image_id: defaultImg?.id || null
 });
 
 const buildLinear = (count, cx, cy) => {
@@ -84,12 +85,15 @@ const Badge = ({ status }) => {
 
 // --- NODE EDITOR --------------------------------------------------------------
 const NodeEditor = ({ node, availableImages, sliceStatus, onSave, onDelete, onClose }) => {
-    const validImage = availableImages?.includes(node.image)
-        ? node.image
-        : (availableImages?.[0] || node.image);
+    const defaultImg = availableImages?.[0];
+    const initialImgId = node.image_id || defaultImg?.id || "";
+    const initialImgName = node.image || defaultImg?.name || "";
 
-    // Inicializamos el estado usando la imagen validada
-    const [f, setF] = useState({ ...node, image: validImage });
+    const [f, setF] = useState({
+        ...node,
+        image_id: initialImgId,
+        image: initialImgName
+    });
 
     const u = (k, v) => setF(p => ({ ...p, [k]: v }));
     const isReadOnly = sliceStatus && sliceStatus !== "DRAFT";
@@ -107,8 +111,20 @@ const NodeEditor = ({ node, availableImages, sliceStatus, onSave, onDelete, onCl
 
                 <div>
                     <Lbl>OS Image</Lbl>
-                    <select value={f.image} disabled={isReadOnly} onChange={e => u("image", e.target.value)} style={inp}>
-                        {availableImages?.map(i => <option key={i}>{i}</option>)}
+                    <select
+                        value={f.image_id || ""}
+                        disabled={isReadOnly}
+                        onChange={e => {
+                            const selectedId = Number(e.target.value);
+                            const selectedName = availableImages.find(i => i.id === selectedId)?.name;
+                            // Guardamos el ID para la BD, y el Name para que el Canvas lo dibuje
+                            u("image_id", selectedId);
+                            u("image", selectedName);
+                        }}
+                        style={inp}
+                    >
+                        <option value="" disabled>Select an OS...</option>
+                        {availableImages?.map(i => <option key={i.id} value={i.id}>{i.name}</option>)}
                     </select>
                 </div>
 
@@ -488,7 +504,7 @@ const SliceCard = ({ slice, active, onClick, onDestroy, onDeploy }) => (
         {slice.status === "Draft" && (
             <button onClick={e => { e.stopPropagation(); onDeploy(slice.id); }}
                 style={{ ...btnBase({ width: "100%", marginTop: 10, background: T.accent, color: "#fff", border: "none", padding: "7px 0", fontSize: 12 }) }}>
-                ? Request Deployment
+                🚀 Request Deployment
             </button>
         )}
     </div>
@@ -616,7 +632,7 @@ export default function App() {
                 const res = await fetch("http://localhost:8085/api/v1/slices/utils/images");
                 if (res.ok) {
                     const data = await res.json();
-                    setImageList(data.map(img => img.name));
+                    setImageList(data); // <-- Guardamos los objetos enteros [{id: 1, name: "Cirros"}]
                 }
             } catch (error) {
                 console.error("Error cargando imágenes:", error);
@@ -654,14 +670,23 @@ export default function App() {
                     const res = await fetch(`http://localhost:8085/api/v1/slices/${id}`, { method: "DELETE" });
                     if (!res.ok) throw new Error("Fallo al destruir");
 
-                    updateSlice(id, { status: "TERMINATED" }); // O filtrarlo para que desaparezca
-                    if (activeId === id) setActiveId(null);
+                    const data = await res.json();
+
+                    if (data.status === "DELETED") {
+                        // Era un draft, se borró de la BD. Lo quitamos de la lista.
+                        setSlices(prev => prev.filter(s => s.id !== id));
+                        if (activeId === id) setActiveId(null);
+                    } else {
+                        // Era físico, NATS lo está matando. Lo pasamos a TERMINATED.
+                        updateSlice(id, { status: "TERMINATED" });
+                    }
+
                     setModal(null);
-                    flash("Orden de destrucción enviada", "success");
+                    flash(data.message);
                 } catch (e) {
                     flash("Error al eliminar", "error");
                 }
-            },
+            }
         });
     };
 
@@ -837,10 +862,10 @@ export default function App() {
                             <span style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{activeSlice.name}</span>
                             <Badge status={activeSlice.status} />
                             <div style={{ flex: 1 }} />
-                            {activeSlice.status === "Draft" && (
+                            {activeSlice.status === "DRAFT" && (
                                 <button onClick={() => deployDraft(activeSlice.id)}
                                     style={btnBase({ fontSize: 12, padding: "6px 16px", background: T.accent, color: "#fff", border: "none", boxShadow: `0 3px 12px ${T.accent}44` })}>
-                                    ? Deploy
+                                    🚀 Deploy
                                 </button>
                             )}
                             <button onClick={() => destroySlice(activeSlice.id)}
