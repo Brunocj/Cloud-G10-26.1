@@ -9,11 +9,14 @@ logger = logging.getLogger("SliceManager.Telemetry")
 PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://10.0.10.1:9090")
 
 # Este es tu inventario de servidores físicos (ajusta las IPs a tu laboratorio)
+# app/telemetry.py
+
+# 🔥 FIX: Cambiamos "server-1" por simplemente el ID entero 1
 WORKERS_CONFIG = [
-    {"worker_id": "server-1", "instance": "localhost:9100"},
-    {"worker_id": "server-2", "instance": "10.0.10.2:9100"},
-    {"worker_id": "server-3", "instance": "10.0.10.3:9100"},
-    {"worker_id": "server-4", "instance": "10.0.10.4:9100"}
+    {"worker_id": 1, "instance": "localhost:9100"},
+    {"worker_id": 2, "instance": "10.0.10.2:9100"},
+    {"worker_id": 3, "instance": "10.0.10.3:9100"},
+    {"worker_id": 4, "instance": "10.0.10.4:9100"}
 ]
 
 async def get_real_worker_metrics():

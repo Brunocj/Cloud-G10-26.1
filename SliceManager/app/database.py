@@ -2,26 +2,17 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 import os
 
-# Configuración de la URL de conexión. 
-# En desarrollo usaremos variables de entorno o valores por defecto.
-# Formato: mysql+pymysql://usuario:password@host:puerto/nombre_bd
-#DB_USER = os.getenv("DB_USER", "root")
-#DB_PASSWORD = os.getenv("DB_PASSWORD", "tu_password_aqui")
-#DB_HOST = os.getenv("DB_HOST", "localhost")
-#DB_NAME = os.getenv("DB_NAME", "pucp_cloud_db")
+# Leemos las variables de entorno que inyecta docker-compose
+# Si por algún motivo lo corres por fuera, usará los valores por defecto
+DB_USER = os.getenv("DB_USER", "root")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "root")
+DB_HOST = os.getenv("DB_HOST", "mysql-db") # <-- ¡El nombre del contenedor MySQL!
+DB_NAME = os.getenv("DB_NAME", "cloud")
 
-#SQLALCHEMY_DATABASE_URL = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:3306/{DB_NAME}"
+SQLALCHEMY_DATABASE_URL = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:3306/{DB_NAME}"
 
-
-
-# Creamos el motor de conexión
-#engine = create_engine(SQLALCHEMY_DATABASE_URL, echo=False)
-
-# --- USAMOS SQLITE PARA PRUEBAS LOCALES ---
-SQLALCHEMY_DATABASE_URL = "sqlite:///./test_cloud.db"
-
-# SQLite necesita este argumento extra "check_same_thread" en FastAPI
-engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
+# Creamos el motor de conexión (ya no necesitamos connect_args de sqlite)
+engine = create_engine(SQLALCHEMY_DATABASE_URL, echo=False)
 
 # Creamos la fábrica de sesiones
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

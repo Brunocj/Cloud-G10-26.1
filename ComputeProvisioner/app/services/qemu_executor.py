@@ -42,18 +42,21 @@ class QEMUExecutor:
     # Deploy
     # ------------------------------------------------------------------
 
-    def create_disk(self, vm_id: str, slice_id: str, image_name: str, worker_ip: str) -> str:
+    # 🔥 FIX: Añadimos disk_gb como parámetro
+    def create_disk(self, vm_id: str, slice_id: str, image_path: str, worker_ip: str, disk_gb: float) -> str:
         """
-        Crea un disco QCOW2 con thin provisioning (backing file).
-        Returns: ruta absoluta del disco creado en el worker.
+        Crea un disco QCOW2 con thin provisioning (backing file) y tamaño específico.
         """
-        image_path = get_image_path(image_name, worker_ip)
-        disk_path  = get_vm_disk_path(vm_id, slice_id)
+        disk_path = get_vm_disk_path(vm_id, slice_id)
+        
+        # Convertimos GB a la sintaxis que entiende qemu-img (ej: 10G)
+        size_arg = f"{int(disk_gb)}G"
 
+        # 🔥 FIX: Añadimos el tamaño al final del comando
         self._exec_checked(
-            f"sudo qemu-img create -f qcow2 -b {image_path} -F qcow2 {disk_path}"
+            f"sudo qemu-img create -f qcow2 -b {image_path} -F qcow2 {disk_path} {size_arg}"
         )
-        logger.info("Disco creado: %s", disk_path)
+        logger.info("Disco creado: %s usando imagen %s con tamaño %s", disk_path, image_path, size_arg)
         return disk_path
 
     def create_tap_interfaces(self, tap_interfaces: List[TapInterface]) -> None:

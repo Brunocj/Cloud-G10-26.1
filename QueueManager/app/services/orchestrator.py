@@ -185,6 +185,8 @@ class Orchestrator:
         payload = {
             "slice_id":   request.slice_id,
             "request_id": request.request_id,
+            # 🔥 FIX: Empaquetamos la lista de VMs para que el compute sepa qué borrar
+            "vms":        [vm.model_dump() for vm in request.vms], 
         }
         logger.debug(f"[slice={request.slice_id}] Enviando a {settings.SUBJECT_COMPUTE_DESTROY}")
         return await nats_manager.request(
@@ -195,7 +197,12 @@ class Orchestrator:
 
     async def _step_network_destroy(self, request: DestroySliceRequest) -> Optional[dict]:
         """Llama al Network Orchestrator para borrar puertos OVS y VLANs"""
-        payload = {"slice_id": request.slice_id, "request_id": request.request_id}
+        payload = {
+            "slice_id":   request.slice_id, 
+            "request_id": request.request_id,
+            # 🔥 FIX: Empaquetamos la lista de links para que OVS sepa qué TAPs desconectar
+            "links":      [link.model_dump() for link in request.links], 
+        }
         return await nats_manager.request(settings.SUBJECT_NETWORK_DESTROY, payload, timeout=settings.NETWORK_TIMEOUT)
 
     # ── Notificación al Slice Manager ─────────────────────────────────────────

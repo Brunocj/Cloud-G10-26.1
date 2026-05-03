@@ -1,7 +1,7 @@
-# app/models.py
-from sqlalchemy import Column, Float, ForeignKey, Integer, String
-from sqlalchemy.dialects.mysql import TINYINT
+# coding: utf-8
+from sqlalchemy import Column, Float, ForeignKey, Integer, JSON, String
 from sqlalchemy.orm import relationship
+from sqlalchemy.dialects.mysql import TINYINT
 from sqlalchemy.ext.declarative import declarative_base
 
 Base = declarative_base()
@@ -20,16 +20,6 @@ class Career(Base):
 
     id = Column(Integer, primary_key=True)
     name = Column(String(100), unique=True)
-
-
-class Image(Base):
-    __tablename__ = 'images'
-
-    id = Column(Integer, primary_key=True)
-    name = Column(String(45))
-    date_uploaded = Column(String(100))
-    is_general = Column(TINYINT)
-    img_path = Column(String(150))
 
 
 class Project(Base):
@@ -80,8 +70,21 @@ class Worker(Base):
     availability_zones = relationship('AvailabilityZone')
 
 
-class Topology(Base):
-    __tablename__ = 'topologies'
+class Image(Base):
+    __tablename__ = 'images'
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(ForeignKey('users.id'), index=True)
+    name = Column(String(45))
+    date_uploaded = Column(String(100))
+    is_general = Column(TINYINT)
+    path = Column(String(150))
+
+    user = relationship('User')
+
+
+class Slice(Base):
+    __tablename__ = 'slices'
 
     id = Column(Integer, primary_key=True)
     status = Column(String(45))
@@ -92,6 +95,7 @@ class Topology(Base):
     date_deployed = Column(String(45))
     project_id = Column(ForeignKey('projects.id'), index=True)
     creator_id = Column(ForeignKey('users.id'), index=True)
+    slice_json = Column(JSON)
 
     availability_zone = relationship('AvailabilityZone')
     creator = relationship('User')
@@ -112,6 +116,16 @@ class UserProject(Base):
     user = relationship('User')
 
 
+class Vlan(Base):
+    __tablename__ = 'vlans'
+
+    id = Column(Integer, primary_key=True)
+    slice_id = Column(ForeignKey('slices.id'), index=True)
+    type = Column(String(45))
+
+    slice = relationship('Slice')
+
+
 class Vm(Base):
     __tablename__ = 'vms'
 
@@ -120,9 +134,12 @@ class Vm(Base):
     vcore = Column(String(45))
     ram = Column(String(45))
     state = Column(String(45))
-    date_uploaded = Column(String(100))
-    topologies_id = Column(ForeignKey('topologies.id'), index=True)
+    external_ip = Column(String(45))
+    slice_id = Column(ForeignKey('slices.id'), index=True)
     image_id = Column(ForeignKey('images.id'), index=True)
+    vnc_port = Column(Integer)
+    worker_id = Column(ForeignKey('workers.id'), index=True)
 
     image = relationship('Image')
-    topologies = relationship('Topology')
+    slice = relationship('Slice')
+    worker = relationship('Worker')

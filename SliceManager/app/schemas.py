@@ -10,4 +10,4 @@ class DeployRequest(BaseModel):
 # Lo que el Frontend nos envía al guardar un borrador (REQ-US-07)
 class DraftSaveRequest(BaseModel):
     name: str
-    topology_json: Dict[str, Any] # El JSON libre que viene del lienzo
+    slice_json: Dict[str, Any] # El JSON libre que viene del lienzo

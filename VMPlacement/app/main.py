@@ -9,7 +9,7 @@ Endpoints:
 import logging
 from fastapi import FastAPI
 from app.models import PlacementRequest, PlacementResponse
-from app.placement_engine import run_placement
+from app.placement_engine_temp import run_placement_temp
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,11 +31,5 @@ def health():
 
 @app.post("/placement", response_model=PlacementResponse, tags=["placement"])
 def placement(request: PlacementRequest) -> PlacementResponse:
-    """
-    Calcula la asignación VM→Worker usando Round Robin.
-
-    - Recibe la lista de VMs con sus requerimientos y la lista de workers
-      con su capacidad disponible (ya filtrados por availability_zone).
-    - Retorna el mapa de asignación o el motivo de fallo.
-    """
-    return run_placement(request)
+    # 🔥 Usamos la función temporal
+    return run_placement_temp(request)

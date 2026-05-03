@@ -43,8 +43,11 @@ class VMSpec(BaseModel):
     ssh_user:        str                = Field(..., description="Usuario SSH del worker")
     ssh_private_key: str                = Field(..., description="Llave privada PEM como string")
     vcpus:           int                = Field(..., ge=1)
-    ram_mb:          int                = Field(..., ge=128)
-    image_name:      str                = Field(..., description="Nombre de la imagen base")
+    ram_mb:          float              = Field(..., ge=128) # 🔥 Cambiado a float
+    disk_gb:         float              = Field(...)         # 🔥 Nuevo: Tamaño del disco
+    image_path:      str                = Field(...)         # 🔥 Nuevo: Ruta exacta de la imagen (reemplaza image_name)
+    vnc_port:        int                = Field(...)         # 🔥 Nuevo: Puerto VNC
+    vnc_display:     int                = Field(...)         # 🔥 Nuevo: Display VNC
     tap_interfaces:  List[TapInterface] = Field(default_factory=list,
                                                 description="Interfaces TAP con MACs asignadas por el Slice Manager")
     priority:        Optional[int]      = Field(default=0, ge=0, le=39)
@@ -98,6 +101,10 @@ class DestroySliceRequest(BaseModel):
     """
     slice_id:   str = Field(...)
     request_id: str = Field(...)
+    
+    # 🔥 NUEVO: Recibimos la "receta" exacta para reenviarla a los workers y garantizar una limpieza perfecta
+    vms:        List[VMSpec]      = Field(default_factory=list)
+    links:      List[NetworkLink] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

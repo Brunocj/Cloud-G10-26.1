@@ -76,11 +76,24 @@ async def handle_destroy(msg: Msg) -> None:
 
         request = DestroyRequest(**payload)
 
-        vm_records = await queue_client.get_slice_vms(request.slice_id) or []
-        logger.info(f"[destroy] VMs en KV: {len(vm_records)}")
+        # 1. Intentamos sacar las VMs del payload directamente (La hoja de ruta del SliceManager)
+        vms_to_destroy = payload.get("vms", [])
+        
+        # 2. Si el payload viene vacío (por retrocompatibilidad), buscamos en KV
+        if not vms_to_destroy:
+            vm_records = await queue_client.get_slice_vms(request.slice_id) or []
+            logger.info(f"[destroy] VMs en KV (Fallback): {len(vm_records)}")
+            vms_to_destroy = vm_records
+        else:
+            logger.info(f"[destroy] VMs leídas desde el request JSON: {len(vms_to_destroy)}")
+
+        # 3. Validamos si hay algo que borrar
+        if not vms_to_destroy:
+             logger.warning("No hay VMs especificadas en el request ni en KV para borrar.")
+             # Continuamos para que el provisioner responda SUCCESS y no tranque el pipeline
 
         response = await asyncio.get_running_loop().run_in_executor(
-            None, _provisioner.destroy, request, vm_records
+            None, _provisioner.destroy, request, vms_to_destroy # Pasamos nuestra lista curada
         )
         logger.info(f"[destroy] Provisioner terminó: status={response.status}")
 

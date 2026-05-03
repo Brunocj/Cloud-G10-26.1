@@ -31,7 +31,9 @@ class VMSpec(BaseModel):
     ssh_private_key: str                 = Field(..., description="Llave privada PEM como string")
     vcpus:           int                 = Field(..., ge=1)
     ram_mb:          int                 = Field(..., ge=128)
-    image_name:      str                 = Field(..., description="Nombre de la imagen base")
+    disk_gb: float
+    image_path: str # 🔥 Ahora recibimos la ruta completa, no solo el nombre
+    vnc_port: int
     tap_interfaces:  List[TapInterface]  = Field(default_factory=list,
                                                   description="Interfaces TAP a crear (orden = índice de NIC en QEMU)")
     priority:        Optional[int]       = Field(default=0, ge=0, le=39)

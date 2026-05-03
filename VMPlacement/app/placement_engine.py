@@ -1,15 +1,10 @@
 """
-Motor de placement: algoritmo Round Robin.
+Motor de placement: algoritmo Round Robin GLOBAL.
 
-Lógica:
-  1. Itera las VMs en el orden en que llegan.
-  2. Para cada VM, busca circularmente desde rr_index el primer worker
-     con vcpus, ram y disco suficientes.
-  3. Al asignar, descuenta los recursos comprometidos del worker
-     para que las siguientes VMs vean la capacidad real restante.
-  4. Si ningún worker puede alojar una VM → fallo total (sin placement parcial).
-
-Stateless entre llamadas: cada PlacementRequest trae el estado completo.
+Lógica modificada para entrega parcial:
+  - Mantiene memoria (variable global) del último worker usado entre diferentes 
+    peticiones HTTP.
+  - Sigue verificando recursos (vcpus, ram, disco).
 """
 
 import logging
@@ -23,6 +18,9 @@ from app.models import (
 
 logger = logging.getLogger(__name__)
 
+# 🔥 LA MAGIA ESTÁ AQUÍ: Variable global en memoria
+# Al estar fuera de las funciones, su valor sobrevive entre distintas peticiones POST
+GLOBAL_RR_INDEX = 0
 
 def _find_worker(
     vm: VMRequest,
@@ -32,7 +30,6 @@ def _find_worker(
     """
     Recorre circularmente desde `start` buscando el primer worker
     con recursos suficientes para `vm`.
-    Retorna (índice, worker) o (None, None).
     """
     n = len(workers)
     for offset in range(n):
@@ -46,6 +43,8 @@ def _find_worker(
 
 
 def run_placement(request: PlacementRequest) -> PlacementResponse:
+    global GLOBAL_RR_INDEX  # Declaramos que vamos a usar y modificar la variable global
+
     if not request.workers:
         return PlacementResponse(
             slice_id=request.slice_id,
@@ -56,7 +55,9 @@ def run_placement(request: PlacementRequest) -> PlacementResponse:
 
     workers = [w.model_copy() for w in request.workers]
     assignments: List[VMAssignment] = []
-    rr_index = 0
+    
+    # 🔥 En lugar de empezar en 0, empezamos donde se quedó la última petición
+    rr_index = GLOBAL_RR_INDEX
 
     for vm in request.vms:
         idx, chosen = _find_worker(vm, workers, rr_index)
@@ -80,7 +81,12 @@ def run_placement(request: PlacementRequest) -> PlacementResponse:
 
         assignments.append(VMAssignment(vm_id=vm.vm_id, worker_id=chosen.worker_id))
         logger.info(f"[{request.slice_id}] {vm.vm_id} → {chosen.worker_id}")
+        
+        # Avanzamos el índice para la SIGUIENTE VM
         rr_index = (idx + 1) % len(workers)
+
+    # 🔥 GUARDAMOS EL ÍNDICE para el siguiente Slice/Request que llegue en el futuro
+    GLOBAL_RR_INDEX = rr_index
 
     return PlacementResponse(
         slice_id=request.slice_id,

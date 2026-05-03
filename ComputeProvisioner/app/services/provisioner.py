@@ -36,7 +36,7 @@ class Provisioner:
     """Orquesta el ciclo de vida completo de las VMs."""
 
     def __init__(self):
-        self._vnc = VNCPortManager()
+        pass
 
     # ------------------------------------------------------------------
     # Deploy
@@ -72,34 +72,40 @@ class Provisioner:
         )
 
     def _deploy_vm_sync(self, vm: VMSpec, slice_id: str) -> VMResult:
-        vnc_port: Optional[int] = None
+        # 🔥 Leemos el puerto y calculamos el display aquí mismo
+        vnc_port = vm.vnc_port
+        vnc_display = vnc_port - 5900
 
         for attempt in range(1, settings.SSH_MAX_RETRIES + 1):
             try:
                 with SSHClient(vm.worker_ip, vm.ssh_user, vm.ssh_private_key) as ssh:
                     executor = QEMUExecutor(ssh)
 
-                    # 1. Puerto VNC
-                    vnc_port    = self._vnc.assign_port(vm.worker_ip, vm.ssh_user, vm.ssh_private_key)
-                    vnc_display = vnc_port - 5900
+                    # 1. Disco
+                    # 🔥 FIX: Le pasamos vm.disk_gb a la función
+                    disk_path = executor.create_disk(vm.vm_id, slice_id, vm.image_path, vm.worker_ip, vm.disk_gb)
 
-                    # 2. Disco
-                    disk_path = executor.create_disk(vm.vm_id, slice_id, vm.image_name, vm.worker_ip)
-
-                    # 3. TAP interfaces (si las hay)
+                    # 2. TAP interfaces
                     if vm.tap_interfaces:
                         executor.create_tap_interfaces(vm.tap_interfaces)
 
-                    # 4. Lanzar QEMU
+                    # 3. Lanzar QEMU con el display inyectado
                     pid = executor.launch_vm(
                         vm_id=vm.vm_id,
                         slice_id=slice_id,
                         disk_path=disk_path,
                         vcpus=vm.vcpus,
                         ram_mb=vm.ram_mb,
-                        vnc_display=vnc_display,
+                        vnc_display=vnc_display, # 🔥 Usamos la variable local
                         tap_interfaces=vm.tap_interfaces,
-                        priority=vm.priority or 0,
+                        priority=vm.priority,
+                    )
+
+                    return VMResult(
+                        vm_id=vm.vm_id,
+                        worker_ip=vm.worker_ip,
+                        pid=pid,
+                        vnc_port=vnc_port, # 🔥 Devolvemos el mismo puerto
                     )
 
                     return VMResult(
@@ -115,8 +121,7 @@ class Provisioner:
                     vm.vm_id, attempt, settings.SSH_MAX_RETRIES, exc,
                 )
                 if attempt == settings.SSH_MAX_RETRIES:
-                    if vnc_port:
-                        self._vnc.release_port(vm.worker_ip, vnc_port)
+                    # 🔥 FIX: Eliminamos el if vnc_port: self._vnc.release_port(...)
                     return VMResult(
                         vm_id=vm.vm_id,
                         worker_ip=vm.worker_ip,

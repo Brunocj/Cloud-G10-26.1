@@ -2,6 +2,7 @@ import logging
 from contextlib import asynccontextmanager
 
 import httpx
+from fastapi.middleware.cors import CORSMiddleware # <-- 1. Importa esto
 from fastapi import FastAPI
 
 from app.config import settings
@@ -30,6 +31,14 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# --- 2. AGREGA ESTE BLOQUE CORS ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"], # El puerto de tu React con Vite
+    allow_credentials=True,
+    allow_methods=["*"], # Permite GET, POST, PUT, DELETE, etc.
+    allow_headers=["*"],
+)
 # ──────────────────────────────────────────────────────────────────
 # Routers
 # ──────────────────────────────────────────────────────────────────

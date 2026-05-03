@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 import asyncio
 
 from app.database import engine, Base
-from app.routers import topology_router, deploy_router
+from app.routers import slice_router, deploy_router
 from app.nats_producer import nats_producer
 from app.services.placement_worker import process_placement_worker
 from app.services.nats_listener import nats_result_listener
@@ -30,7 +30,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Slice Manager Orchestrator", lifespan=lifespan)
 
 # Montamos nuestras rutas
-app.include_router(topology_router.router)
+app.include_router(slice_router.router)
 app.include_router(deploy_router.router)
 
 @app.get("/")
