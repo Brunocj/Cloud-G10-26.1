@@ -1,7 +1,8 @@
-# vm-placement
+# VM Placement — PUCP Cloud Orchestrator
 
 Microservicio HTTP de asignación de VMs a workers físicos.
-Forma parte del sistema de orquestación de slices — proyecto TEL141-G8.
+Recibe una lista de VMs con requerimientos de recursos y una lista de workers
+con capacidad disponible, y devuelve el mapa `vm_id → worker_id`.
 
 ---
 
@@ -10,25 +11,44 @@ Forma parte del sistema de orquestación de slices — proyecto TEL141-G8.
 ```
 Slice Manager
     │
-    ├─(HTTP POST /placement)──► vm-placement   ← ESTE SERVICIO
+    ├─(HTTP POST /placement)──► VM Placement   ← ESTE SERVICIO
     │                                │
-    │                           Round Robin
+    │                      Round Robin (ver estado actual)
     │                                │
     ◄────────(JSON response)─────────┘
     │
-    └─(continúa flujo hacia Compute Provisioner)
+    └─(continúa: enriquecimiento → NATS → Queue Manager)
 ```
 
-La comunicación es **HTTP síncrona request/reply**. El Slice Manager hace un POST y espera la respuesta antes de continuar. El servicio es stateless y maneja múltiples requests concurrentes sin problema (FastAPI + uvicorn async).
+La comunicación es **HTTP síncrona request/reply**. El Slice Manager hace un POST
+y espera la respuesta antes de continuar con el enriquecimiento del contrato.
 
 ---
 
-## Responsabilidad única
+## Estado actual del algoritmo
 
-> Dado un conjunto de VMs con requerimientos de recursos y un conjunto de workers
-> con capacidad disponible, decidir en qué worker físico se despliega cada VM.
+El servicio tiene dos engines implementados:
 
-**No hace:** instanciar VMs, gestionar redes, validar topologías, autenticar.
+| Archivo | Algoritmo | Estado |
+|---------|-----------|--------|
+| `placement_engine_temp.py` | **Round Robin puro** — asigna circularmente sin verificar recursos | ✅ **Activo** |
+| `placement_engine.py` | Round Robin con verificación de CPU/RAM/disco | 🔜 Preparado, pendiente de activar |
+
+El engine activo es `placement_engine_temp.py`. Ambos mantienen el índice Round Robin
+en una variable global en memoria (`LAST_WORKER_INDEX` / `GLOBAL_RR_INDEX`), lo que
+hace que el estado **persista entre distintas peticiones** dentro de la misma ejecución
+del contenedor.
+
+Para activar el engine con verificación de recursos, cambiar en `main.py`:
+```python
+# Antes (activo):
+from app.placement_engine_temp import run_placement_temp
+return run_placement_temp(request)
+
+# Después:
+from app.placement_engine import run_placement
+return run_placement(request)
+```
 
 ---
 
@@ -36,43 +56,37 @@ La comunicación es **HTTP síncrona request/reply**. El Slice Manager hace un P
 
 ### `POST /placement`
 
-Calcula la asignación VM→Worker usando Round Robin.
+Calcula la asignación VM→Worker y devuelve el mapa completo.
 
 **Request body:**
 ```json
 {
-  "slice_id": "abc-123",
-  "availability_zone": "zona-a",
+  "slice_id": "42",
+  "availability_zone": "Linux Cluster",
   "vms": [
-    { "vm_id": "vm-1", "vcpus": 1, "ram_mb": 512, "disk_gb": 3 },
-    { "vm_id": "vm-2", "vcpus": 1, "ram_mb": 512, "disk_gb": 2 },
-    { "vm_id": "vm-3", "vcpus": 1, "ram_mb": 512, "disk_gb": 3 },
-    { "vm_id": "vm-4", "vcpus": 1, "ram_mb": 512, "disk_gb": 2 },
-    { "vm_id": "vm-5", "vcpus": 1, "ram_mb": 512, "disk_gb": 3 },
-    { "vm_id": "vm-6", "vcpus": 1, "ram_mb": 512, "disk_gb": 3 }
+    { "vm_id": "n214", "vcpus": 1, "ram_mb": 512.0, "disk_gb": 10.0 },
+    { "vm_id": "n215", "vcpus": 2, "ram_mb": 1024.0, "disk_gb": 20.0 }
   ],
   "workers": [
-    { "worker_id": "worker-1", "available_vcpus": 10, "available_ram_mb": 16000, "available_disk_gb": 500 },
-    { "worker_id": "worker-2", "available_vcpus": 10, "available_ram_mb": 16000, "available_disk_gb": 500 },
-    { "worker_id": "worker-3", "available_vcpus": 10, "available_ram_mb": 16000, "available_disk_gb": 500 }
+    { "worker_id": 1, "available_vcpus": 10, "available_ram_mb": 16000.0, "available_disk_gb": 500.0 },
+    { "worker_id": 2, "available_vcpus": 10, "available_ram_mb": 16000.0, "available_disk_gb": 500.0 },
+    { "worker_id": 3, "available_vcpus": 10, "available_ram_mb": 16000.0, "available_disk_gb": 500.0 },
+    { "worker_id": 4, "available_vcpus": 10, "available_ram_mb": 16000.0, "available_disk_gb": 500.0 }
   ]
 }
 ```
 
-**Nota:** Los workers deben llegar ya filtrados por `availability_zone` — esa es responsabilidad del Slice Manager.
+> `worker_id` es un entero (`int`), no un string. El Slice Manager envía
+> los workers con IDs enteros (1, 2, 3, 4) y espera recibirlos de la misma forma.
 
 **Response — éxito (HTTP 200):**
 ```json
 {
-  "slice_id": "abc-123",
+  "slice_id": "42",
   "status": "SUCCESS",
   "placement_map": [
-    { "vm_id": "vm-1", "worker_id": "worker-1" },
-    { "vm_id": "vm-2", "worker_id": "worker-2" },
-    { "vm_id": "vm-3", "worker_id": "worker-3" },
-    { "vm_id": "vm-4", "worker_id": "worker-1" },
-    { "vm_id": "vm-5", "worker_id": "worker-2" },
-    { "vm_id": "vm-6", "worker_id": "worker-3" }
+    { "vm_id": "n214", "worker_id": 1 },
+    { "vm_id": "n215", "worker_id": 2 }
   ],
   "reason": null,
   "detail": null
@@ -82,18 +96,21 @@ Calcula la asignación VM→Worker usando Round Robin.
 **Response — fallo (HTTP 200):**
 ```json
 {
-  "slice_id": "abc-123",
+  "slice_id": "42",
   "status": "FAILED",
   "placement_map": null,
-  "reason": "INSUFFICIENT_RESOURCES",
-  "detail": "No hay worker con recursos suficientes para 'vm-3' (vcpus=1, ram_mb=512, disk_gb=3)."
+  "reason": "NO_WORKERS_AVAILABLE",
+  "detail": "La lista de workers está vacía."
 }
 ```
 
 | `reason` | Cuándo ocurre |
 |---|---|
 | `NO_WORKERS_AVAILABLE` | Lista de workers vacía |
-| `INSUFFICIENT_RESOURCES` | Ningún worker tiene CPU/RAM/disco para alguna VM |
+| `INSUFFICIENT_RESOURCES` | Ningún worker tiene CPU/RAM/disco para alguna VM (solo con engine completo) |
+
+> Con el engine temporal (`placement_engine_temp.py`), nunca se devuelve
+> `INSUFFICIENT_RESOURCES` — el Round Robin puro no verifica recursos.
 
 ---
 
@@ -113,7 +130,64 @@ Con el servicio corriendo: `http://localhost:8080/docs`
 
 ---
 
-## Levantar con Docker Compose
+## Estructura del código
+
+```
+vm-placement/
+├── app/
+│   ├── main.py                    # FastAPI app: endpoints HTTP
+│   ├── models.py                  # Pydantic: PlacementRequest, PlacementResponse
+│   ├── placement_engine_temp.py   # Round Robin puro (activo)
+│   └── placement_engine.py        # Round Robin con verificación de recursos (pendiente)
+├── docker-compose.yml
+├── Dockerfile
+└── requirements.txt
+```
+
+### Flujo interno de un request
+
+```
+POST /placement
+  └─► main.py (endpoint placement)
+        └─► placement_engine_temp.run_placement_temp(request)
+              └─► Round Robin puro sobre workers
+              └─► retorna PlacementResponse
+        └─► FastAPI serializa y responde JSON
+```
+
+---
+
+## Comportamiento del Round Robin
+
+El índice global avanza con cada VM asignada y **persiste entre requests**.
+Esto garantiza distribución equitativa a lo largo del tiempo, no solo dentro de un slice.
+
+Ejemplo con 3 workers y dos requests consecutivos de 3 VMs cada uno:
+
+```
+Request 1 (slice-001): n214→worker1, n215→worker2, n216→worker3
+Request 2 (slice-002): n217→worker1, n218→worker2, n219→worker3
+                             ↑ el índice continuó desde donde quedó
+```
+
+> Si el contenedor se reinicia, el índice vuelve a 0. El comportamiento
+> entre reinicios no está garantizado — es un estado en memoria.
+
+---
+
+## Diferencia entre los dos engines
+
+| Característica | `placement_engine_temp` | `placement_engine` |
+|---|---|---|
+| Algoritmo | Round Robin puro | Round Robin con recursos |
+| Verifica CPU/RAM/disco | ❌ No | ✅ Sí |
+| Puede retornar FAILED por recursos | ❌ No | ✅ Sí |
+| Descuenta recursos al asignar | ❌ No | ✅ Sí (localmente, no persiste) |
+| Estado entre requests | `LAST_WORKER_INDEX` global | `GLOBAL_RR_INDEX` global |
+
+---
+
+## Despliegue con Docker
 
 ```bash
 docker compose up --build
@@ -121,18 +195,13 @@ docker compose up --build
 
 Servicio disponible en `http://localhost:8080`.
 
-## Levantar sin Docker (desarrollo local)
+---
+
+## Desarrollo local (sin Docker)
 
 ```bash
 pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8080
-```
-
-## Correr tests
-
-```bash
-pip install -r requirements.txt
-pytest tests/ -v
 ```
 
 ---
@@ -143,59 +212,31 @@ pytest tests/ -v
 curl -X POST http://localhost:8080/placement \
   -H "Content-Type: application/json" \
   -d '{
-    "slice_id": "slice-001",
-    "availability_zone": "zona-a",
+    "slice_id": "42",
+    "availability_zone": "Linux Cluster",
     "vms": [
-      { "vm_id": "vm-1", "vcpus": 1, "ram_mb": 512, "disk_gb": 3 },
-      { "vm_id": "vm-2", "vcpus": 1, "ram_mb": 512, "disk_gb": 2 },
-      { "vm_id": "vm-3", "vcpus": 1, "ram_mb": 512, "disk_gb": 3 },
-      { "vm_id": "vm-4", "vcpus": 1, "ram_mb": 512, "disk_gb": 2 },
-      { "vm_id": "vm-5", "vcpus": 1, "ram_mb": 512, "disk_gb": 3 },
-      { "vm_id": "vm-6", "vcpus": 1, "ram_mb": 512, "disk_gb": 3 }
+      { "vm_id": "n214", "vcpus": 1, "ram_mb": 512.0, "disk_gb": 10.0 },
+      { "vm_id": "n215", "vcpus": 1, "ram_mb": 512.0, "disk_gb": 10.0 },
+      { "vm_id": "n216", "vcpus": 2, "ram_mb": 1024.0, "disk_gb": 20.0 }
     ],
     "workers": [
-      { "worker_id": "worker-1", "available_vcpus": 10, "available_ram_mb": 16000, "available_disk_gb": 500 },
-      { "worker_id": "worker-2", "available_vcpus": 10, "available_ram_mb": 16000, "available_disk_gb": 500 },
-      { "worker_id": "worker-3", "available_vcpus": 10, "available_ram_mb": 16000, "available_disk_gb": 500 }
+      { "worker_id": 1, "available_vcpus": 10, "available_ram_mb": 16000.0, "available_disk_gb": 500.0 },
+      { "worker_id": 2, "available_vcpus": 10, "available_ram_mb": 16000.0, "available_disk_gb": 500.0 },
+      { "worker_id": 3, "available_vcpus": 10, "available_ram_mb": 16000.0, "available_disk_gb": 500.0 }
     ]
   }'
 ```
 
 ---
 
-## Estructura del código
-
-```
-vm-placement/
-├── app/
-│   ├── __init__.py
-│   ├── main.py              # FastAPI app: define los endpoints HTTP
-│   ├── models.py            # Modelos Pydantic de entrada y salida
-│   └── placement_engine.py  # Algoritmo Round Robin puro (sin I/O, testeable)
-├── tests/
-│   └── test_placement.py    # Tests del engine y del endpoint HTTP
-├── docker-compose.yml
-├── Dockerfile
-├── requirements.txt
-└── README.md
-```
-
-### Flujo interno de un request
-
-```
-POST /placement
-  └─► main.py (endpoint placement)
-        └─► placement_engine.py (run_placement)
-              └─► retorna PlacementResponse
-        └─► FastAPI serializa y responde JSON
-```
-
----
-
 ## Notas para colaboradores
 
-- **`placement_engine.py` es el núcleo.** Para cambiar el algoritmo (Best Fit, First Fit, etc.) solo se modifica este archivo.
-- **Stateless.** Cada request es independiente. No hay base de datos ni estado en memoria entre llamadas.
-- **Sin placement parcial.** Si una VM no cabe, se retorna `FAILED` sin asignar ninguna. El Slice Manager activa el rollback (patrón Saga).
-- **El orden de las VMs importa.** El Slice Manager debe enviarlas en orden `vm-1, vm-2, ..., vm-n` para garantizar la distribución Round Robin esperada.
-- **Los workers llegan pre-filtrados por zona.** El vm-placement no filtra por `availability_zone` — asume que todos los workers recibidos son candidatos válidos.
+- **Los workers llegan pre-filtrados por zona.** El VM Placement no filtra por
+  `availability_zone` — asume que todos los workers recibidos son candidatos válidos.
+  Es responsabilidad del Slice Manager filtrarlos antes de llamar a este servicio.
+- **El `worker_id` es siempre `int`.** Los modelos Pydantic lo declaran como `int`
+  y el Slice Manager lo espera así para hacer lookup en su `server_inventory`.
+- **Sin placement parcial.** Si una VM no puede ser asignada (con el engine completo),
+  se retorna `FAILED` sin asignar ninguna. El Slice Manager activa rollback (patrón Saga).
+- **El orden de las VMs importa.** La distribución Round Robin depende del orden
+  en que el Slice Manager envía las VMs.
