@@ -11,15 +11,14 @@ via SSH+QEMU/KVM, y responde el resultado de vuelta al Queue Manager.
 - Crear discos QCOW2 con thin provisioning (backing file = imagen base) en cada worker.
 - Crear interfaces TAP en el worker y conectarlas al bridge OVS (`br-int`).
 - Lanzar procesos QEMU/KVM con las interfaces TAP y MACs pre-asignadas.
-- Asignar puertos VNC de forma centralizada, garantizando que no haya colisiones.
 - Destruir VMs: matar proceso, limpiar TAPs del OVS y del kernel, eliminar disco.
 - Reintentar ante fallos transitorios.
 - Responder el resultado al Queue Manager via NATS reply.
 
 **No** decide en qué worker va cada VM — eso es responsabilidad del VM Placement.  
 **No** asigna MACs ni nombres de TAP — esos vienen calculados por el Slice Manager y viajan en el mensaje.  
-**No** crea el bridge OVS (`br-int`) — ese bridge ya existe en el worker antes del deploy.  
-**No** asigna el puerto VNC desde el mensaje — lo decide internamente este módulo.
+**No** asigna el puerto VNC ni la ruta de imagen — ambos vienen pre-calculados en el mensaje desde el Slice Manager.  
+**No** crea el bridge OVS (`br-int`) — ese bridge ya existe en el worker antes del deploy.
 
 ---
 
@@ -27,20 +26,21 @@ via SSH+QEMU/KVM, y responde el resultado de vuelta al Queue Manager.
 
 ```
 main.py
- ├── api/health.py              → GET /health (healthcheck HTTP)
+ ├── api/health.py              → GET /health (healthcheck HTTP, puerto 8081)
  ├── core/
  │    ├── config.py             → Variables de entorno (Settings)
- │    └── worker.py             → Loop async: suscribe handlers NATS
+ │    ├── worker.py             → Loop async: suscribe handlers NATS
+ │    └── logging_config.py    → Configuración de logging estructurado
  ├── models/
  │    └── schemas.py            → Contratos de entrada/salida (Pydantic)
  ├── services/
  │    ├── provisioner.py        → Orquestación deploy/destroy (lógica central)
  │    ├── qemu_executor.py      → Comandos QEMU/KVM + TAP/OVS sobre el worker
  │    ├── ssh_client.py         → Wrapper SSH con llave PEM en memoria (Paramiko)
- │    ├── vnc_port_manager.py   → Asignación thread-safe de puertos VNC por worker
+ │    ├── vnc_port_manager.py   → Consulta puertos VNC en uso (solo lectura, no asigna)
  │    └── queue_client.py       → Cliente NATS (subscribe, reply, KV)
  └── utils/
-      └── image_resolver.py    → Resolución de rutas de imágenes (adaptable a BD)
+      └── image_resolver.py    → Cálculo de rutas de disco VM
 ```
 
 ---
@@ -52,20 +52,22 @@ Queue Manager
     │
     │  NATS request → compute.deploy
     │  { slice_id, request_id, vms: [{vm_id, worker_ip, ssh_user,
-    │    ssh_private_key, vcpus, ram_mb, image_name,
+    │    ssh_private_key, vcpus, ram_mb, disk_gb, image_path, vnc_port,
     │    tap_interfaces: [{tap_name, mac}, ...], priority}] }
     ▼
 Compute Provisioner
     │
-    ├─ Asigna puerto VNC por worker (VNCPortManager)
-    ├─ SSH → workerN: qemu-img create -f qcow2 -b base.qcow2 vm-X.qcow2
+    ├─ SSH → workerN: qemu-img create -f qcow2 -b {image_path} {disk}.qcow2 {disk_gb}G
     ├─ SSH → workerN: ip tuntap add dev tap-vmX-N mode tap       (por cada TAP)
     ├─ SSH → workerN: ovs-vsctl add-port br-int tap-vmX-N        (por cada TAP)
     ├─ SSH → workerN: ip link set tap-vmX-N up                   (por cada TAP)
     ├─ SSH → workerN: qemu-system-x86_64 ... -netdev tap,ifname=tap-vmX-N
     │                                         -device virtio-net-pci,mac=XX:XX:XX:XX:XX:XX
+    │                                         -vnc :{vnc_port - 5900}
     │                                         -daemonize
-    └─ SSH → workerN: pgrep -f "name vm-X" → obtener PID
+    └─ SSH → workerN: pgrep -f "name vm-X-slice-Y" → obtener PID
+    │
+    │  Persiste estado en NATS KV (para destroy)
     │
     │  NATS reply → Queue Manager
     │  { slice_id, request_id, status, vms: [{vm_id, worker_ip, pid, vnc_port}] }
@@ -78,10 +80,16 @@ Para destroy, el flujo es análogo usando `compute.destroy`:
 ```
 Compute Provisioner (destroy)
     │
+    ├─ Lee VMs del payload (prioridad) o del KV como fallback
     ├─ SSH → workerN: pkill -f "name vm-X-slice-Y"
     ├─ SSH → workerN: ovs-vsctl del-port br-int tap-vmX-N        (por cada TAP)
     ├─ SSH → workerN: ip tuntap del dev tap-vmX-N mode tap       (por cada TAP)
     └─ SSH → workerN: rm -f /vms/vm-X-slice-Y.qcow2
+    │
+    │  Elimina estado del KV
+    │  NATS reply → Queue Manager
+    ▼
+Queue Manager
 ```
 
 ---
@@ -90,8 +98,9 @@ Compute Provisioner (destroy)
 
 ### Entrada: compute.deploy
 
-El puerto VNC **no viene en el mensaje** — es asignado internamente por este módulo.
-Las MACs y nombres de TAP **vienen pre-calculados por el Slice Manager** y viajan en el mensaje sin modificación.
+El puerto VNC y la ruta de imagen **vienen pre-calculados por el Slice Manager**.
+Las MACs y nombres de TAP también **vienen pre-calculados** — el Compute Provisioner
+los aplica directamente sin modificarlos.
 
 ```json
 {
@@ -105,7 +114,9 @@ Las MACs y nombres de TAP **vienen pre-calculados por el Slice Manager** y viaja
       "ssh_private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----",
       "vcpus": 1,
       "ram_mb": 256,
-      "image_name": "cirros-0.5.1-x86_64-disk.img",
+      "disk_gb": 10,
+      "image_path": "/images/cirros-0.5.1-x86_64-disk.img",
+      "vnc_port": 5901,
       "tap_interfaces": [
         { "tap_name": "tap-vm1-0", "mac": "52:54:00:A3:C7:00" },
         { "tap_name": "tap-vm1-1", "mac": "52:54:00:A3:C7:01" }
@@ -124,9 +135,23 @@ En ese caso QEMU arranca con `-netdev user` (modo NAT, útil para pruebas).
 ```json
 {
   "slice_id": "slice-abc123",
-  "request_id": "req-xyz789"
+  "request_id": "req-xyz789",
+  "vms": [
+    {
+      "vm_id": "vm-1",
+      "worker_ip": "10.0.10.2",
+      "ssh_user": "ubuntu",
+      "ssh_private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----",
+      "tap_interfaces": [
+        { "tap_name": "tap-vm1-0", "mac": "52:54:00:A3:C7:00" }
+      ]
+    }
+  ]
 }
 ```
+
+> Si `vms` viene vacío o ausente, el módulo hace fallback al KV store de NATS
+> para recuperar el estado guardado durante el deploy.
 
 ### Salida: respuesta deploy (éxito)
 
@@ -148,7 +173,7 @@ En ese caso QEMU arranca con `-netdev user` (modo NAT, útil para pruebas).
 |-------|-------------|
 | `success` | Todas las VMs operaron correctamente |
 | `error` | Ninguna VM pudo completar la operación |
-| `partial` | Algunas VMs OK, otras fallaron |
+| `partial` | Algunas VMs OK, otras fallaron (solo en deploy) |
 
 ---
 
@@ -167,13 +192,6 @@ las recibe ya resueltas en `tap_interfaces` y las aplica directamente al comando
   XX:YY     → 2 bytes derivados del hash SHA-256 del slice_id
   ZZ        → índice secuencial global dentro del slice (0–255)
 ```
-
-### Propiedades
-
-- **Sin colisión dentro del slice**: `ZZ` es un índice global que nunca se repite.
-- **Sin colisión entre slices**: `XX:YY` varía por `slice_id` (prob. colisión ~1/65536).
-- **Determinístico**: el mismo `slice_id` genera siempre las mismas MACs.
-- **Sin estado externo**: no requiere Redis ni base de datos para la asignación.
 
 ### Ejemplo
 
@@ -198,27 +216,25 @@ VM (QEMU)
   └─ virtio-net-pci (mac=52:54:00:...)
        └─ tap-vmX-N   ← creada por este módulo
             └─ br-int (OVS)  ← preexistente en el worker
-                 └─ ens4 → OFS (red de transporte)
+                 └─ ens4 → red de transporte
 ```
 
 El bridge OVS es siempre `br-int` en todos los workers (configurable con
-`OVS_BRIDGE` en `.env`). No hay un bridge por VLAN — las VLANs se manejan
-internamente en OVS con tags.
+`OVS_BRIDGE` en `.env`). Las VLANs se manejan internamente en OVS con tags.
 
 ---
 
-## Gestión de puertos VNC
+## Persistencia de estado (NATS KV)
 
-El módulo asigna los puertos VNC internamente a través del `VNCPortManager`, un
-singleton thread-safe que garantiza que nunca se repita un puerto en el mismo worker.
+Después de un deploy exitoso, el módulo guarda el estado de las VMs en NATS KV
+bajo la clave `compute-vms:{slice_id}`. Esto permite al destroy recuperar las
+credenciales SSH y las TAP interfaces aunque el Slice Manager no las reenvíe.
 
-Antes de asignar, consulta al worker qué procesos QEMU están activos para detectar
-puertos realmente en uso. Adicionalmente mantiene un registro en memoria para
-coordinar asignaciones concurrentes dentro del mismo deploy.
+El destroy siempre intenta leer las VMs del payload primero; solo recurre al KV
+si el campo `vms` llega vacío (modo fallback por retrocompatibilidad).
 
-El rango disponible es **5901–5999** (displays VNC 1–99 por worker).
-
-Si todos los reintentos de una VM fallan, su puerto VNC se libera automáticamente.
+El estado en KV se elimina automáticamente tras cada destroy, o expira a las
+**3600 segundos** si no se ejecuta destroy explícito.
 
 ---
 
@@ -291,34 +307,17 @@ docker compose up -d
 
 # 3. Verificar
 curl http://localhost:8081/health
-# → {"status": "ok"}
+# → {"status": "ok", "nats": true}
 
 # 4. Logs
 docker compose logs -f compute-provisioner
 ```
 
+El healthcheck reporta `"status": "degraded"` si la conexión con NATS se pierde,
+y devuelve HTTP 503 en ese caso.
+
 > **Nota:** Si el Queue Manager ya tiene NATS corriendo, apunta `NATS_URL` al
 > mismo NATS compartido y levanta solo el servicio `compute-provisioner`.
-
----
-
-## Tests
-
-```bash
-pip install pytest pytest-mock
-pytest tests/ -v
-```
-
-Los tests usan mocks para SSH, NATS y VNCPortManager — no requieren workers
-reales, broker activo ni OVS instalado.
-
-```
-TestMacAllocator          (8 tests) — generación y unicidad de MACs
-TestBuildNetArgs          (4 tests) — argumentos -netdev/-device para QEMU
-TestQEMUExecutorTap       (4 tests) — creación y destrucción de TAPs
-TestQEMUExecutorDeploy    (3 tests) — disco y lanzamiento de VM
-TestQEMUExecutorDestroy   (3 tests) — kill, delete disk
-```
 
 ---
 
@@ -337,7 +336,10 @@ ps aux | grep "vm-1-slice-abc123"
 
 ## Nota sobre imágenes (evolución futura)
 
-Actualmente las imágenes base se asumen presentes en todos los workers.
-La función `app/utils/image_resolver.py:get_image_path()` es el único punto
-a modificar cuando se migre a distribución dinámica desde una BD.
-El resto del código no cambia.
+Actualmente la ruta de imagen viene pre-calculada en el mensaje (`image_path`),
+calculada por el Slice Manager. La función `app/utils/image_resolver.py:get_image_path()`
+sigue disponible como utilidad, pero el punto de extensión principal para migrar
+a distribución dinámica desde una BD es el Slice Manager, no este módulo.
+
+`get_vm_disk_path()` es el único lugar donde se calcula la ruta del disco thin —
+si se cambia el esquema de nombres, solo se modifica ahí.
