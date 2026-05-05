@@ -2,7 +2,7 @@ import json
 import logging
 import uuid # <-- Añadir para el request_id del destroy
 from app.database import SessionLocal
-from app.models import Slice, Vlan
+from app.models import Slice, Vlan, Vm
 from app.nats_producer import nats_producer
 
 logger = logging.getLogger("SliceManager.Listener")
@@ -24,6 +24,7 @@ async def nats_result_listener():
                     logger.info(f"Ignorando mensaje '{status}' porque el slice ya está en {db_slice.status}.")
                 elif status.lower() == "success":
                     db_slice.status = "ACTIVE"
+                    db.query(Vm).filter(Vm.slice_id == slice_id).update({"state": "ACTIVE"})
                     logger.info(f"✅ Topología {slice_id} desplegada exitosamente (ACTIVE).")
                 else:
                     # 🔥 LÓGICA DE ROLLBACK AUTOMÁTICO

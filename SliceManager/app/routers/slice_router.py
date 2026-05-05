@@ -22,16 +22,26 @@ def list_slices(db: Session = Depends(get_db)):
         nodes = s_json.get("nodes", [])
         edges = s_json.get("edges", [])
         
+        # 🔥 FIX: Extraemos la información física de las VMs desplegadas
+        deployed_vms = s_json.get("deployed_vms", [])
+        
+        # 🔥 FIX: Fusionamos la IP y el VNC Port dentro de los nodos del frontend
+        if deployed_vms:
+            for node in nodes:
+                for d_vm in deployed_vms:
+                    if node.get("id") == d_vm.get("vm_id"):
+                        node["worker_ip"] = d_vm.get("worker_ip")
+                        node["vnc_port"] = d_vm.get("vnc_port")
+        
         result.append({
             "id": t.id,
-            # 🔥 FIX: Usamos el nombre real de la BD. Si por algún error está vacío, usamos un fallback.
             "name": t.name if t.name else f"Slice {t.id}", 
             "status": t.status,
             "nodeCount": len(nodes),
             "edgeCount": len(edges),
             "vcpus": sum(int(n.get("vcores", 0)) for n in nodes),
             "ramLabel": f"{sum(float(n.get('ram', 0)) for n in nodes)} MB",
-            "nodes": nodes, 
+            "nodes": nodes, # Ahora estos nodos SÍ llevan la IP y el puerto
             "edges": edges
         })
     return result

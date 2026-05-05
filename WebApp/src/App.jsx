@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from "react"; // <-- Importa useEffect
-
+import VmConsole from "./VmConsole.jsx"; // 🔥 IMPORTA TU COMPONENTE AQUÍ
 // --- TOKENS ------------------------------------------------------------------
 const T = {
     bg: "#f4f7f1",
@@ -84,7 +84,7 @@ const Badge = ({ status }) => {
 };
 
 // --- NODE EDITOR --------------------------------------------------------------
-const NodeEditor = ({ node, availableImages, sliceStatus, onSave, onDelete, onClose }) => {
+const NodeEditor = ({ node, availableImages, sliceStatus, onSave, onDelete, onClose, onOpenConsole }) => {
     const defaultImg = availableImages?.[0];
     const initialImgId = node.image_id || defaultImg?.id || "";
     const initialImgName = node.image || defaultImg?.name || "";
@@ -148,10 +148,11 @@ const NodeEditor = ({ node, availableImages, sliceStatus, onSave, onDelete, onCl
                     <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
                         {/* REQ-US-11: Botón de Consola Web */}
                         <button
-                            onClick={() => window.open(`http://${node.worker_ip || 'localhost'}:${node.vnc_port || '5900'}`, '_blank')}
+                            // 🔥 FIX: Usamos la prop que recibimos
+                            onClick={() => onOpenConsole({ workerIp: node.worker_ip, vncPort: node.vnc_port })}
                             disabled={sliceStatus !== "ACTIVE"}
                             style={btnBase({ width: "100%", background: T.text, color: "#fff", border: "none", padding: "8px 0", opacity: sliceStatus === "ACTIVE" ? 1 : 0.5 })}>
-                            🖥️ Abrir Consola Web
+                            Abrir Consola Web
                         </button>
                         {/* REQ-US-12: Botón de Telemetría */}
                         <button style={btnBase({ width: "100%", background: T.surface, color: T.accent, border: `1px solid ${T.accent}` })}>
@@ -176,7 +177,7 @@ const NodeEditor = ({ node, availableImages, sliceStatus, onSave, onDelete, onCl
 // elements — instead we track which node was hit via a ref, so both the
 // background and nodes funnel through the same onPointerDown on the SVG.
 //
-const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlice }) => {
+const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlice, onOpenConsole }) => {
     const svgRef = useRef();
     const [mode, setMode] = useState("select");
 
@@ -416,10 +417,11 @@ const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlice }) =>
                 {editingNode && (
                     <NodeEditor node={editingNode}
                         availableImages={imageList}
-                        sliceStatus={activeSlice ? activeSlice.status : "DRAFT"} // <-- Pasamos el estado para saber si bloquear la edición
+                        sliceStatus={activeSlice ? activeSlice.status : "DRAFT"}
                         onSave={updated => setNodes(prev => prev.map(n => n.id === updated.id ? updated : n))}
                         onDelete={id => { setNodes(p => p.filter(n => n.id !== id)); setEdges(p => p.filter(e => e.from !== id && e.to !== id)); }}
                         onClose={() => setEditId(null)}
+                        onOpenConsole={onOpenConsole} // 🔥 FIX: Se la pasamos al NodeEditor
                     />
                 )}
             </div>
@@ -591,6 +593,29 @@ const ConfirmModal = ({ title, msg, onOk, onCancel }) => (
     </Overlay>
 );
 
+const ConsoleModal = ({ workerIp, vncPort, onClose }) => (
+    <Overlay>
+        <div style={{
+            background: T.surface,
+            border: `1px solid ${T.border}`,
+            borderRadius: 16,
+            padding: "20px",
+            boxShadow: T.shadowMd,
+            display: "flex",
+            flexDirection: "column",
+            gap: "10px"
+        }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div style={{ fontSize: 17, fontWeight: 800, color: T.text }}>💻 Consola Interactiva VNC</div>
+                <button onClick={onClose} style={btnBase({ background: T.redLight, color: T.red, padding: "5px 10px" })}>Cerrar</button>
+            </div>
+
+            {/* Aquí inyectamos tu componente VmConsole */}
+            <VmConsole workerIp={workerIp} vncPort={vncPort} />
+        </div>
+    </Overlay>
+);
+
 const Toast = ({ msg, type }) => (
     <div style={{ position: "fixed", bottom: 24, right: 24, zIndex: 9999, background: type === "error" ? T.redLight : T.accentLight, border: `1px solid ${type === "error" ? T.red : T.accent}44`, color: type === "error" ? T.red : T.accent, padding: "10px 18px", borderRadius: 10, fontSize: 13, fontWeight: 600, boxShadow: T.shadowMd }}>
         {type === "error" ? "❌" : "✅"} {msg}
@@ -657,7 +682,7 @@ export default function App() {
     // Modals
     const [modal, setModal] = useState(null); // null | "deploy" | "draft" | { type:"confirm", ... }
     const [toast, setToast] = useState(null);
-
+    const [consoleVm, setConsoleVm] = useState(null);
     const flash = (msg, type = "success") => { setToast({ msg, type }); setTimeout(() => setToast(null), 3000); };
 
     const activeSlice = slices.find(s => s.id === activeId) || null;
@@ -919,8 +944,8 @@ export default function App() {
                 {/* Canvas */}
                 <div style={{ flex: 1, overflow: "hidden", display: "flex" }}>
                     {activeSlice
-                        ? <Canvas nodes={activeSlice.nodes} edges={activeSlice.edges} setNodes={setSliceNodes} setEdges={setSliceEdges} imageList={imageList} activeSlice={activeSlice} />
-                        : <Canvas nodes={nodes} edges={edges} setNodes={setNodes} setEdges={setEdges} imageList={imageList} activeSlice={activeSlice} />
+                        ? <Canvas nodes={activeSlice.nodes} edges={activeSlice.edges} setNodes={setSliceNodes} setEdges={setSliceEdges} imageList={imageList} activeSlice={activeSlice} onOpenConsole={setConsoleVm} />
+                        : <Canvas nodes={nodes} edges={edges} setNodes={setNodes} setEdges={setEdges} imageList={imageList} activeSlice={activeSlice} onOpenConsole={setConsoleVm} />
                     }
                 </div>
             </div>
@@ -929,6 +954,16 @@ export default function App() {
             {modal === "deploy" && <DeployModal nodes={nodes} edges={edges} onDeploy={deployFromDesigner} onClose={() => setModal(null)} />}
             {modal === "draft" && <SaveDraftModal nodes={nodes} edges={edges} onSave={saveDraft} onClose={() => setModal(null)} />}
             {modal?.type === "confirm" && <ConfirmModal title={modal.title} msg={modal.msg} onOk={modal.onOk} onCancel={() => setModal(null)} />}
+
+            {/* 🔥 RENDERIZAMOS LA CONSOLA SI HAY UNA VM SELECCIONADA */}
+            {consoleVm && (
+                <ConsoleModal
+                    workerIp={consoleVm.workerIp}
+                    vncPort={consoleVm.vncPort}
+                    onClose={() => setConsoleVm(null)}
+                />
+            )}
+
             {toast && <Toast {...toast} />}
 
             <style>{`

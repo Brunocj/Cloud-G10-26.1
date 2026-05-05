@@ -96,6 +96,7 @@ class QEMUExecutor:
         name    = f"{vm_id}-{slice_id}"
         net_args = _build_net_args(tap_interfaces)
 
+        # En qemu_executor.py, dentro de launch_vm
         cmd = (
             f"sudo nice -n {priority} "
             f"qemu-system-x86_64 "
@@ -104,7 +105,8 @@ class QEMUExecutor:
             f"-m {ram_mb} "
             f"-smp {vcpus} "
             f"-drive file={disk_path},format=qcow2 "
-            f"-vnc :{vnc_display} "
+            # 🔥 FIX: Agregamos 0.0.0.0 y websocket=on
+            f"-vnc 0.0.0.0:{vnc_display},websocket=on " 
             f"{net_args}"
             f"-daemonize"
         )
