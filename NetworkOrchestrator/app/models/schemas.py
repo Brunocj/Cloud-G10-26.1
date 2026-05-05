@@ -54,7 +54,7 @@ class DestroyNetworkRequest(BaseModel):
     """Payload recibido en network.destroy"""
     slice_id:   str
     request_id: str
-
+    links:      Optional[List[NetworkLink]] = None  # 🔥 FIX AQUÍ
 # ---------------------------------------------------------------------------
 # Modelos de Salida (Respuesta al Queue Manager)
 # ---------------------------------------------------------------------------
