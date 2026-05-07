@@ -122,8 +122,8 @@ class NetworkProvisioner:
                         except Exception as exc:
                             logger.error(f"Fallo al conectar TAP de gestión {mgmt_tap}: {exc}")
 
-                # 🔥 B. Configurar Ruteo, NAT y Gateway en TODOS LOS WORKERS (DVR)
-                if vms_list:
+                # 🔥 B. Configurar Ruteo, NAT y Gateway SOLO en el Nodo Líder
+                if is_gateway_leader and vms_list:
                     executor.configure_gateway_and_nat(ssh, slice_id, vms_list, mgmt_vlan)
 
         except Exception as exc:
@@ -201,12 +201,12 @@ class NetworkProvisioner:
                         except Exception as exc:
                             logger.error(f"Fallo al borrar tap de gestión {mgmt_tap}: {exc}")
                         
-                # 🔥 3. Limpiar Gateway, DHCP y NAT en TODOS LOS WORKERS (DVR)
-                if vms_list:
+                # 3. Limpiar Gateway, DHCP y NAT (Solo si es el líder)
+                if is_gateway_leader and vms_list:
                     try:
                         executor.destroy_gateway(ssh, slice_id, vms_list)
                     except Exception as exc:
-                        logger.error(f"Fallo al borrar Gateway/NAT en worker {worker_ip}: {exc}")
+                        logger.error(f"Fallo al borrar Gateway/NAT en líder {worker_ip}: {exc}")
                         
         except Exception as exc:
             logger.error(f"SSH Fail en worker {worker_ip} durante destroy: {exc}")
