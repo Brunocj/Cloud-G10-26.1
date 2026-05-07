@@ -6,6 +6,8 @@ import logging
 from app.services.ssh_client import SSHClient
 from app.models.schemas import SecurityRule
 
+from app.core.config import settings
+
 logger = logging.getLogger(__name__)
 
 class NetworkExecutor:
@@ -104,9 +106,9 @@ class NetworkExecutor:
             for vm in vms:
                 # REGLA A: Salida a Internet (SNAT)
                 if getattr(vm, 'internet_access', 0) == 1:
-                    cmd_snat = f"sudo iptables -t nat -A POSTROUTING -s {subred_interna}.0/24 -o ens3 -j MASQUERADE"
+                    cmd_snat = f"sudo iptables -t nat -A POSTROUTING -s {subred_interna}.0/24 -o {settings.WAN_INTERFACE} -j MASQUERADE"
                     ssh.exec(cmd_snat)
-                    logger.info(f"[{self.worker_ip}] SNAT (Internet) habilitado para subred {subred_interna}.0/24")
+                    logger.info(f"[{self.worker_ip}] SNAT habilitado en {settings.WAN_INTERFACE} para {subred_interna}.0/24")
 
                 # REGLA B: Visibilidad Externa (DNAT)
                 if getattr(vm, 'external_ip', None) and getattr(vm, 'internal_ip', None):
@@ -120,9 +122,12 @@ class NetworkExecutor:
         except Exception as e:
             logger.error(f"[{self.worker_ip}] Error configurando Gateway/NAT: {e}")
 
-    def destroy_gateway(self, ssh: SSHClient, slice_id: str) -> None:
-        """Limpia la interfaz Gateway y mata el DHCP al destruir el slice."""
+    def destroy_gateway(self, ssh: SSHClient, slice_id: str, vms: list) -> None:
+        """Limpia la interfaz Gateway, mata el DHCP y limpia el Iptables al destruir el slice."""
         gw_name = f"gw_{str(slice_id)[-4:]}"
+        octeto_2 = (int(slice_id) // 256) % 256
+        octeto_3 = int(slice_id) % 256
+        subred_interna = f"10.{octeto_2}.{octeto_3}"
         
         # 1. Matar el proceso DHCP
         ssh.exec(f"sudo kill $(cat /var/run/dnsmasq-{gw_name}.pid) 2>/dev/null || true")
@@ -131,8 +136,18 @@ class NetworkExecutor:
         # 2. Borrar el puerto del switch virtual
         ssh.exec(f"sudo ovs-vsctl --if-exists del-port br-int {gw_name}")
         
-        # (Opcional pero recomendado: Limpiar las reglas de iptables)
-        # Como es un entorno educativo, usualmente se puede dejar que el firewall se limpie con reinicios,
-        # pero en producción aquí haríamos un iptables -D para revertir el PREROUTING y POSTROUTING.
+        # 🔥 3. LIMPIEZA DE IPTABLES (El antídoto contra la basura en el kernel)
+        for vm in vms:
+            # Borrar regla SNAT (Navegación)
+            if getattr(vm, 'internet_access', 0) == 1:
+                cmd_snat_del = f"sudo iptables -t nat -D POSTROUTING -s {subred_interna}.0/24 -o {settings.WAN_INTERFACE} -j MASQUERADE"
+                ssh.exec(f"{cmd_snat_del} || true") # || true ignora el error si la regla ya no existía
+            
+            # Borrar regla DNAT (Acceso Externo)
+            if getattr(vm, 'external_ip', None) and getattr(vm, 'internal_ip', None):
+                ext_ip = vm.external_ip
+                internal_vm_ip = vm.internal_ip 
+                cmd_dnat_del = f"sudo iptables -t nat -D PREROUTING -d {ext_ip} -j DNAT --to-destination {internal_vm_ip}"
+                ssh.exec(f"{cmd_dnat_del} || true")
         
         logger.info(f"[{self.worker_ip}] Gateway {gw_name} y DHCP eliminados.")

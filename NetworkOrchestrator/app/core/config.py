@@ -20,6 +20,8 @@ class Settings(BaseSettings):
 
     HEALTH_PORT: int = 8084 # Usamos el 8084 para no chocar con el 8080 y 8081
 
+    WAN_INTERFACE: str = "ens3"  # Interfaz de salida a Internet en los workers (ajustar según tu entorno)
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 settings = Settings()

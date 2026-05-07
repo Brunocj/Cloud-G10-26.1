@@ -43,7 +43,7 @@ class VMSpec(BaseModel):
 
     tap_interfaces:  List[TapInterface]  = Field(default_factory=list,
                                                   description="Interfaces TAP a crear (orden = índice de NIC en QEMU)")
-    priority:        Optional[int]       = Field(default=0, ge=0, le=39)
+    priority:        Optional[int]       = Field(default=20, ge=0, le=39)
 
 
 class VMResult(BaseModel):

@@ -123,26 +123,45 @@ class NetworkProvisioner:
         return ok_eps, fail_eps
 
 
-    # ── DESTROY (Completamente Real) ─────────────────────────────────────────
+    # ── DESTROY (Completamente Real y sin Zombies) ─────────────────────────────────────────
 
     def destroy(self, request: DestroyNetworkRequest) -> DestroyNetworkResponse:
         logger.info(f"[slice={request.slice_id}] Iniciando destrucción REAL de red...")
 
-        # Si el Slice Manager no nos mandó los 'links', no sabemos a dónde entrar a limpiar.
-        if not hasattr(request, 'links') or not request.links:
-            logger.warning(f"[slice={request.slice_id}] Sin arreglo de 'links' en el JSON. Se delega la limpieza de TAPs a la eliminación de las VMs.")
+        endpoints_by_worker = defaultdict(list)
+        # 1. Agrupamos los enlaces a destruir (si existen)
+        if hasattr(request, 'links') and request.links:
+            for link in request.links:
+                endpoints_by_worker[link.vm1_worker_ip].append({"tap": link.vm1_tap, "user": link.vm1_ssh_user, "key": link.vm1_ssh_private_key})
+                endpoints_by_worker[link.vm2_worker_ip].append({"tap": link.vm2_tap, "user": link.vm2_ssh_user, "key": link.vm2_ssh_private_key})
+
+        vms_by_worker = defaultdict(list)
+        # 2. Agrupamos las VMs (si existen) para saber quién era el Gateway Líder
+        if hasattr(request, 'vms') and request.vms:
+            for vm in request.vms:
+                vms_by_worker[vm.worker_ip].append(vm)
+
+        # Si no hay ni VMs ni Links, no hay nada que hacer en la red
+        if not endpoints_by_worker and not vms_by_worker:
+            logger.warning(f"[slice={request.slice_id}] Sin links ni vms en el JSON. Nada que destruir en red.")
             return DestroyNetworkResponse(slice_id=request.slice_id, request_id=request.request_id, status=ProvisioningStatus.SUCCESS)
 
-        endpoints_by_worker = defaultdict(list)
-        for link in request.links:
-            endpoints_by_worker[link.vm1_worker_ip].append({"tap": link.vm1_tap, "user": link.vm1_ssh_user, "key": link.vm1_ssh_private_key})
-            endpoints_by_worker[link.vm2_worker_ip].append({"tap": link.vm2_tap, "user": link.vm2_ssh_user, "key": link.vm2_ssh_private_key})
+        # 🔥 Calculamos los workers involucrados
+        worker_ips = list(endpoints_by_worker.keys())
+        if not worker_ips and vms_by_worker:
+            worker_ips = list(vms_by_worker.keys())
 
         with ThreadPoolExecutor(max_workers=settings.MAX_CONCURRENT_WORKERS) as pool:
-            futures = {
-                pool.submit(self._destroy_on_worker, worker_ip, endpoints): worker_ip
-                for worker_ip, endpoints in endpoints_by_worker.items()
-            }
+            futures = {}
+            for worker_ip in worker_ips:
+                endpoints = endpoints_by_worker.get(worker_ip, [])
+                vms_list = vms_by_worker.get(worker_ip, [])
+                
+                # 🔥 Identificamos al LÍDER (el mismo algoritmo que en el Deploy)
+                is_gateway_leader = (worker_ip == worker_ips[0])
+
+                futures[pool.submit(self._destroy_on_worker, worker_ip, endpoints, vms_list, request.slice_id, is_gateway_leader)] = worker_ip
+                
             for future in as_completed(futures):
                 try:
                     future.result()
@@ -152,15 +171,27 @@ class NetworkProvisioner:
         logger.info(f"[slice={request.slice_id}] Destrucción física completada.")
         return DestroyNetworkResponse(slice_id=request.slice_id, request_id=request.request_id, status=ProvisioningStatus.SUCCESS)
 
-    def _destroy_on_worker(self, worker_ip: str, endpoints: List[dict]) -> None:
+    def _destroy_on_worker(self, worker_ip: str, endpoints: List[dict], vms_list: list, slice_id: str, is_gateway_leader: bool) -> None:
         executor = NetworkExecutor(worker_ip)
         try:
-            with SSHClient(worker_ip, endpoints[0]["user"], endpoints[0]["key"]) as ssh:
+            # Sacamos credenciales de los endpoints o de las VMs como fallback
+            user = endpoints[0]["user"] if endpoints else vms_list[0].ssh_user
+            key = endpoints[0]["key"] if endpoints else vms_list[0].ssh_private_key
+
+            with SSHClient(worker_ip, user, key) as ssh:
+                # 1. Limpiar los puertos TAPs de Capa 2
                 for ep in endpoints:
                     try:
-                        # Asume que en tu NetworkExecutor existe una función remove_port o equivalente
                         executor.destroy_port(ssh, ep["tap"]) 
                     except Exception as exc:
                         logger.error(f"Fallo al borrar tap {ep['tap']}: {exc}")
+                        
+                # 🔥 2. Limpiar el Gateway, DHCP y NAT (Solo si es el líder)
+                if is_gateway_leader and vms_list:
+                    try:
+                        executor.destroy_gateway(ssh, slice_id, vms_list)
+                    except Exception as exc:
+                        logger.error(f"Fallo al borrar Gateway/NAT en líder {worker_ip}: {exc}")
+                        
         except Exception as exc:
             logger.error(f"SSH Fail en worker {worker_ip} durante destroy: {exc}")

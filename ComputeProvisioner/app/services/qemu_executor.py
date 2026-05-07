@@ -49,8 +49,8 @@ class QEMUExecutor:
         """
         disk_path = get_vm_disk_path(vm_id, slice_id)
         
-        # Convertimos GB a la sintaxis que entiende qemu-img (ej: 10G)
-        size_arg = f"{int(disk_gb)}G"
+        # 🔥 FIX: Convertimos a Megabytes. Si piden 0.5 GB, será 512M. ¡A prueba de fallos!
+        size_arg = f"{int(disk_gb * 1024)}M"
 
         # 🔥 FIX: Añadimos el tamaño al final del comando
         self._exec_checked(
@@ -96,16 +96,19 @@ class QEMUExecutor:
         name    = f"{vm_id}-{slice_id}"
         net_args = _build_net_args(tap_interfaces)
 
+        # 🔥 FIX: Mapeo matemático. Si el frontend manda 0, nice será -20 (máxima prioridad). 
+        # Si manda 39, nice será 19 (mínima prioridad). Linux estará feliz.
+        linux_nice = priority - 20
+
         # En qemu_executor.py, dentro de launch_vm
         cmd = (
-            f"sudo nice -n {priority} "
+            f"sudo nice -n {linux_nice} "
             f"qemu-system-x86_64 "
             f"-enable-kvm "
             f"-name {name} "
             f"-m {ram_mb} "
             f"-smp {vcpus} "
             f"-drive file={disk_path},format=qcow2 "
-            # 🔥 FIX: Agregamos 0.0.0.0 y websocket=on
             f"-vnc 0.0.0.0:{vnc_display},websocket=on " 
             f"{net_args}"
             f"-daemonize"

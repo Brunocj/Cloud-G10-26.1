@@ -108,13 +108,6 @@ class Provisioner:
                         vnc_port=vnc_port, # 🔥 Devolvemos el mismo puerto
                     )
 
-                    return VMResult(
-                        vm_id=vm.vm_id,
-                        worker_ip=vm.worker_ip,
-                        pid=pid,
-                        vnc_port=vnc_port,
-                    )
-
             except Exception as exc:
                 logger.warning(
                     "VM %s intento %d/%d falló: %s",
