@@ -111,10 +111,19 @@ class NetworkProvisioner:
                         logger.error(f"Fallo en tap {ep['tap']}: {exc}")
                         fail_eps.append((ep, str(exc)))
 
+                # 🔥 NUEVO: Enchufar el eth0 (tap de gestión) de todas las VMs al Gateway
+                mgmt_vlan = 1000 + int(slice_id) 
+                for vm in vms_list:
+                    if vm.tap_interfaces:
+                        mgmt_tap = vm.tap_interfaces[0].tap_name
+                        try:
+                            # Conecta el eth0 a la VLAN de gestión
+                            executor.configure_vlan_and_port(ssh, mgmt_tap, mgmt_vlan)
+                        except Exception as exc:
+                            logger.error(f"Fallo al conectar TAP de gestión {mgmt_tap}: {exc}")
+
                 # 🔥 B. Configurar Ruteo, NAT y Gateway SOLO en el Nodo Líder
                 if is_gateway_leader and vms_list:
-                    # En lugar de VLAN 10, usamos una VLAN única para el slice (ej. 1000 + ID del slice)
-                    mgmt_vlan = 1000 + int(slice_id) 
                     executor.configure_gateway_and_nat(ssh, slice_id, vms_list, mgmt_vlan)
 
         except Exception as exc:
@@ -185,6 +194,15 @@ class NetworkProvisioner:
                         executor.destroy_port(ssh, ep["tap"]) 
                     except Exception as exc:
                         logger.error(f"Fallo al borrar tap {ep['tap']}: {exc}")
+                
+                # 🔥 NUEVO: Limpiar los TAPs de Gestión
+                for vm in vms_list:
+                    if vm.tap_interfaces:
+                        mgmt_tap = vm.tap_interfaces[0].tap_name
+                        try:
+                            executor.destroy_port(ssh, mgmt_tap)
+                        except Exception as exc:
+                            logger.error(f"Fallo al borrar tap de gestión {mgmt_tap}: {exc}")
                         
                 # 🔥 2. Limpiar el Gateway, DHCP y NAT (Solo si es el líder)
                 if is_gateway_leader and vms_list:

@@ -118,6 +118,13 @@ async def process_placement_worker():
                 network_links = []
                 vms_payload_data = {vm.name: {"tap_interfaces": []} for vm in vms_de_bd}
 
+                # 🔥 NUEVO: Crear SIEMPRE un TAP de gestión (eth0) para cada VM
+                for vm in vms_de_bd:
+                    tap_mgmt = f"t-{str(slice_id)[-3:]}-{vm.name[:4]}-m" # '-m' de management
+                    mac_mgmt = f"{mac_prefix}:{global_mac_counter:02x}".upper()
+                    global_mac_counter += 1
+                    vms_payload_data[vm.name]["tap_interfaces"].append({"tap_name": tap_mgmt, "mac": mac_mgmt})
+
                 # Generamos los enlaces
                 for edge in edges:
                     vm1_id = edge.get("from", edge.get("source"))
