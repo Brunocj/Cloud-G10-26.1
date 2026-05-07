@@ -59,7 +59,7 @@ class NetworkExecutor:
 
     def configure_gateway_and_nat(self, ssh: SSHClient, slice_id: str, vms: list, mgmt_vlan: int) -> None:
         """
-        Crea el Gateway virtual, levanta DHCP y aplica reglas NAT.
+        Crea el Gateway virtual, levanta DHCP y aplica reglas NAT e IPs Externas.
         """
         # Usamos los últimos 4 caracteres del slice para un nombre corto
         gw_name = f"gw_{str(slice_id)[-4:]}" 
@@ -114,6 +114,9 @@ class NetworkExecutor:
                 if getattr(vm, 'external_ip', None) and getattr(vm, 'internal_ip', None):
                     ext_ip = vm.external_ip
                     internal_vm_ip = vm.internal_ip 
+
+                    # 🔥 TRUCO VITAL: El host físico debe reclamar la IP para que el ruteo la intercepte
+                    ssh.exec(f"sudo ip addr add {ext_ip}/32 dev {settings.WAN_INTERFACE} || true")
                     
                     cmd_dnat = f"sudo iptables -t nat -A PREROUTING -d {ext_ip} -j DNAT --to-destination {internal_vm_ip}"
                     ssh.exec(cmd_dnat)
@@ -149,5 +152,7 @@ class NetworkExecutor:
                 internal_vm_ip = vm.internal_ip 
                 cmd_dnat_del = f"sudo iptables -t nat -D PREROUTING -d {ext_ip} -j DNAT --to-destination {internal_vm_ip}"
                 ssh.exec(f"{cmd_dnat_del} || true")
+                # Liberamos la IP externa del host físico
+                ssh.exec(f"sudo ip addr del {ext_ip}/32 dev {settings.WAN_INTERFACE} || true")
         
         logger.info(f"[{self.worker_ip}] Gateway {gw_name} y DHCP eliminados.")
