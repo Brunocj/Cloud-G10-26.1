@@ -76,6 +76,11 @@ async def process_placement_worker():
                 response.raise_for_status()
                 placement_result = response.json()
 
+            # 🔥🔥🔥 DEBUG: Ver qué devuelve VMPlacement
+            logger.info(f"🔥🔥🔥 [PLACEMENT {slice_id}] Response de VMPlacement status: {placement_result.get('status')}")
+            if placement_result.get('status') != 'SUCCESS':
+                logger.warning(f"🔥🔥🔥 [PLACEMENT {slice_id}] ⚠️ VMPlacement NO fue SUCCESS, respuesta: {json.dumps(placement_result, indent=2)[:1000]}")
+
             # 3. ENRIQUECIMIENTO DEL CONTRATO SI EL PLACEMENT FUE EXITOSO
             if placement_result.get("status") == "SUCCESS":
                 placement_map = placement_result.get("placement_map", [])
