@@ -144,6 +144,9 @@ class NetworkExecutor:
         
         # 2. Borrar el puerto del switch virtual
         ssh.exec(f"sudo ovs-vsctl --if-exists del-port br-int {gw_name}")
+
+        # 🔥 2.5 EL MATA-ZOMBIS DEFINITIVO DE LINUX (PARCHE DVR)
+        ssh.exec(f"sudo ip link delete {gw_name} 2>/dev/null || true")
         
         # 🔥 3. LIMPIEZA DE IPTABLES (El antídoto contra la basura en el kernel)
         for vm in vms:
