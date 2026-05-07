@@ -144,59 +144,76 @@ class NetworkExecutor:
         octeto_3 = int(slice_id) % 256
         subred_interna = f"10.{octeto_2}.{octeto_3}"
 
-        logger.info(f"[{self.worker_ip}] Iniciando destrucción del Gateway: {gw_name}")
+        logger.info(f"🔥🔥🔥 [DESTROY] Iniciando destrucción del Gateway: {gw_name} en {self.worker_ip}")
+        logger.info(f"🔥🔥🔥 [DESTROY] Recibí vms_list con {len(vms)} VMs")
+        for i, vm in enumerate(vms):
+            logger.info(f"🔥🔥🔥 [DESTROY]   VM[{i}]: id={getattr(vm, 'vm_id', '?')}, internal_ip={getattr(vm, 'internal_ip', '?')}, external_ip={getattr(vm, 'external_ip', '?')}, internet_access={getattr(vm, 'internet_access', '?')}")
 
         # PASO 1: Limpiar reglas de iptables PRIMERO (antes de borrar interfaces)
+        logger.info(f"🔥🔥🔥 [DESTROY] PASO 1: Limpiando iptables INPUT")
         # 🔥 Limpiar la regla del Firewall DHCP
-        ssh.exec(f"sudo iptables -D INPUT -i {gw_name} -p udp --dport 67:68 -j ACCEPT || true")
-        logger.debug(f"[{self.worker_ip}] Regla DHCP INPUT borrada")
+        exit_code1, out1, err1 = ssh.exec(f"sudo iptables -D INPUT -i {gw_name} -p udp --dport 67:68 -j ACCEPT || true")
+        logger.info(f"🔥🔥🔥 [DESTROY]   Resultado: exit_code={exit_code1}, err={err1}")
         
         # 🔥 LIMPIEZA DE IPTABLES (El antídoto contra la basura en el kernel)
+        logger.info(f"🔥🔥🔥 [DESTROY] PASO 1b: Limpiando iptables SNAT/DNAT ({len(vms)} VMs)")
+        snat_count = 0
+        dnat_count = 0
         for vm in vms:
             # Borrar regla SNAT (Navegación)
             if getattr(vm, 'internet_access', 0) == 1:
                 cmd_snat_del = f"sudo iptables -t nat -D POSTROUTING -s {subred_interna}.0/24 -o {settings.WAN_INTERFACE} -j MASQUERADE || true"
-                ssh.exec(cmd_snat_del)
-                logger.debug(f"[{self.worker_ip}] Regla SNAT borrada para {subred_interna}.0/24")
+                exit_code_snat, _, err_snat = ssh.exec(cmd_snat_del)
+                logger.info(f"🔥🔥🔥 [DESTROY]   SNAT para {subred_interna}.0/24: exit_code={exit_code_snat}, err={err_snat}")
+                snat_count += 1
             
             # Borrar regla DNAT (Acceso Externo)
             if getattr(vm, 'external_ip', None) and getattr(vm, 'internal_ip', None):
                 ext_ip = vm.external_ip
                 internal_vm_ip = vm.internal_ip 
                 cmd_dnat_del = f"sudo iptables -t nat -D PREROUTING -d {ext_ip} -j DNAT --to-destination {internal_vm_ip} || true"
-                ssh.exec(cmd_dnat_del)
-                logger.debug(f"[{self.worker_ip}] Regla DNAT borrada para {ext_ip}")
+                exit_code_dnat, _, err_dnat = ssh.exec(cmd_dnat_del)
+                logger.info(f"🔥🔥🔥 [DESTROY]   DNAT para {ext_ip}: exit_code={exit_code_dnat}, err={err_dnat}")
+                dnat_count += 1
+        logger.info(f"🔥🔥🔥 [DESTROY]   Limpiadas {snat_count} reglas SNAT y {dnat_count} reglas DNAT")
 
         # PASO 2: Matar el proceso DHCP
-        logger.debug(f"[{self.worker_ip}] Matando DHCP en {gw_name}")
-        ssh.exec(f"sudo kill $(cat /var/run/dnsmasq-{gw_name}.pid) 2>/dev/null || true")
-        ssh.exec(f"sudo rm -f /var/run/dnsmasq-{gw_name}.pid")
+        logger.info(f"🔥🔥🔥 [DESTROY] PASO 2: Matando DHCP")
+        exit_code2, out2, err2 = ssh.exec(f"sudo kill $(cat /var/run/dnsmasq-{gw_name}.pid) 2>/dev/null || true")
+        logger.info(f"🔥🔥🔥 [DESTROY]   Kill DHCP: exit_code={exit_code2}, err={err2}")
+        exit_code2b, out2b, err2b = ssh.exec(f"sudo rm -f /var/run/dnsmasq-{gw_name}.pid")
+        logger.info(f"🔥🔥🔥 [DESTROY]   Rm PID: exit_code={exit_code2b}, err={err2b}")
         
         # PASO 3: Borrar el puerto del switch virtual OVS
-        logger.debug(f"[{self.worker_ip}] Borrando puerto OVS: {gw_name}")
-        exit_code, out, err = ssh.exec(f"sudo ovs-vsctl --if-exists del-port br-int {gw_name}")
-        if exit_code != 0:
-            logger.warning(f"[{self.worker_ip}] Error al borrar puerto OVS {gw_name}: {err}")
+        logger.info(f"🔥🔥🔥 [DESTROY] PASO 3: Borrando puerto OVS {gw_name}")
+        exit_code3, out3, err3 = ssh.exec(f"sudo ovs-vsctl --if-exists del-port br-int {gw_name}")
+        logger.info(f"🔥🔥🔥 [DESTROY]   OVS del-port: exit_code={exit_code3}, err={err3}")
+        if exit_code3 != 0:
+            logger.warning(f"🔥🔥🔥 [DESTROY]   ⚠️  Error al borrar puerto OVS: {err3}")
 
         # PASO 4: Eliminar la interfaz de Linux (EL MATA-ZOMBIS DEFINITIVO)
         # ✅ CRÍTICO: Esto remueve la interfaz tipo "internal" del kernel
-        logger.debug(f"[{self.worker_ip}] Eliminando interfaz de Linux: {gw_name}")
-        exit_code, out, err = ssh.exec(f"sudo ip link delete {gw_name} 2>&1")
-        if exit_code == 0:
-            logger.info(f"[{self.worker_ip}] Interfaz {gw_name} eliminada exitosamente del kernel")
+        logger.info(f"🔥🔥🔥 [DESTROY] PASO 4: Eliminando interfaz Linux {gw_name}")
+        exit_code4, out4, err4 = ssh.exec(f"sudo ip link delete {gw_name} 2>&1")
+        logger.info(f"🔥🔥🔥 [DESTROY]   ip link delete: exit_code={exit_code4}, out={out4}, err={err4}")
+        if exit_code4 == 0:
+            logger.info(f"🔥🔥🔥 [DESTROY]   ✅ Interfaz {gw_name} eliminada exitosamente del kernel")
         else:
             # Si no existe, no es un error
-            if "does not exist" in err or "Cannot find device" in err:
-                logger.debug(f"[{self.worker_ip}] La interfaz {gw_name} ya no existe")
+            if "does not exist" in err4 or "Cannot find device" in err4:
+                logger.info(f"🔥🔥🔥 [DESTROY]   ℹ️  La interfaz {gw_name} ya no existe")
             else:
-                logger.warning(f"[{self.worker_ip}] Advertencia al eliminar {gw_name}: {err}")
+                logger.warning(f"🔥🔥🔥 [DESTROY]   ⚠️  Advertencia al eliminar {gw_name}: {err4}")
         
         # PASO 5: Liberar IPs externas del host físico
-        logger.debug(f"[{self.worker_ip}] Limpiando IPs externas")
+        logger.info(f"🔥🔥🔥 [DESTROY] PASO 5: Limpiando IPs externas")
+        ip_count = 0
         for vm in vms:
             if getattr(vm, 'external_ip', None):
                 ext_ip = vm.external_ip
-                ssh.exec(f"sudo ip addr del {ext_ip}/32 dev {settings.WAN_INTERFACE} 2>/dev/null || true")
-                logger.debug(f"[{self.worker_ip}] IP externa {ext_ip} liberada")
+                exit_code5, out5, err5 = ssh.exec(f"sudo ip addr del {ext_ip}/32 dev {settings.WAN_INTERFACE} 2>/dev/null || true")
+                logger.info(f"🔥🔥🔥 [DESTROY]   IP {ext_ip}: exit_code={exit_code5}, err={err5}")
+                ip_count += 1
+        logger.info(f"🔥🔥🔥 [DESTROY]   Limpiadas {ip_count} IPs externas")
         
-        logger.info(f"[{self.worker_ip}] Gateway {gw_name} completamente destruido y limpiado.")
+        logger.info(f"🔥🔥🔥 [DESTROY] ✅✅✅ Gateway {gw_name} completamente destruido en {self.worker_ip}")
