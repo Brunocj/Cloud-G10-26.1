@@ -129,39 +129,74 @@ class NetworkExecutor:
             logger.error(f"[{self.worker_ip}] Error configurando Gateway/NAT: {e}")
 
     def destroy_gateway(self, ssh: SSHClient, slice_id: str, vms: list) -> None:
-        """Limpia la interfaz Gateway, mata el DHCP y limpia el Iptables al destruir el slice."""
+        """
+        Limpia la interfaz Gateway, mata el DHCP y limpia el Iptables al destruir el slice.
+        
+        ORDEN CORRECTO:
+        1. Limpiar iptables SNAT/DNAT
+        2. Matar DHCP
+        3. Borrar puerto del OVS
+        4. Eliminar interfaz de Linux (mata zombis)
+        5. Limpiar IPs externas
+        """
         gw_name = f"gw_{str(slice_id)[-4:]}"
         octeto_2 = (int(slice_id) // 256) % 256
         octeto_3 = int(slice_id) % 256
         subred_interna = f"10.{octeto_2}.{octeto_3}"
 
-        # 🔥 NUEVO: Limpiar la regla del Firewall DHCP
-        ssh.exec(f"sudo iptables -D INPUT -i {gw_name} -p udp --dport 67:68 -j ACCEPT || true")
-        
-        # 1. Matar el proceso DHCP
-        ssh.exec(f"sudo kill $(cat /var/run/dnsmasq-{gw_name}.pid) 2>/dev/null || true")
-        ssh.exec(f"sudo rm -f /var/run/dnsmasq-{gw_name}.pid")
-        
-        # 2. Borrar el puerto del switch virtual
-        ssh.exec(f"sudo ovs-vsctl --if-exists del-port br-int {gw_name}")
+        logger.info(f"[{self.worker_ip}] Iniciando destrucción del Gateway: {gw_name}")
 
-        # 🔥 2.5 EL MATA-ZOMBIS DEFINITIVO DE LINUX (PARCHE DVR)
-        ssh.exec(f"sudo ip link delete {gw_name} 2>/dev/null || true")
+        # PASO 1: Limpiar reglas de iptables PRIMERO (antes de borrar interfaces)
+        # 🔥 Limpiar la regla del Firewall DHCP
+        ssh.exec(f"sudo iptables -D INPUT -i {gw_name} -p udp --dport 67:68 -j ACCEPT || true")
+        logger.debug(f"[{self.worker_ip}] Regla DHCP INPUT borrada")
         
-        # 🔥 3. LIMPIEZA DE IPTABLES (El antídoto contra la basura en el kernel)
+        # 🔥 LIMPIEZA DE IPTABLES (El antídoto contra la basura en el kernel)
         for vm in vms:
             # Borrar regla SNAT (Navegación)
             if getattr(vm, 'internet_access', 0) == 1:
-                cmd_snat_del = f"sudo iptables -t nat -D POSTROUTING -s {subred_interna}.0/24 -o {settings.WAN_INTERFACE} -j MASQUERADE"
-                ssh.exec(f"{cmd_snat_del} || true") # || true ignora el error si la regla ya no existía
+                cmd_snat_del = f"sudo iptables -t nat -D POSTROUTING -s {subred_interna}.0/24 -o {settings.WAN_INTERFACE} -j MASQUERADE || true"
+                ssh.exec(cmd_snat_del)
+                logger.debug(f"[{self.worker_ip}] Regla SNAT borrada para {subred_interna}.0/24")
             
             # Borrar regla DNAT (Acceso Externo)
             if getattr(vm, 'external_ip', None) and getattr(vm, 'internal_ip', None):
                 ext_ip = vm.external_ip
                 internal_vm_ip = vm.internal_ip 
-                cmd_dnat_del = f"sudo iptables -t nat -D PREROUTING -d {ext_ip} -j DNAT --to-destination {internal_vm_ip}"
-                ssh.exec(f"{cmd_dnat_del} || true")
-                # Liberamos la IP externa del host físico
-                ssh.exec(f"sudo ip addr del {ext_ip}/32 dev {settings.WAN_INTERFACE} || true")
+                cmd_dnat_del = f"sudo iptables -t nat -D PREROUTING -d {ext_ip} -j DNAT --to-destination {internal_vm_ip} || true"
+                ssh.exec(cmd_dnat_del)
+                logger.debug(f"[{self.worker_ip}] Regla DNAT borrada para {ext_ip}")
+
+        # PASO 2: Matar el proceso DHCP
+        logger.debug(f"[{self.worker_ip}] Matando DHCP en {gw_name}")
+        ssh.exec(f"sudo kill $(cat /var/run/dnsmasq-{gw_name}.pid) 2>/dev/null || true")
+        ssh.exec(f"sudo rm -f /var/run/dnsmasq-{gw_name}.pid")
         
-        logger.info(f"[{self.worker_ip}] Gateway {gw_name} y DHCP eliminados.")
+        # PASO 3: Borrar el puerto del switch virtual OVS
+        logger.debug(f"[{self.worker_ip}] Borrando puerto OVS: {gw_name}")
+        exit_code, out, err = ssh.exec(f"sudo ovs-vsctl --if-exists del-port br-int {gw_name}")
+        if exit_code != 0:
+            logger.warning(f"[{self.worker_ip}] Error al borrar puerto OVS {gw_name}: {err}")
+
+        # PASO 4: Eliminar la interfaz de Linux (EL MATA-ZOMBIS DEFINITIVO)
+        # ✅ CRÍTICO: Esto remueve la interfaz tipo "internal" del kernel
+        logger.debug(f"[{self.worker_ip}] Eliminando interfaz de Linux: {gw_name}")
+        exit_code, out, err = ssh.exec(f"sudo ip link delete {gw_name} 2>&1")
+        if exit_code == 0:
+            logger.info(f"[{self.worker_ip}] Interfaz {gw_name} eliminada exitosamente del kernel")
+        else:
+            # Si no existe, no es un error
+            if "does not exist" in err or "Cannot find device" in err:
+                logger.debug(f"[{self.worker_ip}] La interfaz {gw_name} ya no existe")
+            else:
+                logger.warning(f"[{self.worker_ip}] Advertencia al eliminar {gw_name}: {err}")
+        
+        # PASO 5: Liberar IPs externas del host físico
+        logger.debug(f"[{self.worker_ip}] Limpiando IPs externas")
+        for vm in vms:
+            if getattr(vm, 'external_ip', None):
+                ext_ip = vm.external_ip
+                ssh.exec(f"sudo ip addr del {ext_ip}/32 dev {settings.WAN_INTERFACE} 2>/dev/null || true")
+                logger.debug(f"[{self.worker_ip}] IP externa {ext_ip} liberada")
+        
+        logger.info(f"[{self.worker_ip}] Gateway {gw_name} completamente destruido y limpiado.")
