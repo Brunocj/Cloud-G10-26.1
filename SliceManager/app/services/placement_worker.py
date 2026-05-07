@@ -243,6 +243,8 @@ async def process_placement_worker():
                 }
 
                 # 🔥 FIX DE RAÍZ: Guardamos la receta exacta en la BD
+                logger.info(f"🔥🔥🔥 [PLACEMENT {slice_id}] Guardando deployed_vms ({len(vms_payload)} VMs) y deployed_links ({len(network_links)} links)")
+                
                 slice_json = db_slice.slice_json
                 if isinstance(slice_json, str):
                     slice_json = json.loads(slice_json)
@@ -252,10 +254,16 @@ async def process_placement_worker():
                 slice_json["deployed_vms"] = vms_payload
                 slice_json["deployed_links"] = network_links
                 db_slice.slice_json = slice_json
+                
+                logger.info(f"🔥🔥🔥 [PLACEMENT {slice_id}] slice_json keys antes de commit: {list(slice_json.keys())}")
+                logger.info(f"🔥🔥🔥 [PLACEMENT {slice_id}] deployed_vms: {len(slice_json.get('deployed_vms', []))} elementos")
+                logger.info(f"🔥🔥🔥 [PLACEMENT {slice_id}] deployed_links: {len(slice_json.get('deployed_links', []))} elementos")
 
                 published = await nats_producer.publish_deploy(queue_manager_payload)
                 db_slice.status = "PROVISIONING" if published else "FAILED"
                 db.commit()
+                
+                logger.info(f"🔥🔥🔥 [PLACEMENT {slice_id}] ✅ GUARDADO EN BD exitosamente")
             else:
                 db_slice.status = "FAILED"
                 db.commit()
