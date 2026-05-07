@@ -170,6 +170,12 @@ async def process_placement_worker():
                         Vm.vnc_port.isnot(None)
                     ).all()
                     vnc_por_worker[w_id] = set(v[0] for v in vnc_ocupados_bd)   
+
+                # 🔥 LÓGICA R5: Matemáticas para la subred interna (10.0.0.0/8)
+                octeto_2 = (int(slice_id) // 256) % 256
+                octeto_3 = int(slice_id) % 256
+                ip_host_counter = 10  # Empezamos a dar IPs desde la .10
+
                 # Construimos la lista final de VMs
                 vms_payload = []
                 for vm in vms_de_bd:
@@ -177,8 +183,6 @@ async def process_placement_worker():
                     worker_id = next(w["worker_id"] for w in placement_map if w["vm_id"] == vm.name)
                     server_info = server_inventory.get(worker_id, {})
                     
-                    # 🔥 FIX 2: Como ya es un entero, lo guardamos directamente en la base de datos
-                    # (Ya puedes borrar el parche de .split('-')[1] que hicimos antes)
                     vm.worker_id = worker_id
                     
                     # ESTRATEGIA VNC: Pool aleatorio protegido
@@ -198,6 +202,10 @@ async def process_placement_worker():
                         img_path = image_obj.path # ✅ Mandamos la ruta exacta y absoluta
                     else:
                         img_path = "" # Error
+
+                    # 🔥 LÓGICA R5: Asignamos la IP interna a esta VM
+                    ip_interna_asignada = f"10.{octeto_2}.{octeto_3}.{ip_host_counter}"
+                    ip_host_counter += 1  # Aumentamos para la siguiente VM (11, 12, 13...)
                     
                     vms_payload.append({
                         "vm_id": vm.name,
@@ -207,10 +215,16 @@ async def process_placement_worker():
                         "vcpus": int(vm.vcore),
                         "ram_mb": float(vm.ram),
                         "disk_gb": float(vm.disk),
-                        "image_path": img_path, # 🔥 Cambiamos el nombre de la llave a image_path
+                        "image_path": img_path,
                         "vnc_port": vm.vnc_port, 
                         "vnc_display": vm.vnc_port - 5900,
-                        "tap_interfaces": vms_payload_data[vm.name]["tap_interfaces"]
+                        "tap_interfaces": vms_payload_data[vm.name]["tap_interfaces"],
+                        
+                        # --- NUEVOS CAMPOS DEL REQUERIMIENTO R5 ---
+                        "internet_access": getattr(vm, 'internet_access', 0), # Usamos getattr por si SQLite/MySQL aún no sincronizó la columna
+                        "external_ip": vm.external_ip,
+                        "internal_ip": ip_interna_asignada # 🔥 ¡La inyectamos al contrato NATS!
+                        # ------------------------------------------
                     })
 
                 # 4. PUBLICACIÓN EN NATS

@@ -25,6 +25,7 @@ class NetworkProvisioner:
     def deploy(self, request: DeployNetworkRequest) -> DeployNetworkResponse:
         logger.info(f"[slice={request.slice_id}] Iniciando despliegue de red ({len(request.links)} enlaces)")
 
+        # 1. Agrupar Enlaces
         endpoints_by_worker = defaultdict(list)
         for link in request.links:
             endpoints_by_worker[link.vm1_worker_ip].append({
@@ -38,14 +39,32 @@ class NetworkProvisioner:
                 "user": link.vm2_ssh_user, "key": link.vm2_ssh_private_key
             })
 
+        # 2. Agrupar VMs 
+        vms_by_worker = defaultdict(list)
+        for vm in request.vms:
+            vms_by_worker[vm.worker_ip].append(vm)
+
         successful_links = set()
         failed_links_errors = {}
 
+        # 3. Lanzar Hilos
         with ThreadPoolExecutor(max_workers=settings.MAX_CONCURRENT_WORKERS) as pool:
-            futures = {
-                pool.submit(self._deploy_on_worker, worker_ip, endpoints): worker_ip
-                for worker_ip, endpoints in endpoints_by_worker.items()
-            }
+            futures = {}
+
+            # 🔥 Convertimos las llaves a lista para elegir al primer worker como LÍDER del Gateway
+            worker_ips = list(endpoints_by_worker.keys())
+            if not worker_ips and vms_by_worker:
+                 worker_ips = list(vms_by_worker.keys()) # Por si hay VMs pero 0 enlaces
+
+            for worker_ip in worker_ips:
+                endpoints = endpoints_by_worker.get(worker_ip, [])
+                vms_list = vms_by_worker.get(worker_ip, [])
+                
+                # 🔥 Solo el primer worker será el encargado del Gateway y el NAT
+                is_gateway_leader = (worker_ip == worker_ips[0]) 
+
+                futures[pool.submit(self._deploy_on_worker, worker_ip, endpoints, vms_list, request.slice_id, is_gateway_leader)] = worker_ip
+
             for future in as_completed(futures):
                 worker_ip = futures[future]
                 try:
@@ -72,12 +91,17 @@ class NetworkProvisioner:
             status=status, links_ok=links_ok, links_failed=links_failed
         )
 
-    def _deploy_on_worker(self, worker_ip: str, endpoints: List[dict]) -> Tuple[List[dict], List[Tuple[dict, str]]]:
+    def _deploy_on_worker(self, worker_ip: str, endpoints: List[dict], vms_list: list, slice_id: str, is_gateway_leader: bool) -> Tuple[List[dict], List[Tuple[dict, str]]]:
         ok_eps, fail_eps = [], []
         executor = NetworkExecutor(worker_ip)
         
         try:
-            with SSHClient(worker_ip, endpoints[0]["user"], endpoints[0]["key"]) as ssh:
+            # Extraemos credenciales (asumimos que si hay VMs pero no enlaces, sacamos credenciales de la primera VM)
+            user = endpoints[0]["user"] if endpoints else vms_list[0].ssh_user
+            key = endpoints[0]["key"] if endpoints else vms_list[0].ssh_private_key
+
+            with SSHClient(worker_ip, user, key) as ssh:
+                # A. Configurar Enlaces L2 (VLANs)
                 for ep in endpoints:
                     try:
                         executor.configure_vlan_and_port(ssh, ep["tap"], ep["vlan"])
@@ -86,6 +110,13 @@ class NetworkProvisioner:
                     except Exception as exc:
                         logger.error(f"Fallo en tap {ep['tap']}: {exc}")
                         fail_eps.append((ep, str(exc)))
+
+                # 🔥 B. Configurar Ruteo, NAT y Gateway SOLO en el Nodo Líder
+                if is_gateway_leader and vms_list:
+                    # En lugar de VLAN 10, usamos una VLAN única para el slice (ej. 1000 + ID del slice)
+                    mgmt_vlan = 1000 + int(slice_id) 
+                    executor.configure_gateway_and_nat(ssh, slice_id, vms_list, mgmt_vlan)
+
         except Exception as exc:
             for ep in endpoints: fail_eps.append((ep, f"SSH Fail: {exc}"))
 

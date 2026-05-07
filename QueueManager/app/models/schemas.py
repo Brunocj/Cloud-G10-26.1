@@ -52,6 +52,11 @@ class VMSpec(BaseModel):
                                                 description="Interfaces TAP con MACs asignadas por el Slice Manager")
     priority:        Optional[int]      = Field(default=0, ge=0, le=39)
 
+    # 🔥 NUEVOS CAMPOS DEL R5: Para que Pydantic no los borre al recibirlos
+    internet_access: int = 0
+    external_ip:     Optional[str] = None
+    internal_ip:     str = "0.0.0.0"
+
 
 class VMResult(BaseModel):
     """Resultado de una VM individual, tal como lo reporta el Compute Provisioner."""

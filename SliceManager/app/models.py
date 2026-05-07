@@ -1,5 +1,5 @@
 # coding: utf-8
-from sqlalchemy import Column, Float, ForeignKey, Integer, JSON, String
+from sqlalchemy import Boolean, Column, Float, ForeignKey, Integer, JSON, String
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.mysql import TINYINT
 from sqlalchemy.ext.declarative import declarative_base
@@ -137,6 +137,7 @@ class Vm(Base):
     disk = Column(Float(asdecimal=True))
     state = Column(String(45))
     external_ip = Column(String(45))
+    internet_access = Column(TINYINT, default=0)
     slice_id = Column(ForeignKey('slices.id'), index=True)
     image_id = Column(ForeignKey('images.id'), index=True)
     vnc_port = Column(Integer)
@@ -145,3 +146,13 @@ class Vm(Base):
     image = relationship('Image')
     slice = relationship('Slice')
     worker = relationship('Worker')
+
+class IpPool(Base):
+    __tablename__ = 'ip_pool'
+
+    id = Column(Integer, primary_key=True)
+    ip_address = Column(String(45), unique=True)
+    is_used = Column(TINYINT, default=0)
+    vm_id = Column(ForeignKey('vms.id', ondelete='SET NULL'), index=True)
+
+    vm = relationship('Vm')

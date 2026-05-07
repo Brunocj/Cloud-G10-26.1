@@ -44,17 +44,34 @@ class NetworkLink(BaseModel):
     vm2_ssh_private_key: str = Field(..., description="Llave PEM del worker 2")
     vm2_security_rules:  List[SecurityRule] = Field(default_factory=list)
 
+class TapInterface(BaseModel):
+    tap_name: str
+    mac: str
+
+class VMNetworkSpec(BaseModel):
+    """Información de la VM necesaria para configurar su Gateway e Iptables."""
+    vm_id:           str
+    worker_ip:       str
+    ssh_user:        str
+    ssh_private_key: str
+    tap_interfaces:  List[TapInterface] = Field(default_factory=list)
+    internet_access: int = 0
+    external_ip:     Optional[str] = None
+    internal_ip:     str
+
 class DeployNetworkRequest(BaseModel):
     """Payload recibido en network.deploy"""
     slice_id:   str
     request_id: str
     links:      List[NetworkLink]
+    vms:        List[VMNetworkSpec] = Field(default_factory=list) # Recibimos las VMs
 
 class DestroyNetworkRequest(BaseModel):
     """Payload recibido en network.destroy"""
     slice_id:   str
     request_id: str
-    links:      Optional[List[NetworkLink]] = None  # 🔥 FIX AQUÍ
+    links:      Optional[List[NetworkLink]] = None  
+    vms:        Optional[List[VMNetworkSpec]] = None 
 # ---------------------------------------------------------------------------
 # Modelos de Salida (Respuesta al Queue Manager)
 # ---------------------------------------------------------------------------

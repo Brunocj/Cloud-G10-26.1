@@ -196,12 +196,14 @@ class Orchestrator:
         )
 
     async def _step_network_destroy(self, request: DestroySliceRequest) -> Optional[dict]:
-        """Llama al Network Orchestrator para borrar puertos OVS y VLANs"""
+        """Llama al Network Orchestrator para borrar puertos OVS, VLANs y Gateways"""
         payload = {
             "slice_id":   request.slice_id, 
             "request_id": request.request_id,
             # 🔥 FIX: Empaquetamos la lista de links para que OVS sepa qué TAPs desconectar
             "links":      [link.model_dump() for link in request.links], 
+            # 🔥 FIX: Enviamos las VMs por si el Network Orchestrator necesita limpiar algo específico
+            "vms":        [vm.model_dump() for vm in request.vms]
         }
         return await nats_manager.request(settings.SUBJECT_NETWORK_DESTROY, payload, timeout=settings.NETWORK_TIMEOUT)
 
@@ -255,11 +257,14 @@ class Orchestrator:
         await self._notify_slice_manager(response.model_dump())
         return response
     async def _step_network_deploy(self, request: DeploySliceRequest) -> Optional[dict]:
-        """Llama al Network Orchestrator para configurar VLANs y OVS"""
+        """Llama al Network Orchestrator para configurar VLANs y OVS y el Gateway"""
         payload = {
             "slice_id":   request.slice_id,
             "request_id": request.request_id,
-            "links":      [link.model_dump() for link in request.links]
+            "links":      [link.model_dump() for link in request.links],
+            # 🔥 FIX: ¡Ahora enviamos también las VMs para que configure el NAT y DHCP!
+            "vms":        [vm.model_dump() for vm in request.vms]
+            
         }
         
         logger.info(f"[slice={request.slice_id}] Solicitando configuración de red...")

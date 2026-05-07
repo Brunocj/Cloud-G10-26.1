@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.schemas import DraftSaveRequest
-from app.models import Slice, Vm, Image, Worker
+from app.models import Slice, Vm, Image, Worker, IpPool
 import json
 
 router = APIRouter(prefix="/api/v1/slices", tags=["Slices / Topologies"])
@@ -60,21 +60,27 @@ def create_draft(request: DraftSaveRequest, db: Session = Depends(get_db)):
         
         workers_db = db.query(Worker).all()
         num_workers = len(workers_db)
-        
         nodes_list = request.slice_json.get("nodes", [])
         
         for index, vm_data in enumerate(nodes_list):
             asignado = workers_db[index % num_workers] if num_workers > 0 else None
             
+            # 🔥 LÓGICA DE SEGURIDAD R5
+            ext_ip = vm_data.get("external_ip", None)
+            # Si tiene IP externa, forzamos internet=1. Si no, tomamos lo que mande el frontend (o 0)
+            int_access = 1 if ext_ip else int(vm_data.get("internet_access", 0))
+            
             nueva_vm = Vm(
-                name=vm_data.get("id"), # 🔥 FIX: DEBE ser 'id' (ej. n214) para que la red no explote
+                name=vm_data.get("id"),
                 vcore=int(vm_data.get("vcores", 1)),
-                ram=float(vm_data.get("ram", 512.0)), # 🔥 FIX: float para tu DB double
-                disk=float(vm_data.get("disk", 5.0)), # 🔥 FIX: float para tu DB double
+                ram=float(vm_data.get("ram", 512.0)),
+                disk=float(vm_data.get("disk", 5.0)),
                 state="DRAFT",
                 slice_id=slice_creado.id,
                 image_id=vm_data.get("image_id"),
-                worker_id=asignado.id if asignado else None
+                worker_id=asignado.id if asignado else None,
+                external_ip=ext_ip,
+                internet_access=int_access
             )
             
             vm_data["worker"] = asignado.name if asignado else "Unassigned"
@@ -83,7 +89,6 @@ def create_draft(request: DraftSaveRequest, db: Session = Depends(get_db)):
             db.add(nueva_vm)
         
         slice_creado.slice_json = {"nodes": nodes_list, "edges": request.slice_json.get("edges", [])}
-            
         db.commit()
         
         return {
@@ -105,9 +110,15 @@ def update_draft(slice_id: int, request: DraftSaveRequest, db: Session = Depends
 
     db_slice.slice_json = {"edges": request.slice_json.get("edges", [])}
     
+    # Limpiamos VMs previas
     db.query(Vm).filter(Vm.slice_id == slice_id).delete()
     
     for vm_data in request.slice_json.get("nodes", []):
+        
+        # 🔥 LÓGICA DE SEGURIDAD R5
+        ext_ip = vm_data.get("external_ip", None)
+        int_access = 1 if ext_ip else int(vm_data.get("internet_access", 0))
+
         nueva_vm = Vm(
             name=vm_data.get("id"),
             vcore=int(vm_data.get("vcores", 1)),
@@ -115,9 +126,10 @@ def update_draft(slice_id: int, request: DraftSaveRequest, db: Session = Depends
             disk=float(vm_data.get("disk", 5.0)),
             state="DRAFT",
             slice_id=slice_id,
-            external_ip=vm_data.get("external_ip", None),
-            image_id=vm_data.get("image_id"),  # 🔥 FIX: ¡No olvides recuperar la imagen!
-            worker_id=vm_data.get("worker_id") # 🔥 FIX: ¡No olvides recuperar el worker asignado!
+            image_id=vm_data.get("image_id"), 
+            worker_id=vm_data.get("worker_id"),
+            external_ip=ext_ip,
+            internet_access=int_access
         )
         db.add(nueva_vm)
 
@@ -138,3 +150,9 @@ def get_available_workers(db: Session = Depends(get_db)):
     if not workers:
         return ["server1"]
     return [w.name for w in workers]
+
+@router.get("/utils/available-ips", status_code=200)
+def get_available_ips(db: Session = Depends(get_db)):
+    # Solo devolvemos las que no están en uso
+    ips = db.query(IpPool).filter(IpPool.is_used == 0).all()
+    return [ip.ip_address for ip in ips]

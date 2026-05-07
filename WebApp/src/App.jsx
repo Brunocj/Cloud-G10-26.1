@@ -92,11 +92,32 @@ const NodeEditor = ({ node, availableImages, sliceStatus, onSave, onDelete, onCl
     const [f, setF] = useState({
         ...node,
         image_id: initialImgId,
-        image: initialImgName
+        image: initialImgName,
+        // 🔥 Agregamos los campos de red
+        internet_access: node.internet_access || 0,
+        external_ip: node.external_ip || ""
     });
 
     const u = (k, v) => setF(p => ({ ...p, [k]: v }));
     const isReadOnly = sliceStatus && sliceStatus !== "DRAFT";
+
+    const [availableIps, setAvailableIps] = useState([]);
+
+    useEffect(() => {
+        if (f.internet_access === 1) {
+            // Nota: Puse tu puerto real 8085 del ApiGateway
+            fetch(`http://localhost:8085/api/v1/slices/utils/available-ips`)
+                .then(res => res.json())
+                .then(data => {
+                    if (f.external_ip && !data.includes(f.external_ip)) {
+                        setAvailableIps([f.external_ip, ...data]);
+                    } else {
+                        setAvailableIps(data);
+                    }
+                });
+        }
+    }, [f.internet_access]);
+    
     return (
         <div style={{ position: "absolute", right: 12, top: 12, width: 268, zIndex: 300, background: T.surface, borderRadius: 14, border: `1.5px solid ${T.accentMid}55`, boxShadow: T.shadowMd, overflow: "hidden" }}>
             <div style={{ background: T.accentLight, padding: "11px 14px", borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -142,6 +163,50 @@ const NodeEditor = ({ node, availableImages, sliceStatus, onSave, onDelete, onCl
                         ))}
                     </div>
                 </div>
+
+                {/* --- NUEVO BLOQUE: NETWORKING (R5) --- */}
+                <div style={{ background: T.surfaceElevated, borderRadius: 9, padding: "11px 12px", border: `1px solid ${T.border}` }}>
+                    <Lbl>Networking (R5)</Lbl>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                        
+                        {/* Checkbox: Salida a Internet */}
+                        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, fontWeight: 600, color: T.text, cursor: isReadOnly ? "default" : "pointer" }}>
+                            <input 
+                                type="checkbox" 
+                                disabled={isReadOnly}
+                                checked={f.internet_access === 1}
+                                onChange={e => {
+                                    const isChecked = e.target.checked;
+                                    setF(prev => ({
+                                        ...prev,
+                                        internet_access: isChecked ? 1 : 0,
+                                        // Seguridad de UX: Si apaga internet, borramos la IP externa
+                                        external_ip: isChecked ? prev.external_ip : ""
+                                    }));
+                                }}
+                                style={{ accentColor: T.accent, width: 14, height: 14 }}
+                            />
+                            Habilitar Salida a Internet (NAT)
+                        </label>
+
+                        {/* Input: IP Externa (Solo se habilita si hay internet) */}
+                        <div style={{ opacity: f.internet_access ? 1 : 0.5, transition: "opacity 0.2s" }}>
+                            <div style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, marginBottom: 4 }}>Asignar IP del Pool (10.60.15.X)</div>
+                            <select 
+                                value={f.external_ip || ""} 
+                                disabled={isReadOnly || !f.internet_access}
+                                onChange={e => u("external_ip", e.target.value)}
+                                style={{ ...inp, fontSize: 12, cursor: "pointer", background: (isReadOnly || !f.internet_access) ? "transparent" : T.surface }}
+                            >
+                                <option value="">-- Seleccionar IP --</option>
+                                {availableIps.map(ip => (
+                                    <option key={ip} value={ip}>{ip}</option>
+                                ))}
+                            </select>
+                        </div>
+                    </div>
+                </div>
+                {/* -------------------------------------- */}
 
                 {/* BOTONES DINÁMICOS SEGÚN EL ESTADO */}
                 {isReadOnly ? (

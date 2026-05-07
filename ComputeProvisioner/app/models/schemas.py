@@ -34,6 +34,13 @@ class VMSpec(BaseModel):
     disk_gb: float
     image_path: str # 🔥 Ahora recibimos la ruta completa, no solo el nombre
     vnc_port: int
+
+    # --- NUEVOS CAMPOS DEL R5 ---
+    internet_access: int                 = Field(default=0, description="1 si tiene salida a internet")
+    external_ip:     Optional[str]       = Field(default=None, description="IP pública/VPN asignada")
+    internal_ip:     Optional[str]       = Field(default=None, description="IP interna asignada por el Queue Manager para NAT/Gateway")
+    # ----------------------------
+
     tap_interfaces:  List[TapInterface]  = Field(default_factory=list,
                                                   description="Interfaces TAP a crear (orden = índice de NIC en QEMU)")
     priority:        Optional[int]       = Field(default=0, ge=0, le=39)
