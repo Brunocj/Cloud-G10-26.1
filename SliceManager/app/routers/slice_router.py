@@ -87,6 +87,18 @@ def create_draft(request: DraftSaveRequest, db: Session = Depends(get_db)):
             vm_data["worker_id"] = asignado.id if asignado else None
             
             db.add(nueva_vm)
+
+            db.flush() # 🔥 Sincroniza temporalmente para obtener el ID de la VM
+
+            # 🔥 Ocupar la IP en la tabla IpPool
+            if ext_ip:
+                ip_record = db.query(IpPool).filter(IpPool.ip_address == ext_ip, IpPool.is_used == 0).first()
+                if ip_record:
+                    ip_record.is_used = 1
+                    ip_record.vm_id = nueva_vm.id
+                else:
+                    # Opcional: Lanzar error si alguien mandó una IP inválida o ya en uso
+                    pass
         
         slice_creado.slice_json = {"nodes": nodes_list, "edges": request.slice_json.get("edges", [])}
         db.commit()
@@ -110,6 +122,15 @@ def update_draft(slice_id: int, request: DraftSaveRequest, db: Session = Depends
 
     db_slice.slice_json = {"edges": request.slice_json.get("edges", [])}
     
+    # 🔥 Liberar IPs del pool antes de destruir las VMs viejas
+    vms_antiguas = db.query(Vm).filter(Vm.slice_id == slice_id).all()
+    for v_ant in vms_antiguas:
+        if v_ant.external_ip:
+            ip_record = db.query(IpPool).filter(IpPool.ip_address == v_ant.external_ip).first()
+            if ip_record:
+                ip_record.is_used = 0
+                ip_record.vm_id = None
+
     # Limpiamos VMs previas
     db.query(Vm).filter(Vm.slice_id == slice_id).delete()
     
@@ -132,6 +153,7 @@ def update_draft(slice_id: int, request: DraftSaveRequest, db: Session = Depends
             internet_access=int_access
         )
         db.add(nueva_vm)
+        db.flush() # 🔥 Sincroniza temporalmente para obtener el ID de la VM
 
     db.commit()
     return {"message": "Borrador actualizado con éxito"}

@@ -77,6 +77,9 @@ class NetworkExecutor:
             ssh.exec(f"sudo ip link set {gw_name} up")
             ssh.exec("sudo sysctl -w net.ipv4.ip_forward=1")
 
+            # 🔥 NUEVO: Permitir tráfico DHCP entrante desde las VMs hacia el Gateway
+            ssh.exec(f"sudo iptables -I INPUT -i {gw_name} -p udp --dport 67:68 -j ACCEPT")
+
             # 🔥 2. CONFIGURAR DHCP (DNSMASQ) CON IPs ESTÁTICAS
             # Matamos cualquier proceso DHCP anterior que se haya quedado colgado
             ssh.exec(f"sudo kill $(cat /var/run/dnsmasq-{gw_name}.pid) 2>/dev/null || true")
@@ -131,6 +134,9 @@ class NetworkExecutor:
         octeto_2 = (int(slice_id) // 256) % 256
         octeto_3 = int(slice_id) % 256
         subred_interna = f"10.{octeto_2}.{octeto_3}"
+
+        # 🔥 NUEVO: Limpiar la regla del Firewall DHCP
+        ssh.exec(f"sudo iptables -D INPUT -i {gw_name} -p udp --dport 67:68 -j ACCEPT || true")
         
         # 1. Matar el proceso DHCP
         ssh.exec(f"sudo kill $(cat /var/run/dnsmasq-{gw_name}.pid) 2>/dev/null || true")
