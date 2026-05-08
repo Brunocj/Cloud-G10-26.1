@@ -77,9 +77,15 @@ async def process_placement_worker():
                 placement_result = response.json()
 
             # 🔥🔥🔥 DEBUG: Ver qué devuelve VMPlacement
-            logger.info(f"🔥🔥🔥 [PLACEMENT {slice_id}] Response de VMPlacement status: {placement_result.get('status')}")
+            import sys
+            print(f"\n{'='*80}", file=sys.stderr, flush=True)
+            print(f"🔥🔥🔥 [PLACEMENT {slice_id}] Response de VMPlacement status: {placement_result.get('status')}", file=sys.stderr, flush=True)
             if placement_result.get('status') != 'SUCCESS':
-                logger.warning(f"🔥🔥🔥 [PLACEMENT {slice_id}] ⚠️ VMPlacement NO fue SUCCESS, respuesta: {json.dumps(placement_result, indent=2)[:1000]}")
+                print(f"🔥🔥🔥 [PLACEMENT {slice_id}] ⚠️ VMPlacement NO fue SUCCESS", file=sys.stderr, flush=True)
+                print(f"🔥🔥🔥 [PLACEMENT {slice_id}] Respuesta completa: {json.dumps(placement_result, indent=2)[:500]}", file=sys.stderr, flush=True)
+            print(f"{'='*80}\n", file=sys.stderr, flush=True)
+            
+            logger.info(f"🔥🔥🔥 [PLACEMENT {slice_id}] Response de VMPlacement status: {placement_result.get('status')}")
 
             # 3. ENRIQUECIMIENTO DEL CONTRATO SI EL PLACEMENT FUE EXITOSO
             if placement_result.get("status") == "SUCCESS":
