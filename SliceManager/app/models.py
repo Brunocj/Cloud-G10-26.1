@@ -1,5 +1,6 @@
 # coding: utf-8
 from sqlalchemy import Boolean, Column, Float, ForeignKey, Integer, JSON, String
+from sqlalchemy.ext.mutable import MutableDict
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.mysql import TINYINT
 from sqlalchemy.ext.declarative import declarative_base
@@ -96,7 +97,7 @@ class Slice(Base):
     date_deployed = Column(String(45))
     project_id = Column(ForeignKey('projects.id'), index=True)
     creator_id = Column(ForeignKey('users.id'), index=True)
-    slice_json = Column(JSON)
+    slice_json = Column(MutableDict.as_mutable(JSON))
 
     availability_zone = relationship('AvailabilityZone')
     creator = relationship('User')

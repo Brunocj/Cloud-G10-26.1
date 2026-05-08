@@ -264,11 +264,16 @@ async def process_placement_worker():
                     
                 slice_json["deployed_vms"] = vms_payload
                 slice_json["deployed_links"] = network_links
-                db_slice.slice_json = slice_json
+                # Reasignamos un dict nuevo para asegurar detección de cambios en JSON
+                db_slice.slice_json = dict(slice_json)
                 
                 logger.info(f"🔥🔥🔥 [PLACEMENT {slice_id}] slice_json keys antes de commit: {list(slice_json.keys())}")
                 logger.info(f"🔥🔥🔥 [PLACEMENT {slice_id}] deployed_vms: {len(slice_json.get('deployed_vms', []))} elementos")
                 logger.info(f"🔥🔥🔥 [PLACEMENT {slice_id}] deployed_links: {len(slice_json.get('deployed_links', []))} elementos")
+
+                # Commit inmediato para no perder la receta aunque falle el publish
+                db.commit()
+                logger.info(f"🔥🔥🔥 [PLACEMENT {slice_id}] ✅ deployed_vms/links persistidos antes de publicar")
 
                 published = await nats_producer.publish_deploy(queue_manager_payload)
                 db_slice.status = "PROVISIONING" if published else "FAILED"
