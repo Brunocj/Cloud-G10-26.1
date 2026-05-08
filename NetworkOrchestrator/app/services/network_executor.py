@@ -159,23 +159,41 @@ class NetworkExecutor:
         logger.info(f"🔥🔥🔥 [DESTROY] PASO 1b: Limpiando iptables SNAT/DNAT ({len(vms)} VMs)")
         snat_count = 0
         dnat_count = 0
-        for vm in vms:
-            # Borrar regla SNAT (Navegación)
-            if getattr(vm, 'internet_access', 0) == 1:
-                cmd_snat_del = f"sudo iptables -t nat -D POSTROUTING -s {subred_interna}.0/24 -o {settings.WAN_INTERFACE} -j MASQUERADE || true"
-                exit_code_snat, _, err_snat = ssh.exec(cmd_snat_del)
-                logger.info(f"🔥🔥🔥 [DESTROY]   SNAT para {subred_interna}.0/24: exit_code={exit_code_snat}, err={err_snat}")
-                snat_count += 1
-            
-            # Borrar regla DNAT (Acceso Externo)
-            if getattr(vm, 'external_ip', None) and getattr(vm, 'internal_ip', None):
-                ext_ip = vm.external_ip
-                internal_vm_ip = vm.internal_ip 
-                cmd_dnat_del = f"sudo iptables -t nat -D PREROUTING -d {ext_ip} -j DNAT --to-destination {internal_vm_ip} || true"
-                exit_code_dnat, _, err_dnat = ssh.exec(cmd_dnat_del)
-                logger.info(f"🔥🔥🔥 [DESTROY]   DNAT para {ext_ip}: exit_code={exit_code_dnat}, err={err_dnat}")
-                dnat_count += 1
-        logger.info(f"🔥🔥🔥 [DESTROY]   Limpiadas {snat_count} reglas SNAT y {dnat_count} reglas DNAT")
+
+        if not vms:
+            logger.warning(f"🔥🔥🔥 [DESTROY]   ⚠️ Sin VMs en payload. Intentando limpieza genérica por subred {subred_interna}.0/24")
+            # SNAT genérico (si existe)
+            exit_code_snat, _, err_snat = ssh.exec(
+                f"sudo iptables -t nat -D POSTROUTING -s {subred_interna}.0/24 -o {settings.WAN_INTERFACE} -j MASQUERADE || true"
+            )
+            logger.info(f"🔥🔥🔥 [DESTROY]   SNAT genérico: exit_code={exit_code_snat}, err={err_snat}")
+
+            # DNAT genérico: elimina reglas cuyo destino apunte a la subred del slice
+            cmd_dnat_cleanup = (
+                "sudo sh -c "
+                f"\"iptables -t nat -S PREROUTING | grep -- '--to-destination {subred_interna}.' | "
+                "sed 's/^-A /-D /' | while read r; do iptables -t nat $r; done\""
+            )
+            exit_code_dnat, _, err_dnat = ssh.exec(cmd_dnat_cleanup)
+            logger.info(f"🔥🔥🔥 [DESTROY]   DNAT genérico: exit_code={exit_code_dnat}, err={err_dnat}")
+        else:
+            for vm in vms:
+                # Borrar regla SNAT (Navegación)
+                if getattr(vm, 'internet_access', 0) == 1:
+                    cmd_snat_del = f"sudo iptables -t nat -D POSTROUTING -s {subred_interna}.0/24 -o {settings.WAN_INTERFACE} -j MASQUERADE || true"
+                    exit_code_snat, _, err_snat = ssh.exec(cmd_snat_del)
+                    logger.info(f"🔥🔥🔥 [DESTROY]   SNAT para {subred_interna}.0/24: exit_code={exit_code_snat}, err={err_snat}")
+                    snat_count += 1
+                
+                # Borrar regla DNAT (Acceso Externo)
+                if getattr(vm, 'external_ip', None) and getattr(vm, 'internal_ip', None):
+                    ext_ip = vm.external_ip
+                    internal_vm_ip = vm.internal_ip 
+                    cmd_dnat_del = f"sudo iptables -t nat -D PREROUTING -d {ext_ip} -j DNAT --to-destination {internal_vm_ip} || true"
+                    exit_code_dnat, _, err_dnat = ssh.exec(cmd_dnat_del)
+                    logger.info(f"🔥🔥🔥 [DESTROY]   DNAT para {ext_ip}: exit_code={exit_code_dnat}, err={err_dnat}")
+                    dnat_count += 1
+            logger.info(f"🔥🔥🔥 [DESTROY]   Limpiadas {snat_count} reglas SNAT y {dnat_count} reglas DNAT")
 
         # PASO 2: Matar el proceso DHCP
         logger.info(f"🔥🔥🔥 [DESTROY] PASO 2: Matando DHCP")

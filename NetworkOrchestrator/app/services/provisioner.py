@@ -201,8 +201,8 @@ class NetworkProvisioner:
                         except Exception as exc:
                             logger.error(f"Fallo al borrar tap de gestión {mgmt_tap}: {exc}")
                         
-                # 🔥 3. Limpiar Gateway, DHCP y NAT en TODOS LOS WORKERS (DVR)
-                if vms_list:
+                # 🔥 3. Limpiar Gateway, DHCP y NAT
+                if vms_list or endpoints:
                     try:
                         executor.destroy_gateway(ssh, slice_id, vms_list)
                     except Exception as exc:
