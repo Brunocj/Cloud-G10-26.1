@@ -90,15 +90,23 @@ class NetworkExecutor:
                 if getattr(vm, 'internal_ip', None) and vm.tap_interfaces:
                     mac_principal = vm.tap_interfaces[0].mac
                     ip_interna = vm.internal_ip
-                    dhcp_hosts_args += f"--dhcp-host={mac_principal},{ip_interna} "
+                    # Marcamos como host conocido para evitar asignación dinámica inesperada
+                    dhcp_hosts_args += f"--dhcp-host={mac_principal},{ip_interna},set:known "
+
+            # Limpiamos leases viejos para evitar que dnsmasq entregue IPs antiguas
+            ssh.exec(f"sudo rm -f /var/run/dnsmasq-{gw_name}.leases")
 
             # Levantamos el DHCP atado EXCLUSIVAMENTE a la interfaz gw_xxxx
             cmd_dhcp = (
-                f"sudo dnsmasq --strict-order --except-interface=lo "
+                f"sudo dnsmasq --strict-order --except-interface=lo --bind-interfaces "
                 f"--interface={gw_name} "
                 f"--listen-address={subred_interna}.1 "
                 f"--dhcp-range={subred_interna}.10,{subred_interna}.200 "
                 f"--dhcp-option=option:router,{subred_interna}.1 "
+                f"--dhcp-authoritative "
+                f"--dhcp-ignore=tag:!known "
+                f"--dhcp-leasefile=/var/run/dnsmasq-{gw_name}.leases "
+                f"--log-dhcp --log-queries "
                 f"{dhcp_hosts_args}"  # Inyectamos los amarres MAC->IP
                 f"--pid-file=/var/run/dnsmasq-{gw_name}.pid"
             )
@@ -107,16 +115,36 @@ class NetworkExecutor:
             
             # 3. Iterar sobre las VMs para aplicar Iptables
             for vm in vms:
-                # REGLA A: Salida a Internet (SNAT)
-                if getattr(vm, 'internet_access', 0) == 1:
-                    cmd_snat = f"sudo iptables -t nat -A POSTROUTING -s {subred_interna}.0/24 -o {settings.WAN_INTERFACE} -j MASQUERADE"
+                internal_vm_ip = getattr(vm, 'internal_ip', None)
+
+                # REGLA A: Salida a Internet (SNAT) por IP
+                if getattr(vm, 'internet_access', 0) == 1 and internal_vm_ip:
+                    cmd_snat = (
+                        f"sudo iptables -t nat -A POSTROUTING -s {internal_vm_ip}/32 "
+                        f"-o {settings.WAN_INTERFACE} -j MASQUERADE"
+                    )
                     ssh.exec(cmd_snat)
-                    logger.info(f"[{self.worker_ip}] SNAT habilitado en {settings.WAN_INTERFACE} para {subred_interna}.0/24")
+                    # Permitimos forward de salida y respuestas
+                    ssh.exec(
+                        f"sudo iptables -I FORWARD 1 -s {internal_vm_ip}/32 "
+                        f"-o {settings.WAN_INTERFACE} -j ACCEPT"
+                    )
+                    ssh.exec(
+                        f"sudo iptables -I FORWARD 1 -d {internal_vm_ip}/32 "
+                        f"-i {settings.WAN_INTERFACE} -m state --state ESTABLISHED,RELATED -j ACCEPT"
+                    )
+                    logger.info(f"[{self.worker_ip}] SNAT habilitado en {settings.WAN_INTERFACE} para {internal_vm_ip}")
+                elif internal_vm_ip:
+                    # Bloquear salida para VMs sin permiso de internet
+                    ssh.exec(
+                        f"sudo iptables -I FORWARD 1 -s {internal_vm_ip}/32 "
+                        f"-o {settings.WAN_INTERFACE} -j DROP"
+                    )
+                    logger.info(f"[{self.worker_ip}] Bloqueo de salida aplicado para {internal_vm_ip}")
 
                 # REGLA B: Visibilidad Externa (DNAT)
-                if getattr(vm, 'external_ip', None) and getattr(vm, 'internal_ip', None):
+                if getattr(vm, 'external_ip', None) and internal_vm_ip:
                     ext_ip = vm.external_ip
-                    internal_vm_ip = vm.internal_ip 
 
                     # 🔥 TRUCO VITAL: El host físico debe reclamar la IP para que el ruteo la intercepte
                     ssh.exec(f"sudo ip addr add {ext_ip}/32 dev {settings.WAN_INTERFACE} || true")
@@ -179,16 +207,35 @@ class NetworkExecutor:
         else:
             for vm in vms:
                 # Borrar regla SNAT (Navegación)
-                if getattr(vm, 'internet_access', 0) == 1:
-                    cmd_snat_del = f"sudo iptables -t nat -D POSTROUTING -s {subred_interna}.0/24 -o {settings.WAN_INTERFACE} -j MASQUERADE || true"
+                internal_vm_ip = getattr(vm, 'internal_ip', None)
+                if getattr(vm, 'internet_access', 0) == 1 and internal_vm_ip:
+                    cmd_snat_del = (
+                        f"sudo iptables -t nat -D POSTROUTING -s {internal_vm_ip}/32 "
+                        f"-o {settings.WAN_INTERFACE} -j MASQUERADE || true"
+                    )
                     exit_code_snat, _, err_snat = ssh.exec(cmd_snat_del)
-                    logger.info(f"🔥🔥🔥 [DESTROY]   SNAT para {subred_interna}.0/24: exit_code={exit_code_snat}, err={err_snat}")
+                    logger.info(f"🔥🔥🔥 [DESTROY]   SNAT para {internal_vm_ip}: exit_code={exit_code_snat}, err={err_snat}")
                     snat_count += 1
+
+                    # Remover reglas de forward permitidas
+                    ssh.exec(
+                        f"sudo iptables -D FORWARD -s {internal_vm_ip}/32 "
+                        f"-o {settings.WAN_INTERFACE} -j ACCEPT || true"
+                    )
+                    ssh.exec(
+                        f"sudo iptables -D FORWARD -d {internal_vm_ip}/32 "
+                        f"-i {settings.WAN_INTERFACE} -m state --state ESTABLISHED,RELATED -j ACCEPT || true"
+                    )
+                elif internal_vm_ip:
+                    # Remover bloqueo para VMs sin acceso
+                    ssh.exec(
+                        f"sudo iptables -D FORWARD -s {internal_vm_ip}/32 "
+                        f"-o {settings.WAN_INTERFACE} -j DROP || true"
+                    )
                 
                 # Borrar regla DNAT (Acceso Externo)
-                if getattr(vm, 'external_ip', None) and getattr(vm, 'internal_ip', None):
+                if getattr(vm, 'external_ip', None) and internal_vm_ip:
                     ext_ip = vm.external_ip
-                    internal_vm_ip = vm.internal_ip 
                     cmd_dnat_del = f"sudo iptables -t nat -D PREROUTING -d {ext_ip} -j DNAT --to-destination {internal_vm_ip} || true"
                     exit_code_dnat, _, err_dnat = ssh.exec(cmd_dnat_del)
                     logger.info(f"🔥🔥🔥 [DESTROY]   DNAT para {ext_ip}: exit_code={exit_code_dnat}, err={err_dnat}")
