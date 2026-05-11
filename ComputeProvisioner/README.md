@@ -1,4 +1,4 @@
-# Compute Provisioner
+# Compute Provisioner — PUCP Cloud Orchestrator
 
 Microservicio encargado del aprovisionamiento computacional del sistema de slices.
 Recibe órdenes del Queue Manager via NATS, crea y destruye VMs en los workers
@@ -26,7 +26,7 @@ via SSH+QEMU/KVM, y responde el resultado de vuelta al Queue Manager.
 
 ```
 main.py
- ├── api/health.py              → GET /health (healthcheck HTTP, puerto 8081)
+ ├── api/health.py              → GET /health (healthcheck HTTP, puerto interno 8080 / externo 8081)
  ├── core/
  │    ├── config.py             → Variables de entorno (Settings)
  │    ├── worker.py             → Loop async: suscribe handlers NATS
@@ -37,7 +37,7 @@ main.py
  │    ├── provisioner.py        → Orquestación deploy/destroy (lógica central)
  │    ├── qemu_executor.py      → Comandos QEMU/KVM + TAP/OVS sobre el worker
  │    ├── ssh_client.py         → Wrapper SSH con llave PEM en memoria (Paramiko)
- │    ├── vnc_port_manager.py   → Consulta puertos VNC en uso (solo lectura, no asigna)
+ │    ├── vnc_port_manager.py   → Utilidad para consultar puertos VNC en uso vía SSH (no conectado al flujo actual — el puerto VNC viene pre-calculado desde el Slice Manager)
  │    └── queue_client.py       → Cliente NATS (subscribe, reply, KV)
  └── utils/
       └── image_resolver.py    → Cálculo de rutas de disco VM
@@ -47,27 +47,31 @@ main.py
 
 ## Flujo de mensajes
 
+### Deploy
+
 ```
 Queue Manager
     │
     │  NATS request → compute.deploy
     │  { slice_id, request_id, vms: [{vm_id, worker_ip, ssh_user,
     │    ssh_private_key, vcpus, ram_mb, disk_gb, image_path, vnc_port,
+    │    internet_access, external_ip, internal_ip,
     │    tap_interfaces: [{tap_name, mac}, ...], priority}] }
     ▼
 Compute Provisioner
     │
-    ├─ SSH → workerN: qemu-img create -f qcow2 -b {image_path} {disk}.qcow2 {disk_gb}G
-    ├─ SSH → workerN: ip tuntap add dev tap-vmX-N mode tap       (por cada TAP)
-    ├─ SSH → workerN: ovs-vsctl add-port br-int tap-vmX-N        (por cada TAP)
-    ├─ SSH → workerN: ip link set tap-vmX-N up                   (por cada TAP)
-    ├─ SSH → workerN: qemu-system-x86_64 ... -netdev tap,ifname=tap-vmX-N
-    │                                         -device virtio-net-pci,mac=XX:XX:XX:XX:XX:XX
-    │                                         -vnc :{vnc_port - 5900}
-    │                                         -daemonize
-    └─ SSH → workerN: pgrep -f "name vm-X-slice-Y" → obtener PID
+    ├─ SSH → workerN: qemu-img create -f qcow2 -b {image_path} -F qcow2 {disk}.qcow2 {disk_gb * 1024}M
+    ├─ SSH → workerN: ip tuntap add dev {tap} mode tap          (por cada TAP)
+    ├─ SSH → workerN: ovs-vsctl add-port br-int {tap}           (por cada TAP)
+    ├─ SSH → workerN: ip link set {tap} up                      (por cada TAP)
+    ├─ SSH → workerN: nice -n {priority-20} qemu-system-x86_64
+    │                   -netdev tap,id=net0,ifname={tap},script=no,downscript=no
+    │                   -device virtio-net-pci,netdev=net0,mac={mac}
+    │                   -vnc 0.0.0.0:{vnc_port - 5900},websocket=on
+    │                   -daemonize
+    └─ SSH → workerN: pgrep -f "name {vm_id}-{slice_id}" → obtener PID
     │
-    │  Persiste estado en NATS KV (para destroy)
+    │  Persiste estado en NATS KV: compute-vms:{slice_id}
     │
     │  NATS reply → Queue Manager
     │  { slice_id, request_id, status, vms: [{vm_id, worker_ip, pid, vnc_port}] }
@@ -75,16 +79,16 @@ Compute Provisioner
 Queue Manager
 ```
 
-Para destroy, el flujo es análogo usando `compute.destroy`:
+### Destroy
 
 ```
 Compute Provisioner (destroy)
     │
     ├─ Lee VMs del payload (prioridad) o del KV como fallback
-    ├─ SSH → workerN: pkill -f "name vm-X-slice-Y"
-    ├─ SSH → workerN: ovs-vsctl del-port br-int tap-vmX-N        (por cada TAP)
-    ├─ SSH → workerN: ip tuntap del dev tap-vmX-N mode tap       (por cada TAP)
-    └─ SSH → workerN: rm -f /vms/vm-X-slice-Y.qcow2
+    ├─ SSH → workerN: pkill -f "name {vm_id}-{slice_id}"
+    ├─ SSH → workerN: ovs-vsctl del-port br-int {tap}           (por cada TAP)
+    ├─ SSH → workerN: ip tuntap del dev {tap} mode tap          (por cada TAP)
+    └─ SSH → workerN: rm -f /vms/{vm_id}-{slice_id}.qcow2
     │
     │  Elimina estado del KV
     │  NATS reply → Queue Manager
@@ -98,13 +102,12 @@ Queue Manager
 
 ### Entrada: compute.deploy
 
-El puerto VNC y la ruta de imagen **vienen pre-calculados por el Slice Manager**.
-Las MACs y nombres de TAP también **vienen pre-calculados** — el Compute Provisioner
-los aplica directamente sin modificarlos.
+El puerto VNC, la ruta de imagen, las MACs y los nombres de TAP **vienen todos
+pre-calculados por el Slice Manager**. El Compute Provisioner los aplica directamente.
 
 ```json
 {
-  "slice_id": "slice-abc123",
+  "slice_id": "42",
   "request_id": "req-xyz789",
   "vms": [
     {
@@ -113,28 +116,34 @@ los aplica directamente sin modificarlos.
       "ssh_user": "ubuntu",
       "ssh_private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----",
       "vcpus": 1,
-      "ram_mb": 256,
+      "ram_mb": 512,
       "disk_gb": 10,
       "image_path": "/images/cirros-0.5.1-x86_64-disk.img",
       "vnc_port": 5901,
+      "internet_access": 1,
+      "external_ip": "192.168.100.50",
+      "internal_ip": "10.0.42.10",
       "tap_interfaces": [
-        { "tap_name": "tap-vm1-0", "mac": "52:54:00:A3:C7:00" },
-        { "tap_name": "tap-vm1-1", "mac": "52:54:00:A3:C7:01" }
+        { "tap_name": "t-042-n214-mgmt", "mac": "52:54:00:A3:C7:00" },
+        { "tap_name": "t-042-n214-n215", "mac": "52:54:00:A3:C7:01" }
       ],
-      "priority": 0
+      "priority": 20
     }
   ]
 }
 ```
 
-Una VM sin interfaces de red simplemente omite `tap_interfaces` (o lo envía vacío).
-En ese caso QEMU arranca con `-netdev user` (modo NAT, útil para pruebas).
+> `priority` va de 0 (máxima prioridad de CPU) a 39 (mínima). Se mapea a `nice`
+> de Linux como `nice = priority - 20`, es decir: 0 → nice -20, 20 → nice 0, 39 → nice 19.
+
+> Una VM sin interfaces de red puede omitir `tap_interfaces` o enviarlo vacío.
+> En ese caso QEMU arranca con `-netdev user` (modo NAT, útil para pruebas).
 
 ### Entrada: compute.destroy
 
 ```json
 {
-  "slice_id": "slice-abc123",
+  "slice_id": "42",
   "request_id": "req-xyz789",
   "vms": [
     {
@@ -143,7 +152,8 @@ En ese caso QEMU arranca con `-netdev user` (modo NAT, útil para pruebas).
       "ssh_user": "ubuntu",
       "ssh_private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----",
       "tap_interfaces": [
-        { "tap_name": "tap-vm1-0", "mac": "52:54:00:A3:C7:00" }
+        { "tap_name": "t-042-n214-mgmt", "mac": "52:54:00:A3:C7:00" },
+        { "tap_name": "t-042-n214-n215", "mac": "52:54:00:A3:C7:01" }
       ]
     }
   ]
@@ -157,7 +167,7 @@ En ese caso QEMU arranca con `-netdev user` (modo NAT, útil para pruebas).
 
 ```json
 {
-  "slice_id": "slice-abc123",
+  "slice_id": "42",
   "request_id": "req-xyz789",
   "status": "success",
   "vms": [
@@ -195,14 +205,12 @@ las recibe ya resueltas en `tap_interfaces` y las aplica directamente al comando
 
 ### Ejemplo
 
-Para `slice-abc123` con 2 VMs de 2 interfaces cada una:
+Para `slice_id=42` con 1 VM de 2 interfaces:
 
 | VM | Interfaz | MAC |
 |----|----------|-----|
-| vm-1 | tap-vm1-0 | `52:54:00:A3:C7:00` |
-| vm-1 | tap-vm1-1 | `52:54:00:A3:C7:01` |
-| vm-2 | tap-vm2-0 | `52:54:00:A3:C7:02` |
-| vm-2 | tap-vm2-1 | `52:54:00:A3:C7:03` |
+| vm-1 | t-042-n214-mgmt | `52:54:00:A3:C7:00` |
+| vm-1 | t-042-n214-n215 | `52:54:00:A3:C7:01` |
 
 ---
 
@@ -214,13 +222,13 @@ Las interfaces TAP actúan como punto de conexión entre las VMs y el bridge OVS
 ```
 VM (QEMU)
   └─ virtio-net-pci (mac=52:54:00:...)
-       └─ tap-vmX-N   ← creada por este módulo
+       └─ t-042-vmX-Y   ← creada por este módulo
             └─ br-int (OVS)  ← preexistente en el worker
                  └─ ens4 → red de transporte
 ```
 
 El bridge OVS es siempre `br-int` en todos los workers (configurable con
-`OVS_BRIDGE` en `.env`). Las VLANs se manejan internamente en OVS con tags.
+`OVS_BRIDGE` en `.env`). Las VLANs son asignadas luego por el Network Orchestrator.
 
 ---
 
@@ -240,10 +248,8 @@ El estado en KV se elimina automáticamente tras cada destroy, o expira a las
 
 ## Variables de entorno
 
-Copiar `.env.example` a `.env` y ajustar:
-
 | Variable | Default | Descripción |
-|----------|---------|-------------|
+|---|---|---|
 | `NATS_URL` | `nats://nats:4222` | URL del servidor NATS |
 | `NATS_KV_BUCKET` | `compute-state` | Bucket KV para persistir VMs desplegadas |
 | `QUEUE_DEPLOY` | `compute.deploy` | Subject de entrada para deploy |
@@ -256,7 +262,7 @@ Copiar `.env.example` a `.env` y ajustar:
 | `VMS_BASE_DIR` | `/vms` | Directorio de discos VM en workers |
 | `MAX_CONCURRENT_WORKERS` | `10` | Workers procesados en paralelo |
 | `LOG_LEVEL` | `INFO` | Nivel de logging |
-| `HEALTH_PORT` | `8080` | Puerto del healthcheck HTTP |
+| `HEALTH_PORT` | `8080` | Puerto interno del healthcheck HTTP (mapeado al 8081 en Docker) |
 
 ---
 
@@ -299,17 +305,14 @@ Antes de desplegar, cada worker debe tener:
 ## Despliegue con Docker
 
 ```bash
-# 1. Copiar configuración
-cp .env.example .env
-
-# 2. Levantar
+# 1. Levantar
 docker compose up -d
 
-# 3. Verificar
+# 2. Verificar (puerto externo 8081)
 curl http://localhost:8081/health
 # → {"status": "ok", "nats": true}
 
-# 4. Logs
+# 3. Logs
 docker compose logs -f compute-provisioner
 ```
 
@@ -326,18 +329,18 @@ y devuelve HTTP 503 en ese caso.
 Cada proceso QEMU se nombra con el patrón `{vm_id}-{slice_id}`:
 
 ```bash
-pgrep -f "name vm-1-slice-abc123"
+pgrep -f "name vm-1-42"
 # → 14823
 
-ps aux | grep "vm-1-slice-abc123"
+ps aux | grep "vm-1-42"
 ```
 
 ---
 
 ## Nota sobre imágenes (evolución futura)
 
-Actualmente la ruta de imagen viene pre-calculada en el mensaje (`image_path`),
-calculada por el Slice Manager. La función `app/utils/image_resolver.py:get_image_path()`
+La ruta de imagen viene pre-calculada en el mensaje (`image_path`), calculada
+por el Slice Manager. La función `app/utils/image_resolver.py:get_image_path()`
 sigue disponible como utilidad, pero el punto de extensión principal para migrar
 a distribución dinámica desde una BD es el Slice Manager, no este módulo.
 

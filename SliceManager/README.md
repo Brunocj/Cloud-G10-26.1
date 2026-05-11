@@ -13,10 +13,11 @@ resultados y ejecuta rollback automático ante fallos.
 - Persistir slices y VMs en MySQL (modelo relacional).
 - Consultar métricas reales de los workers desde Prometheus.
 - Invocar al VM Placement para obtener el mapa `vm → worker`.
-- Enriquecer el contrato con: IPs SSH, llaves PEM, MACs, TAP names, VLANs, VNC ports, rutas de imagen.
+- Enriquecer el contrato con: IPs SSH, llaves PEM, MACs, TAP names (incluido TAP de gestión), VLANs, VNC ports, rutas de imagen, IPs internas de la subred de gestión.
 - Publicar `slice.deploy` y `slice.destroy` en NATS JetStream hacia el Queue Manager.
 - Escuchar `slice.result` y actualizar el estado en MySQL.
 - Ejecutar rollback automático (publish destroy) si el resultado es error.
+- Gestionar el pool de IPs externas (tabla `ip_pool`): reservar al crear borrador, liberar al destruir o actualizar.
 
 **No** ejecuta comandos en workers — eso es del Compute Provisioner.  
 **No** configura red — eso es del Network Orchestrator.  
@@ -57,7 +58,7 @@ deploy_router.py
     ├─ Valida que el slice exista en MySQL
     ├─ Cambia status → PENDING_APPROVAL
     └─ Encola en placement_queue (asyncio.Queue)
-    │  Responde 202 inmediatamente
+       Responde 202 inmediatamente
     ▼
 placement_worker.py (background)
     │
@@ -66,27 +67,34 @@ placement_worker.py (background)
     ├─ 3. POST http://vm-placement:8080/placement → mapa vm→worker
     │
     │  Si placement == SUCCESS:
-    ├─ 4. Para cada edge del slice_json:
-    │       - Genera tap names: t-{slice[-3:]}-{vm1[:4]}-{vm2[:4]}
+    ├─ 4. Para cada VM: genera TAP de gestión (eth0)
+    │       - tap_name: t-{slice[-3:]}-{vm[:4]}-m
+    │       - mac: 52:54:XX:YY:{counter:02x}
+    │
+    ├─ 5. Para cada edge del slice_json:
+    │       - Genera tap names de datos: t-{slice[-3:]}-{vm1[:4]}-{vm2[:4]}
     │       - Genera MACs: 52:54:XX:YY:{counter:02x} (XX:YY = SHA256 del slice_id)
     │       - Asigna VLAN libre aleatoria (100–4000, sin colisión con BD)
-    │       - Persiste Vlan en MySQL
+    │       - Persiste Vlan en MySQL (tabla vlans)
     │       - Lee llave PEM desde ./keys/workerN.pem
     │
-    ├─ 5. Para cada VM:
+    ├─ 6. Para cada VM:
     │       - Asigna VNC port libre por worker (5901–5999, sin colisión con BD)
     │       - Consulta image_path desde tabla images
+    │       - Calcula IP interna: 10.{slice//256}.{slice%256}.{10+idx}
+    │       - Inyecta internet_access, external_ip, internal_ip
     │       - Construye VMSpec completo
     │
-    ├─ 6. Guarda deployed_vms y deployed_links en slice_json (MySQL)
-    ├─ 7. Publica slice.deploy en NATS JetStream → Queue Manager
-    └─ 8. Cambia status → PROVISIONING
+    ├─ 7. Guarda deployed_vms y deployed_links en slice_json (MySQL) — ANTES de publicar
+    ├─ 8. Publica slice.deploy en NATS JetStream → Queue Manager
+    └─ 9. Cambia status → PROVISIONING (o FAILED si el publish falló)
     ▼
 Queue Manager → Compute + Network → slice.result
     ▼
 nats_listener.py (background)
-    ├─ status == "success" → slice.status = ACTIVE
+    ├─ status == "success" → slice.status = ACTIVE, vm.state = ACTIVE
     └─ status != "success" → slice.status = FAILED
+                              libera VLANs de MySQL
                               publica slice.destroy (rollback automático)
 ```
 
@@ -99,7 +107,8 @@ Frontend
     │ DELETE /api/v1/slices/{id}
     ▼
 deploy_router.py
-    ├─ Si status == DRAFT: elimina VMs + slice de MySQL → responde 200
+    ├─ Si status == DRAFT:
+    │     Elimina VMs + Slice de MySQL → responde 200
     │
     └─ Si status != DRAFT:
         ├─ Lee deployed_vms y deployed_links de slice_json
@@ -122,13 +131,12 @@ deploy_router.py
 | `DELETE` | `/api/v1/slices/{id}` | Destruye un slice activo o elimina un borrador |
 | `GET` | `/api/v1/slices/utils/images` | Lista imágenes disponibles |
 | `GET` | `/api/v1/slices/utils/workers` | Lista workers registrados |
+| `GET` | `/api/v1/slices/utils/available-ips` | Lista IPs del pool que no están en uso |
 | `GET` | `/` | Healthcheck básico |
 
 ---
 
-## Formato de mensajes NATS
-
-### slice.deploy (publicado al Queue Manager)
+## Formato del mensaje NATS `slice.deploy`
 
 ```json
 {
@@ -146,8 +154,12 @@ deploy_router.py
       "image_path": "/images/cirros-0.5.1-x86_64-disk.img",
       "vnc_port": 5901,
       "vnc_display": 1,
+      "internet_access": 1,
+      "external_ip": "192.168.100.50",
+      "internal_ip": "10.0.42.10",
       "tap_interfaces": [
-        { "tap_name": "t-042-n214-n215", "mac": "52:54:00:A3:C7:00" }
+        { "tap_name": "t-042-n214-m",    "mac": "52:54:00:A3:C7:00" },
+        { "tap_name": "t-042-n214-n215", "mac": "52:54:00:A3:C7:01" }
       ]
     }
   ],
@@ -160,23 +172,24 @@ deploy_router.py
       "vm1_tap": "t-042-n214-n215",
       "vm1_ssh_user": "ubuntu",
       "vm1_ssh_private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----",
-      "vm1_security_rules": [],
       "vm2_id": "n215",
       "vm2_worker_ip": "10.0.10.3",
       "vm2_tap": "t-042-n215-n214",
       "vm2_ssh_user": "ubuntu",
-      "vm2_ssh_private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----",
-      "vm2_security_rules": []
+      "vm2_ssh_private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----"
     }
   ]
 }
 ```
 
-### slice.destroy (publicado al Queue Manager)
+> El TAP `t-042-n214-m` (sufijo `-m`) es la interfaz de gestión (eth0) que conecta
+> la VM al Gateway L3. Se genera siempre, independientemente de si la VM tiene enlaces.
 
-Mismo formato que `slice.deploy` pero sin campos opcionales de imagen/vnc.
-Las `vms` y `links` se recuperan de `slice_json.deployed_vms` y `slice_json.deployed_links`
-guardados en MySQL durante el deploy.
+## Formato del mensaje NATS `slice.destroy`
+
+Mismo formato que `slice.deploy` pero usando los datos guardados en `deployed_vms`
+y `deployed_links` de `slice_json` en MySQL. Se envía la receta completa para que
+Compute y Network puedan limpiar sin depender de estado externo.
 
 ---
 
@@ -187,26 +200,30 @@ guardados en MySQL durante el deploy.
 
   52:54:00  → prefijo QEMU estándar
   XX:YY     → primeros 4 chars del SHA-256 del slice_id
-  ZZ        → contador secuencial global (0x00–0xFF)
+  ZZ        → contador secuencial global dentro del slice (0x00–0xFF)
+             (incluye el TAP de gestión, que siempre es el primero)
 ```
 
-Ejemplo para `slice_id=42`:
-```
-52:54:00:A3:C7:00   → primer TAP del slice 42
-52:54:00:A3:C7:01   → segundo TAP del slice 42
-```
+Ejemplo para `slice_id=42`, 2 VMs con 1 enlace:
 
-## Esquema de generación de TAP names
+| VM | Tipo de TAP | tap_name | MAC |
+|----|-------------|----------|-----|
+| n214 | gestión | t-042-n214-m | `52:54:00:A3:C7:00` |
+| n215 | gestión | t-042-n215-m | `52:54:00:A3:C7:01` |
+| n214 | enlace | t-042-n214-n215 | `52:54:00:A3:C7:02` |
+| n215 | enlace | t-042-n215-n214 | `52:54:00:A3:C7:03` |
+
+## Esquema de IPs internas (subred de gestión)
+
+La IP interna de cada VM se calcula a partir del `slice_id`:
 
 ```
-t-{slice_id[-3:]}-{vm1_id[:4]}-{vm2_id[:4]}
-t-{slice_id[-3:]}-{vm2_id[:4]}-{vm1_id[:4]}
-```
+subred = 10. (slice_id // 256) % 256 . slice_id % 256 .0/24
+VMs    = 10.X.Y.10, 10.X.Y.11, 10.X.Y.12, ...
 
-Ejemplo: slice 42, VMs `n214` ↔ `n215`:
-```
-vm1 side: t-042-n214-n215
-vm2 side: t-042-n215-n214
+Ejemplos:
+  slice_id=1  → 10.0.1.10, 10.0.1.11, ...
+  slice_id=42 → 10.0.42.10, 10.0.42.11, ...
 ```
 
 ---
@@ -217,15 +234,27 @@ Tablas principales utilizadas por este módulo:
 
 | Tabla | Descripción |
 |-------|-------------|
-| `slices` | Estado y metadatos del slice, incluye `slice_json` (JSON) |
-| `vms` | VMs con recursos, worker asignado, vnc_port |
-| `vlans` | VLANs asignadas por slice (se limpian al destroy) |
+| `slices` | Estado y metadatos del slice, incluye `slice_json` (JSON) con la topología y `deployed_vms`/`deployed_links` post-deploy |
+| `vms` | VMs con recursos, worker asignado, vnc_port, external_ip, internet_access |
+| `vlans` | VLANs asignadas por slice (se limpian al destroy o rollback) |
 | `images` | Imágenes disponibles con `path` absoluto en el worker |
-| `workers` | Workers registrados con IP |
-| `users`, `projects` | IAM — usados por routers (actualmente hardcodeado `user-123`) |
+| `workers` | Workers registrados con IP y zona de disponibilidad |
+| `ip_pool` | Pool de IPs externas flotantes: `is_used`, `vm_id` (FK) |
+| `users`, `projects` | IAM — usados por routers (actualmente hardcodeado `creator_id = "user-123"`) |
 
-El campo `slice_json` almacena la topología del canvas y, tras el deploy, también
-`deployed_vms` y `deployed_links` (la "receta" completa para poder hacer destroy).
+El campo `slice_json` almacena dos secciones:
+- `nodes` / `edges`: topología del canvas (creada al guardar borrador)
+- `deployed_vms` / `deployed_links`: receta completa post-placement (creada al desplegar)
+
+### Gestión del pool de IPs externas
+
+Al crear o actualizar un borrador con `external_ip` en una VM:
+- Se marca `ip_pool.is_used = 1` y `ip_pool.vm_id = <nueva_vm.id>`.
+
+Al actualizar un borrador, las IPs de las VMs anteriores se liberan antes de eliminarlas.
+
+Al destruir un slice (DRAFT), las IPs no se liberan explícitamente aquí — la eliminación
+en cascada de la VM limpia el FK en `ip_pool`.
 
 ---
 
@@ -236,27 +265,35 @@ Las credenciales SSH se leen desde archivos `.pem` montados en el contenedor:
 ```
 slice-manager/
 └── keys/
-    ├── worker1.pem
-    ├── worker2.pem
-    ├── worker3.pem
-    └── worker4.pem
+    ├── worker1.pem   → worker_id=1, IP 10.0.10.1
+    ├── worker2.pem   → worker_id=2, IP 10.0.10.2
+    ├── worker3.pem   → worker_id=3, IP 10.0.10.3
+    └── worker4.pem   → worker_id=4, IP 10.0.10.4
 ```
 
-El mapeo `worker_id → IP` está hardcodeado en `placement_worker.py`:
+El mapeo `worker_id → IP` está hardcodeado en `placement_worker.py` (variable `server_inventory`).
+Todos los workers usan el usuario SSH `ubuntu`.
 
-| worker_id | IP | Usuario |
-|-----------|-----|---------|
-| 1 | 10.0.10.1 | ubuntu |
-| 2 | 10.0.10.2 | ubuntu |
-| 3 | 10.0.10.3 | ubuntu |
-| 4 | 10.0.10.4 | ubuntu |
+---
+
+## Telemetría y fallback
+
+El módulo consulta Prometheus para obtener métricas reales de los workers antes de
+cada placement:
+
+- `node_memory_MemAvailable_bytes / 1024 / 1024` → RAM disponible en MB
+- `count by(instance)(node_cpu_seconds_total{mode="idle"})` → vCPUs disponibles
+- `node_filesystem_avail_bytes{mountpoint="/"} / 1024 / 1024 / 1024` → disco en GB
+
+Si Prometheus no responde (timeout 5s), usa métricas simuladas para no bloquear
+el pipeline: 10 vCPUs, 16 GB RAM, 500 GB disco por worker.
 
 ---
 
 ## Variables de entorno
 
 | Variable | Default | Descripción |
-|----------|---------|-------------|
+|---|---|---|
 | `NATS_URL` | `nats://localhost:4222` | URL del servidor NATS (Queue Manager) |
 | `VM_PLACEMENT_URL` | `http://vm-placement:8080/placement` | URL del VM Placement |
 | `PROMETHEUS_URL` | `http://10.0.10.1:9090` | URL de Prometheus |
@@ -288,32 +325,3 @@ docker compose logs -f slice-manager
 
 > **Nota:** El Slice Manager se conecta a MySQL en `host.docker.internal` (la
 > máquina host). Asegurarse de que MySQL esté corriendo y accesible antes de levantar.
-
----
-
-## Telemetría y fallback
-
-El módulo consulta Prometheus para obtener métricas reales de los workers antes de
-cada placement:
-
-- `node_memory_MemAvailable_bytes` → RAM disponible en MB
-- `count(node_cpu_seconds_total{mode="idle"})` → vCPUs disponibles por instancia
-- `node_filesystem_avail_bytes{mountpoint="/"}` → disco disponible en GB
-
-Si Prometheus no responde (timeout 5s), usa métricas simuladas para no bloquear
-el pipeline: 10 vCPUs, 16 GB RAM, 500 GB disco por worker.
-
----
-
-## Script de prueba de concurrencia
-
-`test_concurrency.py` dispara 20 requests simultáneos al endpoint de deploy
-para validar que la `asyncio.Queue` los serializa correctamente sin que el
-servidor colapse:
-
-```bash
-python test_concurrency.py
-```
-
-El resultado esperado: todos los requests reciben `202 ACCEPTED` inmediatamente
-(< 1s cada uno) y el placement_worker los procesa uno por uno en background.

@@ -75,6 +75,7 @@ Queue Manager
     │           si status == "error" → falla y notifica
     │
     ├─ Paso 2: core NATS request → network.deploy  (timeout: 60s)
+    │           envía links + vms (necesario para Gateway, DHCP y NAT)
     │           espera respuesta directa del Network Orchestrator
     │           si status != "success" → falla y notifica
     │
@@ -98,7 +99,7 @@ Queue Manager
     ├─ Persiste estado en NATS KV
     │
     ├─ Paso 0: core NATS request → network.destroy  (timeout: 60s)
-    │           limpia VLANs y puertos OVS
+    │           envía links + vms (para limpiar Gateway, NAT y puertos OVS)
     │           si no responde: warning y continúa (no bloquea)
     │
     ├─ Paso 1: core NATS request → compute.destroy  (timeout: 300s)
@@ -136,10 +137,14 @@ Slice Manager
       "image_path": "/images/cirros-0.5.1-x86_64-disk.img",
       "vnc_port": 5901,
       "vnc_display": 1,
+      "internet_access": 1,
+      "external_ip": "192.168.100.50",
+      "internal_ip": "10.0.42.10",
       "tap_interfaces": [
-        { "tap_name": "tap-vm1-0", "mac": "52:54:00:A3:C7:00" }
+        { "tap_name": "t-042-n214-m",    "mac": "52:54:00:A3:C7:00" },
+        { "tap_name": "t-042-n214-n215", "mac": "52:54:00:A3:C7:01" }
       ],
-      "priority": 0
+      "priority": 20
     }
   ],
   "links": [
@@ -148,13 +153,13 @@ Slice Manager
       "vlan_id": 100,
       "vm1_id": "vm-1",
       "vm1_worker_ip": "10.0.10.2",
-      "vm1_tap": "tap-vm1-0",
+      "vm1_tap": "t-042-n214-n215",
       "vm1_ssh_user": "ubuntu",
       "vm1_ssh_private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----",
       "vm1_security_rules": [{ "allow_port": 22, "protocol": "tcp" }],
       "vm2_id": "vm-2",
       "vm2_worker_ip": "10.0.10.3",
-      "vm2_tap": "tap-vm2-0",
+      "vm2_tap": "t-042-n215-n214",
       "vm2_ssh_user": "ubuntu",
       "vm2_ssh_private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----",
       "vm2_security_rules": []
@@ -181,8 +186,12 @@ Slice Manager
       "image_path": "/images/cirros-0.5.1-x86_64-disk.img",
       "vnc_port": 5901,
       "vnc_display": 1,
+      "internet_access": 1,
+      "external_ip": "192.168.100.50",
+      "internal_ip": "10.0.42.10",
       "tap_interfaces": [
-        { "tap_name": "tap-vm1-0", "mac": "52:54:00:A3:C7:00" }
+        { "tap_name": "t-042-n214-m",    "mac": "52:54:00:A3:C7:00" },
+        { "tap_name": "t-042-n214-n215", "mac": "52:54:00:A3:C7:01" }
       ]
     }
   ],
@@ -191,11 +200,11 @@ Slice Manager
       "connection_id": "conn-001",
       "vlan_id": 100,
       "vm1_worker_ip": "10.0.10.2",
-      "vm1_tap": "tap-vm1-0",
+      "vm1_tap": "t-042-n214-n215",
       "vm1_ssh_user": "ubuntu",
       "vm1_ssh_private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----",
       "vm2_worker_ip": "10.0.10.3",
-      "vm2_tap": "tap-vm2-0",
+      "vm2_tap": "t-042-n215-n214",
       "vm2_ssh_user": "ubuntu",
       "vm2_ssh_private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----"
     }
@@ -252,8 +261,10 @@ Slice Manager
 | `SUBJECT_RESULT` | `slice.result` | Subject de salida de resultados |
 | `SUBJECT_COMPUTE_DEPLOY` | `compute.deploy` | Subject hacia el Compute Provisioner (deploy) |
 | `SUBJECT_COMPUTE_DESTROY` | `compute.destroy` | Subject hacia el Compute Provisioner (destroy) |
+| `SUBJECT_COMPUTE_RESULT` | `compute.result` | Subject de resultado del Compute Provisioner |
 | `SUBJECT_NETWORK_DEPLOY` | `network.deploy` | Subject hacia el Network Orchestrator (deploy) |
 | `SUBJECT_NETWORK_DESTROY` | `network.destroy` | Subject hacia el Network Orchestrator (destroy) |
+| `SUBJECT_NETWORK_RESULT` | `network.result` | Subject de resultado del Network Orchestrator |
 | `JS_STREAM_NAME` | `SLICES` | Nombre del stream JetStream (captura `slice.*`) |
 | `JS_KV_BUCKET` | `slice-state` | Bucket KV para persistir estado de operaciones |
 | `COMPUTE_TIMEOUT` | `300` | Segundos máximos para esperar al Compute Provisioner |
