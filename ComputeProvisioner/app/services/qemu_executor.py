@@ -42,17 +42,41 @@ class QEMUExecutor:
     # Deploy
     # ------------------------------------------------------------------
 
-    # 🔥 FIX: Añadimos disk_gb como parámetro
     def create_disk(self, vm_id: str, slice_id: str, image_path: str, worker_ip: str, disk_gb: float) -> str:
         """
-        Crea un disco QCOW2 con thin provisioning (backing file) y tamaño específico.
+        Crea un disco QCOW2 con thin provisioning (backing file).
+
+        El tamaño final del overlay es max(disk_gb, tamaño virtual de la imagen base)
+        para evitar que GRUB falle con "outside of disk 'hd0'" en imágenes grandes
+        como Ubuntu (virtual size ~2.2 GB).
         """
         disk_path = get_vm_disk_path(vm_id, slice_id)
-        
-        # 🔥 FIX: Convertimos a Megabytes. Si piden 0.5 GB, será 512M. ¡A prueba de fallos!
-        size_arg = f"{int(disk_gb * 1024)}M"
 
-        # 🔥 FIX: Añadimos el tamaño al final del comando
+        # Consultamos el tamaño virtual de la imagen base (en bytes)
+        requested_mb = int(disk_gb * 1024)
+        try:
+            out = self._exec_checked(
+                f"sudo qemu-img info --output=json {image_path}"
+            )
+            import json
+            backing_info = json.loads(out)
+            backing_bytes = backing_info.get("virtual-size", 0)
+            backing_mb = int(backing_bytes / (1024 * 1024))
+            logger.info(
+                "Imagen base %s: virtual-size = %d MB, solicitado = %d MB",
+                image_path, backing_mb, requested_mb,
+            )
+        except Exception as exc:
+            logger.warning(
+                "No se pudo leer virtual-size de %s (%s), usando tamaño solicitado",
+                image_path, exc,
+            )
+            backing_mb = 0
+
+        # El overlay NUNCA debe ser menor que la imagen base
+        final_mb = max(requested_mb, backing_mb)
+        size_arg = f"{final_mb}M"
+
         self._exec_checked(
             f"sudo qemu-img create -f qcow2 -b {image_path} -F qcow2 {disk_path} {size_arg}"
         )
@@ -78,6 +102,50 @@ class QEMUExecutor:
             self._exec_checked(f"sudo ip link set {tap} up")
             logger.info("TAP %s conectada a OVS bridge %s", tap, bridge)
 
+    def _prepare_cloud_init(self, vm_id: str, image_path: str, public_key_path: str = "keys/worker_key.pub") -> str:
+        """Genera el ISO de cloud-init en el worker físico para inyectar la llave SSH"""
+        
+        # Detectamos el usuario según la imagen
+        os_user = "cirros" if "cirros" in image_path.lower() else "ubuntu"
+
+        try:
+            # Leemos tu llave pública dentro del contenedor de provisioner
+            with open(public_key_path, "r") as f:
+                pub_key = f.read().strip()
+        except Exception:
+            pub_key = ""
+
+        # Creamos el archivo YAML que el OS leerá al encender
+        user_data = f"""#cloud-config
+users:
+  - name: {os_user}
+    ssh-authorized-keys:
+      - {pub_key}
+    sudo: ['ALL=(ALL) NOPASSWD:ALL']
+    groups: sudo
+    shell: /bin/bash
+chpasswd:
+  list: |
+    {os_user}:pucp2026
+  expire: False
+"""
+        meta_data = f"instance-id: {vm_id}\nlocal-hostname: {vm_id}\n"
+
+        # Mandamos esto por SSH al worker para crear el .iso
+        cmd_cloud_init = f"""
+        cat << 'EOF' > /tmp/{vm_id}_user-data
+{user_data}
+EOF
+        cat << 'EOF' > /tmp/{vm_id}_meta-data
+{meta_data}
+EOF
+        sudo cloud-localds /vms/{vm_id}_seed.iso /tmp/{vm_id}_user-data /tmp/{vm_id}_meta-data
+        """
+        
+        # 🔥 FIX: Usamos la función _ssh.exec que ya existe en tu clase, de forma síncrona
+        self._ssh.exec(cmd_cloud_init)
+        return f"/vms/{vm_id}_seed.iso"
+
     def launch_vm(
         self,
         vm_id:          str,
@@ -87,6 +155,7 @@ class QEMUExecutor:
         ram_mb:         int,
         vnc_display:    int,
         tap_interfaces: List[TapInterface],
+        image_path:     str,   # 🔥 FIX: Añadimos image_path aquí para enviarlo a cloud_init
         priority:       int = 0,
     ) -> int:
         """
@@ -96,11 +165,11 @@ class QEMUExecutor:
         name    = f"{vm_id}-{slice_id}"
         net_args = _build_net_args(tap_interfaces)
 
-        # 🔥 FIX: Mapeo matemático. Si el frontend manda 0, nice será -20 (máxima prioridad). 
-        # Si manda 39, nice será 19 (mínima prioridad). Linux estará feliz.
         linux_nice = priority - 20
-
-        # En qemu_executor.py, dentro de launch_vm
+        
+        # 🔥 FIX: Llamamos a la función síncrona usando self y las variables locales
+        seed_iso_path = self._prepare_cloud_init(vm_id, image_path)
+        
         cmd = (
             f"sudo nice -n {linux_nice} "
             f"qemu-system-x86_64 "
@@ -109,6 +178,7 @@ class QEMUExecutor:
             f"-m {ram_mb} "
             f"-smp {vcpus} "
             f"-drive file={disk_path},format=qcow2 "
+            f"-cdrom {seed_iso_path} "
             f"-vnc 0.0.0.0:{vnc_display},websocket=on " 
             f"{net_args}"
             f"-daemonize"

@@ -98,6 +98,7 @@ class Provisioner:
                         ram_mb=vm.ram_mb,
                         vnc_display=vnc_display, # 🔥 Usamos la variable local
                         tap_interfaces=vm.tap_interfaces,
+                        image_path=vm.image_path,  # <---- AÑADE ESTA LÍNEA AQUÍ
                         priority=vm.priority,
                     )
 

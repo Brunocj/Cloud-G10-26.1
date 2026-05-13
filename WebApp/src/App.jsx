@@ -117,7 +117,7 @@ const NodeEditor = ({ node, availableImages, sliceStatus, onSave, onDelete, onCl
                 });
         }
     }, [f.internet_access]);
-    
+
     return (
         <div style={{ position: "absolute", right: 12, top: 12, width: 268, zIndex: 300, background: T.surface, borderRadius: 14, border: `1.5px solid ${T.accentMid}55`, boxShadow: T.shadowMd, overflow: "hidden" }}>
             <div style={{ background: T.accentLight, padding: "11px 14px", borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -138,9 +138,8 @@ const NodeEditor = ({ node, availableImages, sliceStatus, onSave, onDelete, onCl
                         onChange={e => {
                             const selectedId = Number(e.target.value);
                             const selectedName = availableImages.find(i => i.id === selectedId)?.name;
-                            // Guardamos el ID para la BD, y el Name para que el Canvas lo dibuje
-                            u("image_id", selectedId);
-                            u("image", selectedName);
+                            // Guardamos ambos en un solo setState para evitar que React batchee y pierda uno
+                            setF(p => ({ ...p, image_id: selectedId, image: selectedName }));
                         }}
                         style={inp}
                     >
@@ -168,11 +167,11 @@ const NodeEditor = ({ node, availableImages, sliceStatus, onSave, onDelete, onCl
                 <div style={{ background: T.surfaceElevated, borderRadius: 9, padding: "11px 12px", border: `1px solid ${T.border}` }}>
                     <Lbl>Networking (R5)</Lbl>
                     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                        
+
                         {/* Checkbox: Salida a Internet */}
                         <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, fontWeight: 600, color: T.text, cursor: isReadOnly ? "default" : "pointer" }}>
-                            <input 
-                                type="checkbox" 
+                            <input
+                                type="checkbox"
                                 disabled={isReadOnly}
                                 checked={f.internet_access === 1}
                                 onChange={e => {
@@ -192,8 +191,8 @@ const NodeEditor = ({ node, availableImages, sliceStatus, onSave, onDelete, onCl
                         {/* Input: IP Externa (Solo se habilita si hay internet) */}
                         <div style={{ opacity: f.internet_access ? 1 : 0.5, transition: "opacity 0.2s" }}>
                             <div style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, marginBottom: 4 }}>Asignar IP del Pool (10.60.15.X)</div>
-                            <select 
-                                value={f.external_ip || ""} 
+                            <select
+                                value={f.external_ip || ""}
                                 disabled={isReadOnly || !f.internet_access}
                                 onChange={e => u("external_ip", e.target.value)}
                                 style={{ ...inp, fontSize: 12, cursor: "pointer", background: (isReadOnly || !f.internet_access) ? "transparent" : T.surface }}
@@ -374,7 +373,11 @@ const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlice, onOp
                 )}
                 {mode === "select" && <span style={{ fontSize: 11, color: T.textMuted }}>Drag to move · Double-click to edit · Click an edge to delete it</span>}
                 <div style={{ flex: 1 }} />
-                <button onClick={() => { setNodes([]); setEdges([]); setLinkFrom(null); setEditId(null); }}
+                <button onClick={() => {
+                    if (window.confirm("⚠️ ¿Estás seguro de limpiar todo el lienzo? Perderás el trabajo no guardado.")) {
+                        setNodes([]); setEdges([]); setLinkFrom(null); setEditId(null);
+                    }
+                }}
                     style={btnBase({ boxShadow: "none", fontSize: 11, padding: "5px 12px", color: T.red, border: `1px solid ${T.red}33`, background: T.redLight })}>
                     🗑️ Clear
                 </button>
@@ -901,6 +904,73 @@ export default function App() {
         }
     };
 
+    // -- Exportar / Importar Topologías ------------------------------------------
+    const exportarTopologia = () => {
+        if (nodes.length === 0) {
+            flash("No hay nodos para exportar", "error");
+            return;
+        }
+        const dataActual = {
+            vms: nodes,
+            edges: edges
+        };
+        const dataStr = JSON.stringify(dataActual, null, 2);
+        const blob = new Blob([dataStr], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `topologia_pucp_${new Date().getTime()}.json`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+        flash("Topología exportada exitosamente");
+    };
+
+    const importarTopologia = (event) => {
+        const file = event.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            try {
+                const jsonImportado = JSON.parse(e.target.result);
+                if (jsonImportado.vms && Array.isArray(jsonImportado.vms)) {
+                    // Generamos un sufijo único para evitar colisiones de IDs (ej. n1_imp_4012)
+                    const suffix = `_imp_${new Date().getTime().toString().slice(-4)}`;
+                    const idMap = {};
+
+                    const newNodes = jsonImportado.vms.map(n => {
+                        const newId = `${n.id}${suffix}`;
+                        idMap[n.id] = newId;
+                        // Desplazamos un poco las X y Y para que no se superpongan exactamente encima de las actuales
+                        return { ...n, id: newId, x: (n.x || 0) + 50, y: (n.y || 0) + 50 };
+                    });
+
+                    const newEdges = (jsonImportado.edges || []).map(edge => ({
+                        ...edge,
+                        id: `${edge.id}${suffix}`,
+                        from: idMap[edge.from] || edge.from,
+                        to: idMap[edge.to] || edge.to
+                    }));
+
+                    // MAGIA: Usamos el estado previo (prev) y le SUMAMOS los nuevos, en lugar de reemplazarlos
+                    setNodes(prev => [...prev, ...newNodes]);
+                    setEdges(prev => [...prev, ...newEdges]);
+                    flash("Topología importada y añadida al lienzo actual");
+                } else {
+                    throw new Error("Formato inválido");
+                }
+            } catch (error) {
+                console.error("Error al leer el JSON:", error);
+                flash("El archivo no es una topología válida.", "error");
+            }
+        };
+        event.target.value = null;
+        reader.readAsText(file);
+    };
+
     // Setters that update in-place when viewing a slice
     const setSliceNodes = fn => setSlices(p => p.map(s => s.id === activeId ? refreshMeta({ ...s, nodes: typeof fn === "function" ? fn(s.nodes) : fn }) : s));
     const setSliceEdges = fn => setSlices(p => p.map(s => s.id === activeId ? refreshMeta({ ...s, edges: typeof fn === "function" ? fn(s.edges) : fn }) : s));
@@ -991,7 +1061,22 @@ export default function App() {
                         <>
                             <span style={{ fontSize: 14, fontWeight: 700, color: T.text }}>Topology Designer</span>
                             <span style={{ fontSize: 11, color: T.textMuted }}>— New Slice</span>
+
                             <div style={{ flex: 1 }} />
+
+                            {/* NUEVOS BOTONES DE IMPORTAR/EXPORTAR */}
+                            <label style={btnBase({ fontSize: 12, padding: "6px 14px", background: T.surface, color: T.text, boxShadow: "none", cursor: "pointer" })}>
+                                ⬆️ Importar
+                                <input type="file" accept=".json" style={{ display: 'none' }} onChange={importarTopologia} />
+                            </label>
+
+                            {nodes.length > 0 && (
+                                <button onClick={exportarTopologia} style={btnBase({ fontSize: 12, padding: "6px 14px", background: T.surface, color: T.text, boxShadow: "none" })}>
+                                    ⬇️ Exportar
+                                </button>
+                            )}
+                            <div style={{ width: 1, height: 22, background: T.border, margin: "0 4px" }} />
+
                             {nodes.length > 0 && (
                                 <button onClick={() => setModal("draft")}
                                     style={btnBase({ fontSize: 12, padding: "6px 14px", background: T.surfaceElevated, color: T.textMuted, boxShadow: "none" })}>

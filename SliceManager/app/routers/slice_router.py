@@ -11,7 +11,7 @@ router = APIRouter(prefix="/api/v1/slices", tags=["Slices / Topologies"])
 
 @router.get("/", status_code=200)
 def list_slices(db: Session = Depends(get_db)):
-    slices = db.query(Slice).filter(Slice.creator_id == "user-123").all()
+    slices = db.query(Slice).filter(Slice.creator_id == "user-123").order_by(Slice.id.desc()).all()
     
     result = []
     for t in slices:
