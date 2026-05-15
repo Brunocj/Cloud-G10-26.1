@@ -2,7 +2,7 @@ import json
 import logging
 import uuid # <-- Añadir para el request_id del destroy
 from app.database import SessionLocal
-from app.models import Slice, Vlan, Vm
+from app.models import Slice, Vlan, Vm, IpPool
 from app.nats_producer import nats_producer
 
 logger = logging.getLogger("SliceManager.Listener")
@@ -34,8 +34,21 @@ async def nats_result_listener():
                     
                     # 1. Liberamos las VLANs de la base de datos local
                     db.query(Vlan).filter(Vlan.slice_id == slice_id).delete()
+
+                    # 2. Liberamos IPs externas del pool
+                    vms = db.query(Vm).filter(
+                        Vm.slice_id == slice_id,
+                        Vm.external_ip.isnot(None)
+                    ).all()
+                    if vms:
+                        ips = [vm.external_ip for vm in vms if vm.external_ip]
+                        if ips:
+                            ip_records = db.query(IpPool).filter(IpPool.ip_address.in_(ips)).all()
+                            for record in ip_records:
+                                record.is_used = 0
+                                record.vm_id = None
                     
-                    # 2. Disparamos la orden de destrucción a NATS para limpiar los workers
+                    # 3. Disparamos la orden de destrucción a NATS para limpiar los workers
                     rollback_payload = {
                         "slice_id": str(slice_id), 
                         "request_id": f"req-rollback-{uuid.uuid4().hex[:8]}"

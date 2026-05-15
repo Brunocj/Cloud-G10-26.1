@@ -146,12 +146,29 @@ class NetworkExecutor:
                 if getattr(vm, 'external_ip', None) and internal_vm_ip:
                     ext_ip = vm.external_ip
 
-                    # 🔥 TRUCO VITAL: El host físico debe reclamar la IP para que el ruteo la intercepte
-                    ssh.exec(f"sudo ip addr add {ext_ip}/32 dev {settings.WAN_INTERFACE} || true")
-                    
-                    cmd_dnat = f"sudo iptables -t nat -A PREROUTING -d {ext_ip} -j DNAT --to-destination {internal_vm_ip}"
+                    # 🔥 Acceso exterior: DNAT por la interfaz de datos (ens4) hacia la VM interna
+                    ssh.exec(f"sudo ip addr add {ext_ip}/32 dev {settings.EXTERNAL_INTERFACE} || true")
+
+                    cmd_dnat = (
+                        f"sudo iptables -t nat -A PREROUTING -i {settings.EXTERNAL_INTERFACE} "
+                        f"-d {ext_ip} -j DNAT --to-destination {internal_vm_ip}"
+                    )
                     ssh.exec(cmd_dnat)
-                    logger.info(f"[{self.worker_ip}] Ruteo Externo habilitado: {ext_ip} -> {internal_vm_ip}")
+
+                    # Forward explícito para permitir el flujo de entrada/salida
+                    ssh.exec(
+                        f"sudo iptables -I FORWARD 1 -i {settings.EXTERNAL_INTERFACE} "
+                        f"-d {internal_vm_ip}/32 -j ACCEPT"
+                    )
+                    ssh.exec(
+                        f"sudo iptables -I FORWARD 1 -o {settings.EXTERNAL_INTERFACE} "
+                        f"-s {internal_vm_ip}/32 -m state --state ESTABLISHED,RELATED -j ACCEPT"
+                    )
+
+                    logger.info(
+                        f"[{self.worker_ip}] DNAT exterior habilitado ({settings.EXTERNAL_INTERFACE}): "
+                        f"{ext_ip} -> {internal_vm_ip}"
+                    )
 
         except Exception as e:
             logger.error(f"[{self.worker_ip}] Error configurando Gateway/NAT: {e}")
@@ -236,9 +253,22 @@ class NetworkExecutor:
                 # Borrar regla DNAT (Acceso Externo)
                 if getattr(vm, 'external_ip', None) and internal_vm_ip:
                     ext_ip = vm.external_ip
-                    cmd_dnat_del = f"sudo iptables -t nat -D PREROUTING -d {ext_ip} -j DNAT --to-destination {internal_vm_ip} || true"
+                    cmd_dnat_del = (
+                        f"sudo iptables -t nat -D PREROUTING -i {settings.EXTERNAL_INTERFACE} "
+                        f"-d {ext_ip} -j DNAT --to-destination {internal_vm_ip} || true"
+                    )
                     exit_code_dnat, _, err_dnat = ssh.exec(cmd_dnat_del)
                     logger.info(f"🔥🔥🔥 [DESTROY]   DNAT para {ext_ip}: exit_code={exit_code_dnat}, err={err_dnat}")
+
+                    # Remover reglas de forward para acceso exterior
+                    ssh.exec(
+                        f"sudo iptables -D FORWARD -i {settings.EXTERNAL_INTERFACE} "
+                        f"-d {internal_vm_ip}/32 -j ACCEPT || true"
+                    )
+                    ssh.exec(
+                        f"sudo iptables -D FORWARD -o {settings.EXTERNAL_INTERFACE} "
+                        f"-s {internal_vm_ip}/32 -m state --state ESTABLISHED,RELATED -j ACCEPT || true"
+                    )
                     dnat_count += 1
             logger.info(f"🔥🔥🔥 [DESTROY]   Limpiadas {snat_count} reglas SNAT y {dnat_count} reglas DNAT")
 
@@ -276,7 +306,9 @@ class NetworkExecutor:
         for vm in vms:
             if getattr(vm, 'external_ip', None):
                 ext_ip = vm.external_ip
-                exit_code5, out5, err5 = ssh.exec(f"sudo ip addr del {ext_ip}/32 dev {settings.WAN_INTERFACE} 2>/dev/null || true")
+                exit_code5, out5, err5 = ssh.exec(
+                    f"sudo ip addr del {ext_ip}/32 dev {settings.EXTERNAL_INTERFACE} 2>/dev/null || true"
+                )
                 logger.info(f"🔥🔥🔥 [DESTROY]   IP {ext_ip}: exit_code={exit_code5}, err={err5}")
                 ip_count += 1
         logger.info(f"🔥🔥🔥 [DESTROY]   Limpiadas {ip_count} IPs externas")

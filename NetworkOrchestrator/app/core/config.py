@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     HEALTH_PORT: int = 8084 # Usamos el 8084 para no chocar con el 8080 y 8081
 
     WAN_INTERFACE: str = "ens3"  # Interfaz de salida a Internet en los workers (ajustar según tu entorno)
+    EXTERNAL_INTERFACE: str = "br-int"  # Interfaz de datos para acceso exterior (DNAT)
+    EXTERNAL_POOL_CIDR: str = "10.60.15.0/24"  # Pool de acceso exterior asignado
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models import Slice,Vm,Vlan
+from app.models import Slice, Vm, Vlan, IpPool
 from app.schemas import DeployRequest
 from app.services.placement_worker import placement_queue
 from app.nats_producer import nats_producer
@@ -9,6 +9,24 @@ import uuid
 import json
 
 router = APIRouter(prefix="/api/v1/slices", tags=["Deploy"])
+
+
+def _release_external_ips(db: Session, slice_id: int) -> None:
+    vms = db.query(Vm).filter(
+        Vm.slice_id == slice_id,
+        Vm.external_ip.isnot(None)
+    ).all()
+    if not vms:
+        return
+
+    ips = [vm.external_ip for vm in vms if vm.external_ip]
+    if not ips:
+        return
+
+    ip_records = db.query(IpPool).filter(IpPool.ip_address.in_(ips)).all()
+    for record in ip_records:
+        record.is_used = 0
+        record.vm_id = None
 
 @router.post("/{slice_id}/deploy", status_code=202)
 async def request_deploy(slice_id: int, request: DeployRequest, db: Session = Depends(get_db)):
@@ -36,6 +54,7 @@ async def request_destroy(slice_id: int, db: Session = Depends(get_db)):
 
     # 🔥 NUEVA LÓGICA: Si es un borrador, solo lo borramos de MySQL y ya está.
     if db_slice.status == "DRAFT":
+        _release_external_ips(db, slice_id)
         # Primero borramos las VMs hijas por la relación de llave foránea
         db.query(Vm).filter(Vm.slice_id == slice_id).delete()
         # Luego borramos el Slice
@@ -68,6 +87,9 @@ async def request_destroy(slice_id: int, db: Session = Depends(get_db)):
         
         # 🔥 FIX: Propagamos el estado a todas las VMs que pertenecen a este slice
         db.query(Vm).filter(Vm.slice_id == slice_id).update({"state": "TERMINATED"})
+
+        # 🔥 Liberamos IPs externas del pool
+        _release_external_ips(db, slice_id)
         
         db.commit()
         return {"status": "ACCEPTED", "message": "Orden de destrucción enviada."}
