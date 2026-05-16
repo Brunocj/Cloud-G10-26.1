@@ -117,6 +117,7 @@ class QEMUExecutor:
 
         # Creamos el archivo YAML que el OS leerá al encender
         user_data = f"""#cloud-config
+ssh_pwauth: true
 users:
   - name: {os_user}
     ssh-authorized-keys:
