@@ -112,6 +112,20 @@ class NetworkExecutor:
             )
             ssh.exec(cmd_dhcp)
             logger.info(f"[{self.worker_ip}] DHCP levantado en {gw_name} ({subred_interna}.0/24)")
+
+            # 🔥 3. DOBLE NAT: Permite acceso SSH desde VPN a las VMs con IP externa
+            # El MASQUERADE en gw_name hace que la VM siempre responda al gateway
+            # local, evitando el problema de routing asimétrico en la respuesta.
+            ssh.exec(f"sudo iptables -t nat -A POSTROUTING -o {gw_name} -j MASQUERADE")
+            logger.info(f"[{self.worker_ip}] Doble NAT (MASQUERADE) habilitado en {gw_name}")
+
+            # 🔥 4. POLICY ROUTING: Respuestas de VMs con IP externa regresan por br-int al GW
+            # La tabla 100 rutea el tráfico destinado a redes externas (VPN) via br-int.
+            # Usamos bash -c para que || true funcione (paramiko no invoca shell por defecto).
+            gw_ip_prefix = settings.EXTERNAL_POOL_CIDR.split('/')[0].rsplit('.', 1)[0]
+            ssh.exec(f"bash -c 'sudo ip rule add iif {gw_name} table 100 priority 100 || true'")
+            ssh.exec(f"bash -c 'sudo ip route replace 10.8.0.0/24 via {gw_ip_prefix}.1 dev {settings.EXTERNAL_INTERFACE} table 100 || true'")
+            logger.info(f"[{self.worker_ip}] Policy routing tabla 100 configurado para {gw_name}")
             
             # 3. Iterar sobre las VMs para aplicar Iptables
             for vm in vms:
@@ -199,6 +213,11 @@ class NetworkExecutor:
         # 🔥 Limpiar la regla del Firewall DHCP
         exit_code1, out1, err1 = ssh.exec(f"sudo iptables -D INPUT -i {gw_name} -p udp --dport 67:68 -j ACCEPT || true")
         logger.info(f"🔥🔥🔥 [DESTROY]   Resultado: exit_code={exit_code1}, err={err1}")
+
+        # 🔥 Limpiar Doble NAT (MASQUERADE en gw_name) y policy routing
+        ssh.exec(f"sudo iptables -t nat -D POSTROUTING -o {gw_name} -j MASQUERADE || true")
+        ssh.exec(f"sudo ip rule del iif {gw_name} table 100 priority 100 || true")
+        logger.info(f"🔥🔥🔥 [DESTROY]   Doble NAT y policy routing limpiados para {gw_name}")
         
         # 🔥 LIMPIEZA DE IPTABLES (El antídoto contra la basura en el kernel)
         logger.info(f"🔥🔥🔥 [DESTROY] PASO 1b: Limpiando iptables SNAT/DNAT ({len(vms)} VMs)")

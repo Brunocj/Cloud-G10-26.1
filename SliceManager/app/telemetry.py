@@ -8,12 +8,10 @@ logger = logging.getLogger("SliceManager.Telemetry")
 # Leemos la URL de Prometheus de las variables de entorno
 PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://10.0.10.1:9090")
 
-# Este es tu inventario de servidores físicos (ajusta las IPs a tu laboratorio)
-# app/telemetry.py
-
-# 🔥 FIX: Cambiamos "server-1" por simplemente el ID entero 1
+# Inventario de compute nodes (workers de cómputo).
+# ⚠️  Worker 1 (server1) es el HEADNODE: corre los servicios de orquestación
+#     (SliceManager, QueueManager, etc.) y NO recibe VMs de usuario.
 WORKERS_CONFIG = [
-    {"worker_id": 1, "instance": "localhost:9100"},
     {"worker_id": 2, "instance": "10.0.10.2:9100"},
     {"worker_id": 3, "instance": "10.0.10.3:9100"},
     {"worker_id": 4, "instance": "10.0.10.4:9100"}
@@ -23,6 +21,7 @@ async def get_real_worker_metrics():
     """
     Consulta a Prometheus las métricas reales de los hipervisores.
     Retorna la lista de workers lista para el payload del VM Placement.
+    Solo incluye los compute nodes (workers 2, 3 y 4).
     """
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -41,7 +40,6 @@ async def get_real_worker_metrics():
             ram, cpus, disk = await asyncio.gather(ram_task, cpus_task, disk_task)
 
             # --- 🔍 DEBUGGING CLAVE ---
-            # Esto imprimirá en tu terminal los nombres exactos que Prometheus está usando.
             logger.info(f"🔍 Nombres de instancias detectadas en Prometheus: {list(ram.keys())}")
 
             workers_payload = []
@@ -53,17 +51,16 @@ async def get_real_worker_metrics():
                     "available_ram_mb":  int(ram.get(inst, 0)),
                     "available_disk_gb": int(disk.get(inst, 0)),
                 })
-            
-            logger.info(f"Métricas reales obtenidas de {len(workers_payload)} servidores.")
+
+            logger.info(f"Métricas reales obtenidas de {len(workers_payload)} compute nodes.")
             return workers_payload
 
     except Exception as e:
         logger.error(f"Fallo al conectar con Prometheus: {str(e)}")
         # FALLBACK: Si Prometheus está caído, usamos datos simulados para no detener el sistema
-        logger.warning("Usando métricas simuladas como respaldo...")
+        logger.warning("Usando métricas simuladas como respaldo (solo compute nodes 2, 3, 4)...")
         return [
-            { "worker_id": "server-1", "available_vcpus": 10, "available_ram_mb": 16000, "available_disk_gb": 500 },
-            { "worker_id": "server-2", "available_vcpus": 10, "available_ram_mb": 16000, "available_disk_gb": 500 },
-            { "worker_id": "server-3", "available_vcpus": 10, "available_ram_mb": 16000, "available_disk_gb": 500 },
-            { "worker_id": "server-4", "available_vcpus": 10, "available_ram_mb": 16000, "available_disk_gb": 500 }
+            {"worker_id": 2, "available_vcpus": 10, "available_ram_mb": 16000, "available_disk_gb": 500},
+            {"worker_id": 3, "available_vcpus": 10, "available_ram_mb": 16000, "available_disk_gb": 500},
+            {"worker_id": 4, "available_vcpus": 10, "available_ram_mb": 16000, "available_disk_gb": 500},
         ]
