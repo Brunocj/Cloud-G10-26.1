@@ -6,3 +6,4 @@ pydantic-settings==2.2.1
 # ── JWT (descomentar cuando se active la validación) ──────────────
 # PyJWT==2.8.0
 # cryptography==42.0.8
+websockets==12.0

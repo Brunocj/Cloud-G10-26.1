@@ -70,7 +70,7 @@ async def forward_slice_request(path: str, request: Request):
             method=request.method,
             url=target_url,
             headers=headers,
-            content=body,
+            content=body,  # raw bytes — preserva multipart/form-data sin modificar
         )
     except httpx.ConnectError:
         logger.error("No se pudo conectar al Slice Manager en %s", settings.SLICE_MANAGER_URL)

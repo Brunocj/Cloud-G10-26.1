@@ -225,6 +225,14 @@ async def process_placement_worker():
                     ip_interna_asignada = f"10.{octeto_2}.{octeto_3}.{ip_host_counter}"
                     ip_host_counter += 1  # Aumentamos para la siguiente VM (11, 12, 13...)
                     
+                    # 🔥 CREDENCIALES cloud-init: tomamos del nodo UI o usamos el nombre de imagen como fallback
+                    # El slice_json guarda los nodos tal como los envió el frontend
+                    nodo_ui = next((n for n in slice_json.get("nodes", []) if n.get("id") == vm.name), {})
+                    # Fallback inteligente: primer token del nombre de imagen en minúsculas (ej: "ubuntu-22.04" → "ubuntu")
+                    image_name_lower = (image_obj.name if image_obj else "ubuntu").lower().split("-")[0].split(".")[0]
+                    vm_user     = nodo_ui.get("vm_user") or image_name_lower
+                    vm_password = nodo_ui.get("vm_password") or "pucp2026"
+
                     vms_payload.append({
                         "vm_id": vm.name,
                         "worker_ip": server_info.get("ip", "0.0.0.0"),
@@ -239,11 +247,16 @@ async def process_placement_worker():
                         "tap_interfaces": vms_payload_data[vm.name]["tap_interfaces"],
                         
                         # --- NUEVOS CAMPOS DEL REQUERIMIENTO R5 ---
-                        "internet_access": getattr(vm, 'internet_access', 0), # Usamos getattr por si SQLite/MySQL aún no sincronizó la columna
+                        "internet_access": getattr(vm, 'internet_access', 0),
                         "external_ip": vm.external_ip,
-                        "internal_ip": ip_interna_asignada # 🔥 ¡La inyectamos al contrato NATS!
+                        "internal_ip": ip_interna_asignada,
                         # ------------------------------------------
+
+                        # Credenciales cloud-init (del UI o inferidas del nombre de imagen)
+                        "vm_user": vm_user,
+                        "vm_password": vm_password,
                     })
+
 
                 # 4. PUBLICACIÓN EN NATS
                 queue_manager_payload = {

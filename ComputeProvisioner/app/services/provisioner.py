@@ -96,9 +96,11 @@ class Provisioner:
                         disk_path=disk_path,
                         vcpus=vm.vcpus,
                         ram_mb=vm.ram_mb,
-                        vnc_display=vnc_display, # 🔥 Usamos la variable local
+                        vnc_display=vnc_display,
                         tap_interfaces=vm.tap_interfaces,
-                        image_path=vm.image_path,  # <---- AÑADE ESTA LÍNEA AQUÍ
+                        image_path=vm.image_path,
+                        vm_user=vm.vm_user or "ubuntu",
+                        vm_password=vm.vm_password or "pucp2026",
                         priority=vm.priority,
                     )
 
@@ -182,6 +184,7 @@ class Provisioner:
                     executor.destroy_tap_interfaces(taps)
 
                 executor.delete_disk(vm_id, slice_id)
+                executor.delete_seed_iso(vm_id)  # Limpia el ISO de cloud-init
 
             logger.info("VM %s destruida correctamente", vm_id)
             return None

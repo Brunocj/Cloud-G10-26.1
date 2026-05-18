@@ -15,10 +15,13 @@ services:
       - DB_USER=mandarina
       - DB_PASSWORD=sandia
       - DB_NAME=cloud
+      - GC_INTERVAL_HOURS=6
+      - IMAGES_DIR=/mnt/cloud_images
     volumes:
       # Monta la carpeta local ./keys en la ruta /app/keys dentro del contenedor
       # El ":ro" significa Read-Only (Solo lectura por seguridad)
       - ./keys:/app/keys:ro
+      - /mnt/cloud_images:/mnt/cloud_images
     networks:
       - pucp_cloud_net
 networks:

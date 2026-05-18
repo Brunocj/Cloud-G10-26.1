@@ -148,6 +148,46 @@ const NodeEditor = ({ node, availableImages, sliceStatus, onSave, onDelete, onCl
                     </select>
                 </div>
 
+                {/* --- Credenciales de la VM (cloud-init) --- */}
+                {!isReadOnly && (
+                <div style={{ background: T.surfaceElevated, borderRadius: 9, padding: "11px 12px", border: `1px solid ${T.border}` }}>
+                    <Lbl>Credenciales VM <span style={{ fontWeight: 400, color: T.textFaint }}>(cloud-init)</span></Lbl>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                        <div>
+                            <div style={{ fontSize: 9, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 3 }}>Usuario</div>
+                            <input
+                                value={f.vm_user || ""}
+                                placeholder={f.image?.toLowerCase().split("-")[0] || "ubuntu"}
+                                onChange={e => u("vm_user", e.target.value)}
+                                style={{ ...inp, fontSize: 12 }}
+                            />
+                        </div>
+                        <div>
+                            <div style={{ fontSize: 9, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 3 }}>Contraseña</div>
+                            <input
+                                type="text"
+                                value={f.vm_password || ""}
+                                placeholder="pucp2026"
+                                onChange={e => u("vm_password", e.target.value)}
+                                style={{ ...inp, fontSize: 12 }}
+                            />
+                        </div>
+                    </div>
+                    <div style={{ fontSize: 9, color: T.textFaint, marginTop: 6 }}>⚠️ Dejar vacío usa el nombre de imagen como usuario y "pucp2026" como contraseña. No aplica a Cirros.</div>
+                </div>
+                )}
+
+                {/* En modo lectura: mostrar credenciales configuradas */}
+                {isReadOnly && (node.vm_user || node.vm_password) && (
+                <div style={{ background: T.surfaceElevated, borderRadius: 9, padding: "9px 12px", border: `1px solid ${T.border}` }}>
+                    <Lbl>Credenciales</Lbl>
+                    <div style={{ fontSize: 11, color: T.text }}>
+                        <span style={{ fontWeight: 700 }}>Usuario:</span> {node.vm_user || "(imagen)"}{" "}|{" "}
+                        <span style={{ fontWeight: 700 }}>Pass:</span> {node.vm_password || "pucp2026"}
+                    </div>
+                </div>
+                )}
+
                 <div style={{ background: T.surfaceElevated, borderRadius: 9, padding: "11px 12px", border: `1px solid ${T.border}` }}>
                     <Lbl>Resources</Lbl>
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
@@ -690,6 +730,129 @@ const Toast = ({ msg, type }) => (
     </div>
 );
 
+// --- IMAGE PANEL COMPONENT ---------------------------------------------------
+const ImagePanel = ({ fullImages, onRefresh, flash, refreshImageList }) => {
+    const [uploading, setUploading] = useState(false);
+    const [gcRunning, setGcRunning] = useState(false);
+    const [uploadForm, setUploadForm] = useState({ name: "", file: null });
+    const [showUpload, setShowUpload] = useState(false);
+    const fileRef = useRef(null);
+
+    const handleUpload = async () => {
+        if (!uploadForm.file || !uploadForm.name.trim()) {
+            flash("Completa el nombre y selecciona un archivo", "error"); return;
+        }
+        setUploading(true);
+        const fd = new FormData();
+        fd.append("name", uploadForm.name.trim());
+        fd.append("is_general", 0);
+        fd.append("file", uploadForm.file);
+        try {
+            const res = await fetch("http://localhost:8085/api/v1/slices/utils/images/upload", { method: "POST", body: fd });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || "Error al subir");
+            flash(`Imagen '${uploadForm.name}' subida correctamente ✅`);
+            setShowUpload(false);
+            setUploadForm({ name: "", file: null });
+            onRefresh();
+            if (refreshImageList) refreshImageList();
+        } catch (e) { flash(e.message, "error"); }
+        finally { setUploading(false); }
+    };
+
+    const handleDelete = async (img) => {
+        if (!window.confirm(`¿Eliminar la imagen '${img.name}'?`)) return;
+        try {
+            const res = await fetch(`http://localhost:8085/api/v1/slices/utils/images/${img.id}`, { method: "DELETE" });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || "Error al eliminar");
+            flash(data.message);
+            onRefresh();
+        } catch (e) { flash(e.message, "error"); }
+    };
+
+    const handleGC = async () => {
+        setGcRunning(true);
+        try {
+            const res = await fetch("http://localhost:8085/api/v1/slices/utils/images/gc/run", { method: "POST" });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || "Error GC");
+            flash(data.message);
+            // El GC corre en background, esperamos un poco y refrescamos la lista
+            setTimeout(() => {
+                onRefresh();
+                if (refreshImageList) refreshImageList();
+            }, 3000);
+        } catch (e) { flash(e.message, "error"); }
+        finally { setTimeout(() => setGcRunning(false), 3500); }
+    };
+
+    return (
+        <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+            {/* GC + Upload buttons */}
+            <div style={{ padding: "10px 12px", borderBottom: `1px solid ${T.border}`, display: "flex", gap: 6, flexShrink: 0 }}>
+                <button onClick={() => setShowUpload(v => !v)}
+                    style={btnBase({ flex: 1, fontSize: 11, padding: "6px 8px", background: T.accent, color: "#fff", border: "none" })}>
+                    ⬆️ Subir Imagen
+                </button>
+                <button onClick={handleGC} disabled={gcRunning}
+                    style={btnBase({ flex: 1, fontSize: 11, padding: "6px 8px", background: gcRunning ? T.surfaceElevated : T.yellowLight, color: gcRunning ? T.textMuted : T.yellow, border: `1px solid ${T.yellow}44` })}>
+                    {gcRunning ? "🔄 Limpiando..." : "🧹 Ejecutar GC"}
+                </button>
+            </div>
+
+            {/* Upload form (colapsable) */}
+            {showUpload && (
+                <div style={{ padding: "10px 12px", borderBottom: `1px solid ${T.border}`, background: T.accentLight, flexShrink: 0 }}>
+                    <Lbl>Nombre de la imagen</Lbl>
+                    <input value={uploadForm.name} onChange={e => setUploadForm(p => ({ ...p, name: e.target.value }))}
+                        placeholder="ej: ubuntu-custom-v1" style={{ ...inp, marginBottom: 8 }} />
+                    <Lbl>Archivo (.qcow2 / .img / .iso)</Lbl>
+                    <input type="file" accept=".qcow2,.img,.iso" ref={fileRef}
+                        onChange={e => setUploadForm(p => ({ ...p, file: e.target.files[0] }))}
+                        style={{ fontSize: 11, color: T.text, marginBottom: 8, width: "100%" }} />
+                    <button onClick={handleUpload} disabled={uploading}
+                        style={btnBase({ width: "100%", background: T.accent, color: "#fff", border: "none", opacity: uploading ? 0.6 : 1 })}>
+                        {uploading ? "Subiendo..." : "✅ Confirmar Subida"}
+                    </button>
+                </div>
+            )}
+
+            {/* Image list */}
+            <div style={{ flex: 1, overflowY: "auto", padding: "8px 10px", display: "flex", flexDirection: "column", gap: 6 }}>
+                {fullImages.length === 0 && (
+                    <div style={{ color: T.textFaint, fontSize: 12, textAlign: "center", padding: 16 }}>Sin imágenes registradas</div>
+                )}
+                {fullImages.map(img => (
+                    <div key={img.id} style={{ background: T.surface, border: `1px solid ${img.in_use ? T.accent + "44" : T.border}`, borderRadius: 10, padding: "9px 10px", boxShadow: T.shadow }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontSize: 12, fontWeight: 700, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                    {img.is_general ? "🔒" : "📦"} {img.name}
+                                </div>
+                                <div style={{ fontSize: 10, color: T.textMuted, marginTop: 2 }}>
+                                    {img.in_use
+                                        ? <span style={{ color: T.accent, fontWeight: 600 }}>✅ En uso ({img.active_vm_count} VM{img.active_vm_count > 1 ? "s" : ""})</span>
+                                        : <span style={{ color: img.is_general ? T.textMuted : T.yellow }}>⚪ Sin VMs activas</span>
+                                    }
+                                </div>
+                                <div style={{ fontSize: 9, color: T.textFaint, marginTop: 2, fontFamily: "monospace" }}>{img.path}</div>
+                            </div>
+                            {img.is_general !== 1 && (
+                                <button onClick={() => handleDelete(img)} disabled={img.in_use}
+                                    title={img.in_use ? "No se puede eliminar: tiene VMs activas" : "Eliminar imagen"}
+                                    style={{ ...btnBase({ padding: "4px 8px", fontSize: 13, background: img.in_use ? T.surfaceElevated : T.redLight, color: img.in_use ? T.textFaint : T.red, border: `1px solid ${img.in_use ? T.border : T.red + "44"}`, marginLeft: 6, cursor: img.in_use ? "not-allowed" : "pointer", flexShrink: 0 }) }}>
+                                    🗑️
+                                </button>
+                            )}
+                        </div>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+};
+
 // --- SEED DATA ----------------------------------------------------------------
 const mkSlice = (name, status, nodes, edges) => {
     const totalRam = nodes.reduce((s, n) => s + n.ram, 0);
@@ -715,33 +878,44 @@ export default function App() {
     const [slices, setSlices] = useState([]);
     // Dentro de export default function App() { ...
     const [imageList, setImageList] = useState(["Cargando imágenes..."]);
+    const [activeId, setActiveId] = useState(null);
+    const [sidebarTab, setSidebarTab] = useState("slices");
+    const [fullImages, setFullImages] = useState([]);
+
+    const fetchFullImages = async () => {
+        try {
+            const res = await fetch("http://localhost:8085/api/v1/slices/utils/images/");
+            if (res.ok) setFullImages(await res.json());
+        } catch (e) { console.error("Error cargando imágenes completas:", e); }
+    };
+
     useEffect(() => {
         const fetchSlices = async () => {
             try {
                 const res = await fetch("http://localhost:8085/api/v1/slices");
-                if (res.ok) {
-                    const data = await res.json();
-                    setSlices(data);
-                }
-            } catch (error) {
-                console.error("Error cargando slices:", error);
-            }
+                if (res.ok) setSlices(await res.json());
+            } catch (error) { console.error("Error cargando slices:", error); }
         };
         const fetchImages = async () => {
             try {
                 const res = await fetch("http://localhost:8085/api/v1/slices/utils/images");
-                if (res.ok) {
-                    const data = await res.json();
-                    setImageList(data); // <-- Guardamos los objetos enteros [{id: 1, name: "Cirros"}]
-                }
-            } catch (error) {
-                console.error("Error cargando imágenes:", error);
-            }
+                if (res.ok) setImageList(await res.json());
+            } catch (error) { console.error("Error cargando imágenes:", error); }
         };
         fetchSlices();
         fetchImages();
+        fetchFullImages();
+
+        // Polling: actualizar slices cada 8s para reflejar cambios de estado en tiempo real
+        const interval = setInterval(async () => {
+            try {
+                const res = await fetch("http://localhost:8085/api/v1/slices");
+                if (res.ok) setSlices(await res.json());
+            } catch (_) { /* silencioso */ }
+        }, 8000);
+        return () => clearInterval(interval);
     }, []);
-    const [activeId, setActiveId] = useState(null);
+
 
     // Designer state (for new slices)
     const [nodes, setNodes] = useState([]);
@@ -1008,7 +1182,22 @@ export default function App() {
                 {/* Templates — only in designer mode */}
                 {!activeSlice && <TemplatePicker />}
 
-                {/* Slices list */}
+                {/* Slices / Images tab bar */}
+                <div style={{ display: "flex", borderBottom: `1px solid ${T.border}`, flexShrink: 0 }}>
+                    {[["slices", "📋 Slices"], ["images", "🖼️ Imágenes"]].map(([id, label]) => (
+                        <button key={id} onClick={() => setSidebarTab(id)}
+                            style={{ flex: 1, padding: "9px 4px", fontSize: 11, fontWeight: 700, fontFamily: "inherit",
+                                background: sidebarTab === id ? T.accentLight : "transparent",
+                                color: sidebarTab === id ? T.accent : T.textMuted,
+                                border: "none", borderBottom: sidebarTab === id ? `2px solid ${T.accent}` : "2px solid transparent",
+                                cursor: "pointer", transition: "all 0.15s" }}>
+                            {label}
+                        </button>
+                    ))}
+                </div>
+
+                {/* Slices tab */}
+                {sidebarTab === "slices" && (
                 <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
                     <div style={{ padding: "12px 16px 8px", display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
                         <Lbl style={{ marginBottom: 0 }}>My Slices <span style={{ color: T.accent, marginLeft: 5 }}>{slices.length}</span></Lbl>
@@ -1027,6 +1216,21 @@ export default function App() {
                         {slices.length === 0 && <div style={{ color: T.textFaint, fontSize: 12, textAlign: "center", padding: 16 }}>No slices yet</div>}
                     </div>
                 </div>
+                )}
+
+                {/* Images tab */}
+                {sidebarTab === "images" && (
+                <div style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
+                    <ImagePanel fullImages={fullImages} onRefresh={fetchFullImages} flash={flash}
+                        refreshImageList={async () => {
+                            try {
+                                const res = await fetch("http://localhost:8085/api/v1/slices/utils/images");
+                                if (res.ok) setImageList(await res.json());
+                            } catch (_) {}
+                        }}
+                    />
+                </div>
+                )}
             </div>
 
             {/* -- MAIN ------------------------------------------------------- */}

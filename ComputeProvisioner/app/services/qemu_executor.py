@@ -102,50 +102,63 @@ class QEMUExecutor:
             self._exec_checked(f"sudo ip link set {tap} up")
             logger.info("TAP %s conectada a OVS bridge %s", tap, bridge)
 
-    def _prepare_cloud_init(self, vm_id: str, image_path: str, public_key_path: str = "keys/worker_key.pub") -> str:
-        """Genera el ISO de cloud-init en el worker físico para inyectar la llave SSH"""
-        
-        # Detectamos el usuario según la imagen
-        os_user = "cirros" if "cirros" in image_path.lower() else "ubuntu"
+    def _prepare_cloud_init(self, vm_id: str, image_path: str, vm_user: str = "ubuntu", vm_password: str = "pucp2026", public_key_path: str = "keys/worker_key.pub") -> str:
+        """Genera el ISO de cloud-init en el worker fisico para inyectar la llave SSH y credenciales."""
 
         try:
-            # Leemos tu llave pública dentro del contenedor de provisioner
             with open(public_key_path, "r") as f:
                 pub_key = f.read().strip()
         except Exception:
             pub_key = ""
 
-        # Creamos el archivo YAML que el OS leerá al encender
-        user_data = f"""#cloud-config
-ssh_pwauth: true
-users:
-  - name: {os_user}
+        # Construimos las entradas de usuarios:
+        # - Siempre incluimos el usuario por defecto de la imagen (ubuntu/alpine/etc)
+        # - Si el usuario custom es distinto al default, lo agregamos como adicional
+        default_image_user = "cirros" if "cirros" in image_path.lower() else "ubuntu"
+
+        users_block = f"""users:
+  - default
+"""
+        # Si el usuario custom es diferente al de la imagen base, agregarlo como usuario adicional
+        if vm_user != default_image_user:
+            users_block += f"""  - name: {vm_user}
     ssh-authorized-keys:
       - {pub_key}
     sudo: ['ALL=(ALL) NOPASSWD:ALL']
     groups: sudo
     shell: /bin/bash
+"""
+
+        # Siempre seteamos la contraseña para ambos usuarios
+        chpasswd_list = f"{default_image_user}:{vm_password}"
+        if vm_user != default_image_user:
+            chpasswd_list += f"\n    {vm_user}:{vm_password}"
+
+        user_data = f"""#cloud-config
+ssh_pwauth: true
+{users_block}
 chpasswd:
   list: |
-    {os_user}:pucp2026
+    {chpasswd_list}
   expire: False
 """
         meta_data = f"instance-id: {vm_id}\nlocal-hostname: {vm_id}\n"
 
-        # Mandamos esto por SSH al worker para crear el .iso
-        cmd_cloud_init = f"""
-        cat << 'EOF' > /tmp/{vm_id}_user-data
-{user_data}
-EOF
-        cat << 'EOF' > /tmp/{vm_id}_meta-data
-{meta_data}
-EOF
-        sudo cloud-localds /vms/{vm_id}_seed.iso /tmp/{vm_id}_user-data /tmp/{vm_id}_meta-data
-        """
-        
-        # 🔥 FIX: Usamos la función _ssh.exec que ya existe en tu clase, de forma síncrona
+        # Usamos Python en el worker (mas confiable que heredoc via SSH)
+        # Escapamos las comillas simples para evitar problemas con el shell
+        user_data_escaped = user_data.replace("'", "'\\''")
+        meta_data_escaped = meta_data.replace("'", "'\\''")
+
+        cmd_cloud_init = (
+            f"printf '%s' '{user_data_escaped}' > /tmp/{vm_id}_user-data && "
+            f"printf '%s' '{meta_data_escaped}' > /tmp/{vm_id}_meta-data && "
+            f"sudo cloud-localds /vms/{vm_id}_seed.iso /tmp/{vm_id}_user-data /tmp/{vm_id}_meta-data"
+        )
+
         self._ssh.exec(cmd_cloud_init)
+        logger.info("cloud-init ISO generado para VM %s (usuario: %s, default: %s)", vm_id, vm_user, default_image_user)
         return f"/vms/{vm_id}_seed.iso"
+
 
     def launch_vm(
         self,
@@ -156,7 +169,9 @@ EOF
         ram_mb:         int,
         vnc_display:    int,
         tap_interfaces: List[TapInterface],
-        image_path:     str,   # 🔥 FIX: Añadimos image_path aquí para enviarlo a cloud_init
+        image_path:     str,
+        vm_user:        str = "ubuntu",
+        vm_password:    str = "pucp2026",
         priority:       int = 0,
     ) -> int:
         """
@@ -168,8 +183,8 @@ EOF
 
         linux_nice = priority - 20
         
-        # 🔥 FIX: Llamamos a la función síncrona usando self y las variables locales
-        seed_iso_path = self._prepare_cloud_init(vm_id, image_path)
+        # Generamos el cloud-init ISO con usuario y contraseña configurados
+        seed_iso_path = self._prepare_cloud_init(vm_id, image_path, vm_user=vm_user, vm_password=vm_password)
         
         cmd = (
             f"sudo nice -n {linux_nice} "
@@ -180,7 +195,7 @@ EOF
             f"-smp {vcpus} "
             f"-drive file={disk_path},format=qcow2 "
             f"-cdrom {seed_iso_path} "
-            f"-vnc 0.0.0.0:{vnc_display},websocket=on " 
+            f"-vnc 0.0.0.0:{vnc_display},websocket={vnc_display + 5700} " 
             f"{net_args}"
             f"-daemonize"
         )
@@ -222,6 +237,16 @@ EOF
             logger.info("Disco eliminado: %s", disk_path)
         else:
             logger.warning("Disco no encontrado (ya eliminado): %s", disk_path)
+
+    def delete_seed_iso(self, vm_id: str) -> None:
+        """Elimina el ISO de cloud-init generado al arrancar la VM."""
+        iso_path = f"/vms/{vm_id}_seed.iso"
+        code, _, _ = self._ssh.exec(f"test -f {iso_path}")
+        if code == 0:
+            self._ssh.exec(f"sudo rm -f {iso_path}")
+            logger.info("Seed ISO eliminado: %s", iso_path)
+        else:
+            logger.debug("Seed ISO no encontrado: %s", iso_path)
 
     def destroy_tap_interfaces(self, tap_interfaces: List[TapInterface]) -> None:
         """

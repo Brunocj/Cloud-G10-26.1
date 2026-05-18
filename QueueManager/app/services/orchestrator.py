@@ -80,7 +80,24 @@ class Orchestrator:
             f"{len(successful)} VMs levantadas"
         )
 
+        # Si no hay links de red (ej: 1 sola VM), saltar el paso de red
+        if not request.links:
+            logger.info(f"[slice={request.slice_id}] Sin links de red, se omite Network Orchestrator.")
+            await self._delete_state(state.slice_id)
+            final_status = SliceStatus(status)
+            response = DeploySliceResponse(
+                slice_id=request.slice_id,
+                request_id=request.request_id,
+                status=final_status,
+                vms=successful,
+                failed_vms=failed,
+            )
+            await self._notify_slice_manager(response.model_dump())
+            logger.info(f"[slice={request.slice_id}] Deploy finalizado (sin red): {final_status}")
+            return response
+
         network_result = await self._step_network_deploy(request)
+
         if network_result is None:
             return await self._fail_deploy(state, "Timeout: Network Orchestrator no respondió")
             

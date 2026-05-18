@@ -57,6 +57,10 @@ class VMSpec(BaseModel):
     external_ip:     Optional[str] = None
     internal_ip:     str = "0.0.0.0"
 
+    # Credenciales de la VM para cloud-init
+    vm_user:     Optional[str] = None   # Si None → se usa el nombre de la imagen
+    vm_password: Optional[str] = None   # Si None → se usa "pucp2026"
+
 
 class VMResult(BaseModel):
     """Resultado de una VM individual, tal como lo reporta el Compute Provisioner."""

@@ -7,6 +7,7 @@ from fastapi import FastAPI
 
 from app.config import settings
 from app.routers import slices
+from app.routers import vnc_proxy
 
 logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL),
@@ -43,6 +44,7 @@ app.add_middleware(
 # Routers
 # ──────────────────────────────────────────────────────────────────
 app.include_router(slices.router)
+app.include_router(vnc_proxy.router)
 
 
 # ──────────────────────────────────────────────────────────────────

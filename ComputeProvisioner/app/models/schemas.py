@@ -41,6 +41,10 @@ class VMSpec(BaseModel):
     internal_ip:     Optional[str]       = Field(default=None, description="IP interna asignada por el Queue Manager para NAT/Gateway")
     # ----------------------------
 
+    # Credenciales cloud-init
+    vm_user:     Optional[str] = Field(default=None, description="Usuario a crear en la VM (default: nombre de imagen)")
+    vm_password: Optional[str] = Field(default=None, description="Contraseña de la VM (default: pucp2026)")
+
     tap_interfaces:  List[TapInterface]  = Field(default_factory=list,
                                                   description="Interfaces TAP a crear (orden = índice de NIC en QEMU)")
     priority:        Optional[int]       = Field(default=20, ge=0, le=39)
