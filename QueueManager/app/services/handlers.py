@@ -26,9 +26,14 @@ async def handle_deploy(msg: Msg) -> None:
     try:
         payload = json.loads(msg.data.decode())
         request = DeploySliceRequest(**payload)
+        logger.info("="*70)
+        logger.info("[QM] 📥 Mensaje NATS recibido en 'slice.deploy'")
+        logger.info("[QM]    slice_id=%s  request_id=%s  VMs=%d  links=%d",
+                    request.slice_id, request.request_id,
+                    len(request.vms), len(request.links))
         await _orchestrator.deploy(request)
     except Exception as exc:
-        logger.error(f"Error procesando slice.deploy: {exc}", exc_info=True)
+        logger.error("[QM] ❌ Error procesando slice.deploy: %s", exc, exc_info=True)
 
 
 async def handle_destroy(msg: Msg) -> None:
@@ -40,6 +45,8 @@ async def handle_destroy(msg: Msg) -> None:
     try:
         payload = json.loads(msg.data.decode())
         request = DestroySliceRequest(**payload)
+        logger.info("[QM] 📥 Mensaje NATS recibido en 'slice.destroy'")
+        logger.info("[QM]    slice_id=%s  request_id=%s", request.slice_id, request.request_id)
         await _orchestrator.destroy(request)
     except Exception as exc:
-        logger.error(f"Error procesando slice.destroy: {exc}", exc_info=True)
+        logger.error("[QM] ❌ Error procesando slice.destroy: %s", exc, exc_info=True)

@@ -46,11 +46,24 @@ class QEMUExecutor:
         """
         Crea un disco QCOW2 con thin provisioning (backing file).
 
-        El tamaño final del overlay es max(disk_gb, tamaño virtual de la imagen base)
-        para evitar que GRUB falle con "outside of disk 'hd0'" en imágenes grandes
-        como Ubuntu (virtual size ~2.2 GB).
+        Es idempotente: si el disco ya existe (por un intento previo fallido o una
+        VM que sigue corriendo), lo elimina primero para evitar el error
+        "Failed to get write lock" en escenarios de alta concurrencia.
         """
         disk_path = get_vm_disk_path(vm_id, slice_id)
+
+        # --- Idempotencia: eliminar disco previo si existe ---
+        try:
+            _code, check_out, _ = self._ssh.exec(f"test -f {disk_path} && echo EXISTS || echo MISSING")
+            if "EXISTS" in check_out:
+                logger.warning(
+                    "Disco previo encontrado en %s — eliminando antes de recrear (retry idempotente)",
+                    disk_path
+                )
+                self._exec_checked(f"sudo rm -f {disk_path}")
+        except Exception as exc:
+            logger.warning("No se pudo verificar existencia de disco previo en %s: %s", disk_path, exc)
+
 
         # Consultamos el tamaño virtual de la imagen base (en bytes)
         requested_mb = int(disk_gb * 1024)

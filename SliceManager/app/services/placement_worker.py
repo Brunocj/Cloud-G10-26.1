@@ -71,21 +71,23 @@ async def process_placement_worker():
                 "workers": real_workers_metrics
             }
 
+            logger.info("[PLACEMENT] 👉 VM Placement invocado para %d VM(s) en zona '%s'", len(dynamic_vms), zone)
+            for dv in dynamic_vms:
+                logger.info("[PLACEMENT]    VM: %-20s vCPUs: %d  RAM: %d MB  Disco: %d GB",
+                            dv['vm_id'], dv['vcpus'], dv['ram_mb'], dv['disk_gb'])
+
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.post(VM_PLACEMENT_URL, json=payload)
                 response.raise_for_status()
                 placement_result = response.json()
 
-            # 🔥🔥🔥 DEBUG: Ver qué devuelve VMPlacement
-            import sys
-            print(f"\n{'='*80}", file=sys.stderr, flush=True)
-            print(f"🔥🔥🔥 [PLACEMENT {slice_id}] Response de VMPlacement status: {placement_result.get('status')}", file=sys.stderr, flush=True)
-            if placement_result.get('status') != 'SUCCESS':
-                print(f"🔥🔥🔥 [PLACEMENT {slice_id}] ⚠️ VMPlacement NO fue SUCCESS", file=sys.stderr, flush=True)
-                print(f"🔥🔥🔥 [PLACEMENT {slice_id}] Respuesta completa: {json.dumps(placement_result, indent=2)[:500]}", file=sys.stderr, flush=True)
-            print(f"{'='*80}\n", file=sys.stderr, flush=True)
-            
-            logger.info(f"🔥🔥🔥 [PLACEMENT {slice_id}] Response de VMPlacement status: {placement_result.get('status')}")
+            placement_status = placement_result.get('status')
+            placement_map = placement_result.get('placement_map', [])
+            logger.info("[PLACEMENT] ✅ VM Placement respondio: status=%s  asignaciones=%d",
+                        placement_status, len(placement_map))
+            if placement_status == 'SUCCESS':
+                for asig in placement_map:
+                    logger.info("[PLACEMENT]    %s → Worker-%s", asig.get('vm_id'), asig.get('worker_id'))
 
             # 3. ENRIQUECIMIENTO DEL CONTRATO SI EL PLACEMENT FUE EXITOSO
             if placement_result.get("status") == "SUCCESS":
@@ -181,6 +183,15 @@ async def process_placement_worker():
                     
                     # 🔥 PASO 3: Guardamos la VLAN explícitamente en la BD con su ID real
                     db.add(Vlan(id=vlan_actual, slice_id=slice_id, type="p2p"))
+
+                    logger.info(
+                        "[PLACEMENT] 🔗 Enlace %-20s → %-20s | VLAN: %-4d | "
+                        "TAP1: %-28s MAC1: %s | TAP2: %-28s MAC2: %s",
+                        vm1_id, vm2_id, vlan_actual,
+                        tap1, mac1, tap2, mac2
+                    )
+
+                logger.info("[PLACEMENT] ✅ %d enlace(s) procesados: MACs y VLANs asignados", len(edges))
                 vnc_por_worker = {}
                 for w_id in server_inventory.keys():
                     vnc_ocupados_bd = db.query(Vm.vnc_port).filter(
@@ -209,8 +220,9 @@ async def process_placement_worker():
                             candidato = random.randint(5901, 5999) # Rango estándar VNC
                             if candidato not in vnc_por_worker[worker_id]:
                                 vm.vnc_port = candidato
-                                # Lo añadimos al set global para protegerlo de la sig. VM
-                                vnc_por_worker[worker_id].add(candidato) 
+                                vnc_por_worker[worker_id].add(candidato)
+                                logger.info("[PLACEMENT]    VNC asignado: VM %-20s → Worker-%d puerto %d",
+                                            vm.name, worker_id, candidato)
                                 break
                     
                     # 🔥 CONSULTA DINÁMICA DE LA IMAGEN
@@ -259,6 +271,14 @@ async def process_placement_worker():
 
 
                 # 4. PUBLICACIÓN EN NATS
+                logger.info("="*70)
+                logger.info("[PLACEMENT] 📤 Publicando en NATS → QueueManager")
+                logger.info("[PLACEMENT]    slice_id=%s  VMs=%d  links=%d",
+                            slice_id, len(vms_payload), len(network_links))
+                for vp in vms_payload:
+                    logger.info("[PLACEMENT]    VM: %-20s worker_ip=%-12s vnc_port=%s  taps=%d",
+                                vp['vm_id'], vp['worker_ip'], vp['vnc_port'],
+                                len(vp.get('tap_interfaces', [])))
                 queue_manager_payload = {
                     "slice_id": str(slice_id), 
                     "request_id": f"req-{uuid.uuid4().hex[:8]}",
@@ -286,13 +306,18 @@ async def process_placement_worker():
 
                 # Commit inmediato para no perder la receta aunque falle el publish
                 db.commit()
-                logger.info(f"🔥🔥🔥 [PLACEMENT {slice_id}] ✅ deployed_vms/links persistidos antes de publicar")
+                logger.info("[PLACEMENT] 💾 deployed_vms/links persistidos en BD")
 
                 published = await nats_producer.publish_deploy(queue_manager_payload)
-                db_slice.status = "PROVISIONING" if published else "FAILED"
+                if published:
+                    db_slice.status = "PROVISIONING"
+                    logger.info("[PLACEMENT] 🟠 Estado del slice cambiado a PROVISIONING")
+                else:
+                    db_slice.status = "FAILED"
+                    logger.error("[PLACEMENT] ❌ Fallo al publicar en NATS, estado → FAILED")
                 db.commit()
-                
-                logger.info(f"🔥🔥🔥 [PLACEMENT {slice_id}] ✅ GUARDADO EN BD exitosamente")
+                logger.info("[PLACEMENT] 🏁 Flujo de placement completado para slice=%s", slice_id)
+                logger.info("="*70)
             else:
                 db_slice.status = "FAILED"
                 db.commit()

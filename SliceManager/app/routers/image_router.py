@@ -76,7 +76,7 @@ def _delete_file_via_ssh(file_path: str) -> None:
 @router.get("/", status_code=200)
 def list_images(db: Session = Depends(get_db)):
     """Lista todas las imágenes con información de uso."""
-    images = db.query(Image).all()
+    images = db.query(Image).filter(Image.is_general.isnot(None)).all()
     if not images:
         return []
 
@@ -145,10 +145,15 @@ async def upload_image(
 
     existing = db.query(Image).filter(Image.path == dest_path).first()
     if existing:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Ya existe una imagen registrada en esa ruta: {dest_path}",
-        )
+        if existing.is_general is None:
+            # Imagen soft-deleted: reutilizamos el registro y sobreescribimos el archivo
+            logger.info("Imagen '%s' estaba soft-deleted — se reutiliza el registro (id=%d)", name, existing.id)
+            # El archivo se sobreescribirá más abajo
+        else:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Ya existe una imagen activa registrada en esa ruta: {dest_path}",
+            )
 
     try:
         os.makedirs(IMAGES_DIR, exist_ok=True)
@@ -160,6 +165,21 @@ async def upload_image(
             status_code=500,
             detail=f"No se pudo guardar el archivo. ¿El volumen NFS está montado? ({IMAGES_DIR})",
         )
+
+    if existing and existing.is_general is None:
+        # Reactivar registro soft-deleted
+        existing.name = name
+        existing.is_general = is_general
+        existing.date_uploaded = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        db.commit()
+        db.refresh(existing)
+        logger.info("Imagen '%s' reactivada → %s", name, dest_path)
+        return {
+            "id": existing.id,
+            "name": existing.name,
+            "path": dest_path,
+            "message": f"Imagen '{name}' reactivada correctamente.",
+        }
 
     nueva_imagen = Image(
         user_id="user-123",
@@ -220,10 +240,11 @@ def delete_image(image_id: int, db: Session = Depends(get_db)):
         else:
             _delete_file_via_ssh(img.path)
 
-    db.delete(img)
+    # Soft-delete: marcamos is_general=NULL para preservar FK con vms históricos
+    img.is_general = None
     db.commit()
 
-    logger.info("Imagen id=%d '%s' eliminada.", image_id, img.name)
+    logger.info("Imagen id=%d '%s' marcada como eliminada.", image_id, img.name)
     return {"message": f"Imagen '{img.name}' eliminada correctamente."}
 
 

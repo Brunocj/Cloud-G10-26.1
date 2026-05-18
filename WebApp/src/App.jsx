@@ -391,6 +391,22 @@ const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlice, onOp
     const linkFromNode = linkFrom ? nodes.find(n => n.id === linkFrom) : null;
     const totalRam = nodes.reduce((s, n) => s + n.ram, 0);
 
+    // Build interface map: ens3 = management (always), so data links start at ens4.
+    // The i-th data edge connected to a node → ens{4+i}
+    const ifaceMap = (() => {
+        const cnt = {};
+        const map = {};
+        edges.forEach(ed => {
+            const fi = cnt[ed.from] ?? 0;
+            const ti = cnt[ed.to] ?? 0;
+            map[ed.id] = { fromIface: `ens${4 + fi}`, toIface: `ens${4 + ti}` };
+            cnt[ed.from] = fi + 1;
+            cnt[ed.to] = ti + 1;
+        });
+        return map;
+    })();
+
+
     return (
         <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", position: "relative" }}>
 
@@ -452,6 +468,10 @@ const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlice, onOp
                     {edges.map(ed => {
                         const A = nodes.find(n => n.id === ed.from), B = nodes.find(n => n.id === ed.to);
                         if (!A || !B) return null;
+                        const iface = ifaceMap[ed.id] || {};
+                        // Points at 28% / 72% along the edge for the interface labels
+                        const fx = A.x + 0.28 * (B.x - A.x), fy = A.y + 0.28 * (B.y - A.y);
+                        const tx = A.x + 0.72 * (B.x - A.x), ty = A.y + 0.72 * (B.y - A.y);
                         return (
                             <g key={ed.id}>
                                 <line x1={A.x} y1={A.y} x2={B.x} y2={B.y}
@@ -469,6 +489,28 @@ const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlice, onOp
                                             setEdges(prev => prev.filter(x => x.id !== ed.id));
                                         }
                                     }} />
+                                {/* Interface label near A (fromIface) */}
+                                {iface.fromIface && (
+                                    <g style={{ pointerEvents: "none" }}>
+                                        <rect x={fx - 17} y={fy - 8} width={34} height={14} rx={4}
+                                            fill={T.accentLight} stroke={T.accent + "66"} strokeWidth={1} />
+                                        <text x={fx} y={fy + 0.5} textAnchor="middle" dominantBaseline="middle"
+                                            style={{ fontSize: 7.5, fill: T.accent, fontFamily: "monospace", fontWeight: 800 }}>
+                                            {iface.fromIface}
+                                        </text>
+                                    </g>
+                                )}
+                                {/* Interface label near B (toIface) */}
+                                {iface.toIface && (
+                                    <g style={{ pointerEvents: "none" }}>
+                                        <rect x={tx - 17} y={ty - 8} width={34} height={14} rx={4}
+                                            fill={T.accentLight} stroke={T.accent + "66"} strokeWidth={1} />
+                                        <text x={tx} y={ty + 0.5} textAnchor="middle" dominantBaseline="middle"
+                                            style={{ fontSize: 7.5, fill: T.accent, fontFamily: "monospace", fontWeight: 800 }}>
+                                            {iface.toIface}
+                                        </text>
+                                    </g>
+                                )}
                             </g>
                         );
                     })}

@@ -154,10 +154,10 @@ def run_gc_cycle() -> dict:
                     logger.warning("[GC] No se pudo borrar archivo %s: %s", img.path, exc)
                     _ssh_delete_image_file(img.path)
 
-            # Borrar registro de BD
-            db.delete(img)
+            # Soft-delete: marcamos is_general=NULL para no romper FK con vms
+            img.is_general = None
             summary["unused_images_deleted"] += 1
-            logger.info("[GC] Imagen sin uso eliminada: id=%d name='%s'", img.id, img.name)
+            logger.info("[GC] Imagen sin uso marcada como eliminada: id=%d name='%s'", img.id, img.name)
 
         if unused_images:
             db.commit()

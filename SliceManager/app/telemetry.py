@@ -23,6 +23,8 @@ async def get_real_worker_metrics():
     Retorna la lista de workers lista para el payload del VM Placement.
     Solo incluye los compute nodes (workers 2, 3 y 4).
     """
+    logger.info("─"*60)
+    logger.info("[TELEMETRY] 📡 Consultando Prometheus en %s ...", PROMETHEUS_URL)
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             async def fetch_metric(promql):
@@ -32,6 +34,7 @@ async def get_real_worker_metrics():
                 return {r["metric"]["instance"]: float(r["value"][1]) for r in results}
 
             # Lanzamos las 3 consultas simultáneamente (Concurrencia)
+            logger.info("[TELEMETRY]   Consultando: RAM disponible, vCPUs idle, Disco libre...")
             ram_task  = fetch_metric("node_memory_MemAvailable_bytes/1024/1024")
             cpus_task = fetch_metric('count by(instance)(node_cpu_seconds_total{mode="idle"})')
             disk_task = fetch_metric('node_filesystem_avail_bytes{mountpoint="/"}/1024/1024/1024')
@@ -39,26 +42,31 @@ async def get_real_worker_metrics():
             # Esperamos a que las 3 terminen
             ram, cpus, disk = await asyncio.gather(ram_task, cpus_task, disk_task)
 
-            # --- 🔍 DEBUGGING CLAVE ---
-            logger.info(f"🔍 Nombres de instancias detectadas en Prometheus: {list(ram.keys())}")
+            logger.info("[TELEMETRY] ✅ Métricas recibidas de Prometheus. Instancias detectadas: %s", list(ram.keys()))
 
             workers_payload = []
             for w in WORKERS_CONFIG:
                 inst = w["instance"]
+                vcpus_val = int(cpus.get(inst, 0))
+                ram_val   = int(ram.get(inst, 0))
+                disk_val  = int(disk.get(inst, 0))
                 workers_payload.append({
                     "worker_id": w["worker_id"],
-                    "available_vcpus":   int(cpus.get(inst, 0)),
-                    "available_ram_mb":  int(ram.get(inst, 0)),
-                    "available_disk_gb": int(disk.get(inst, 0)),
+                    "available_vcpus":   vcpus_val,
+                    "available_ram_mb":  ram_val,
+                    "available_disk_gb": disk_val,
                 })
+                logger.info("[TELEMETRY]   Worker-%d (%s) → vCPUs: %d  RAM: %d MB  Disco: %d GB",
+                            w["worker_id"], inst, vcpus_val, ram_val, disk_val)
 
-            logger.info(f"Métricas reales obtenidas de {len(workers_payload)} compute nodes.")
+            logger.info("[TELEMETRY] 📊 Resumen: %d compute nodes disponibles para placement", len(workers_payload))
+            logger.info("─"*60)
             return workers_payload
 
     except Exception as e:
-        logger.error(f"Fallo al conectar con Prometheus: {str(e)}")
+        logger.error("[TELEMETRY] ❌ Fallo al conectar con Prometheus: %s", e)
         # FALLBACK: Si Prometheus está caído, usamos datos simulados para no detener el sistema
-        logger.warning("Usando métricas simuladas como respaldo (solo compute nodes 2, 3, 4)...")
+        logger.warning("[TELEMETRY] ⚠️  Usando métricas SIMULADAS como respaldo (workers 2, 3, 4)...")
         return [
             {"worker_id": 2, "available_vcpus": 10, "available_ram_mb": 16000, "available_disk_gb": 500},
             {"worker_id": 3, "available_vcpus": 10, "available_ram_mb": 16000, "available_disk_gb": 500},

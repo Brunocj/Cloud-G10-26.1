@@ -1,6 +1,12 @@
+import logging
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
 import asyncio
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
 
 from app.database import engine, Base
 from app.routers import slice_router, deploy_router

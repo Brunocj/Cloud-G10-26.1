@@ -63,6 +63,8 @@ class Provisioner:
         else:
             status = DeployStatus.PARTIAL
 
+        logger.info("[CP] 📊 Resultado deploy slice=%s: ✅ %d OK  ❌ %d fallidas  estado=%s",
+                    request.slice_id, len(ok), len(failed), status.value)
         return DeployReply(
             slice_id=request.slice_id,
             request_id=request.request_id,
@@ -72,24 +74,36 @@ class Provisioner:
         )
 
     def _deploy_vm_sync(self, vm: VMSpec, slice_id: str) -> VMResult:
-        # 🔥 Leemos el puerto y calculamos el display aquí mismo
         vnc_port = vm.vnc_port
         vnc_display = vnc_port - 5900
 
+        logger.info("[CP] 🚀 Desplegando VM: %s  worker=%s  vCPUs=%d  RAM=%d MB  Disco=%d GB",
+                    vm.vm_id, vm.worker_ip, vm.vcpus, vm.ram_mb, vm.disk_gb)
+        logger.info("[CP]    imagen=%s  vnc_port=%d  taps=%d  user=%s",
+                    vm.image_path, vnc_port, len(vm.tap_interfaces or []), vm.vm_user or 'ubuntu')
+
         for attempt in range(1, settings.SSH_MAX_RETRIES + 1):
             try:
+                logger.info("[CP]    🔌 Abriendo SSH a %s (intento %d/%d)...",
+                            vm.worker_ip, attempt, settings.SSH_MAX_RETRIES)
                 with SSHClient(vm.worker_ip, vm.ssh_user, vm.ssh_private_key) as ssh:
                     executor = QEMUExecutor(ssh)
 
                     # 1. Disco
-                    # 🔥 FIX: Le pasamos vm.disk_gb a la función
+                    logger.info("[CP]    💽 [1/3] Creando disco QCOW2 para %s...", vm.vm_id)
                     disk_path = executor.create_disk(vm.vm_id, slice_id, vm.image_path, vm.worker_ip, vm.disk_gb)
+                    logger.info("[CP]    💽       Disco creado: %s", disk_path)
 
                     # 2. TAP interfaces
                     if vm.tap_interfaces:
+                        logger.info("[CP]    🔗 [2/3] Creando %d TAP interface(s)...", len(vm.tap_interfaces))
                         executor.create_tap_interfaces(vm.tap_interfaces)
+                        for tap in vm.tap_interfaces:
+                            logger.info("[CP]          TAP: %-28s MAC: %s",
+                                        getattr(tap, 'tap_name', tap), getattr(tap, 'mac', ''))
 
-                    # 3. Lanzar QEMU con el display inyectado
+                    # 3. Lanzar QEMU
+                    logger.info("[CP]    ⚡ [3/3] Lanzando QEMU (VNC :%d)...", vnc_display)
                     pid = executor.launch_vm(
                         vm_id=vm.vm_id,
                         slice_id=slice_id,
@@ -103,21 +117,21 @@ class Provisioner:
                         vm_password=vm.vm_password or "pucp2026",
                         priority=vm.priority,
                     )
-
+                    logger.info("[CP] ✅ VM %s activa en worker=%s  PID=%s  VNC=:%d (port %d)",
+                                vm.vm_id, vm.worker_ip, pid, vnc_display, vnc_port)
                     return VMResult(
                         vm_id=vm.vm_id,
                         worker_ip=vm.worker_ip,
                         pid=pid,
-                        vnc_port=vnc_port, # 🔥 Devolvemos el mismo puerto
+                        vnc_port=vnc_port,
                     )
 
             except Exception as exc:
-                logger.warning(
-                    "VM %s intento %d/%d falló: %s",
-                    vm.vm_id, attempt, settings.SSH_MAX_RETRIES, exc,
-                )
+                logger.warning("[CP] ⚠️  VM %s intento %d/%d falló: %s",
+                               vm.vm_id, attempt, settings.SSH_MAX_RETRIES, exc)
                 if attempt == settings.SSH_MAX_RETRIES:
-                    # 🔥 FIX: Eliminamos el if vnc_port: self._vnc.release_port(...)
+                    logger.error("[CP] ❌ VM %s no se pudo desplegar tras %d intentos",
+                                 vm.vm_id, settings.SSH_MAX_RETRIES)
                     return VMResult(
                         vm_id=vm.vm_id,
                         worker_ip=vm.worker_ip,

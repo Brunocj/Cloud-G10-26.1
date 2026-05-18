@@ -7,8 +7,10 @@ from app.services.placement_worker import placement_queue
 from app.nats_producer import nats_producer
 import uuid
 import json
+import logging
 
 router = APIRouter(prefix="/api/v1/slices", tags=["Deploy"])
+logger = logging.getLogger("SliceManager.Deploy")
 
 
 def _release_external_ips(db: Session, slice_id: int) -> None:
@@ -30,16 +32,25 @@ def _release_external_ips(db: Session, slice_id: int) -> None:
 
 @router.post("/{slice_id}/deploy", status_code=202)
 async def request_deploy(slice_id: int, request: DeployRequest, db: Session = Depends(get_db)):
+    logger.info("="*70)
+    logger.info("[DEPLOY] 📥 Solicitud de despliegue recibida para slice_id=%s", slice_id)
+    logger.info("[DEPLOY]    zona=%s  TTL=%sh  motivo=%s", request.availability_zone, request.ttl_hours, getattr(request, 'motivo', 'N/A'))
     db_slice = db.query(Slice).filter(Slice.id == slice_id).first()
     if not db_slice:
         raise HTTPException(status_code=404, detail="Slice no encontrada")
-        
+
+    logger.info("[DEPLOY] ✅ Slice '%s' encontrado en BD (estado actual: %s)", db_slice.name, db_slice.status)
+    
+    
     db_slice.status = "PENDING_APPROVAL"
     db_slice.TTL = request.ttl_hours
     db.commit()
+    logger.info("[DEPLOY] 🟡 Estado cambiado a PENDING_APPROVAL")
 
     # Encolamos (Usamos "slice_id" internamente)
     await placement_queue.put({"slice_id": slice_id, "zone": request.availability_zone})
+    logger.info("[DEPLOY] 📤 Solicitud encolada en placement_queue → worker en background la procesará")
+    logger.info("="*70)
     return {"status": "ACCEPTED", "message": "Enviado a validación de recursos."}
 
 @router.delete("/{slice_id}", status_code=202)
