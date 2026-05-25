@@ -1,13 +1,13 @@
 services:
   vm-placement:
     build: .
-    container_name: vm-placement  # Importante para que el Slice Manager lo encuentre por este nombre
+    container_name: vm-placement
     ports:
       - "8080:8080"
     restart: unless-stopped
     networks:
       - pucp_cloud_net
-
+ 
 networks:
   pucp_cloud_net:
     external: true

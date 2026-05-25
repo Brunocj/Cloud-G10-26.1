@@ -1,95 +1,82 @@
 """
-Motor de placement: algoritmo Round Robin GLOBAL.
+Placement Engine — LLF-D (Least Loaded First con ordenamiento Decreciente)
 
-Lógica modificada para entrega parcial:
-  - Mantiene memoria (variable global) del último worker usado entre diferentes 
-    peticiones HTTP.
-  - Sigue verificando recursos (vcpus, ram, disco).
+Función objetivo:
+    min( max( carga_i / C_i ) )   ∀ i ∈ workers de la zona
+
+Criterio de selección por iteración:
+    worker* = argmax_i( D_i )     → implementado con Max Heap para O(1) acceso
+
+Complejidad: O(n log n + n log m)
+    - O(n log n): ordenamiento inicial de VMs por peso decreciente
+    - O(n log m): n operaciones heapreplace sobre heap de m workers
 """
 
-import logging
-from typing import List, Tuple, Optional
+import heapq
+from typing import List, Dict, Tuple
 
-from app.models import (
-    PlacementRequest, PlacementResponse,
-    PlacementStatus, VMAssignment, VMRequest, WorkerState,
-    FailureReason,
-)
+from app.models import VMSpec, WorkerState, PlacementEntry
 
-logger = logging.getLogger(__name__)
 
-# 🔥 LA MAGIA ESTÁ AQUÍ: Variable global en memoria
-# Al estar fuera de las funciones, su valor sobrevive entre distintas peticiones POST
-GLOBAL_RR_INDEX = 0
-
-def _find_worker(
-    vm: VMRequest,
+def run_placement(
+    vms: List[VMSpec],
     workers: List[WorkerState],
-    start: int,
-) -> Tuple[Optional[int], Optional[WorkerState]]:
+) -> Tuple[bool, List[PlacementEntry], str, str]:
     """
-    Recorre circularmente desde `start` buscando el primer worker
-    con recursos suficientes para `vm`.
+    Ejecuta LLF-D y retorna (success, placement_map, reason, detail).
+
+    Pasos:
+      1. Validaciones previas.
+      2. Ordenar VMs de mayor a menor peso  → O(n log n)
+      3. Construir Max Heap de workers       → O(m)
+      4. Por cada VM: extraer worker más disponible, verificar capacidad,
+         asignar y reinsertar en heap        → O(n log m)
+      5. Retornar mapa completo o FAILED atómico.
     """
-    n = len(workers)
-    for offset in range(n):
-        idx = (start + offset) % n
-        w = workers[idx]
-        if (w.available_vcpus  >= vm.vcpus and
-            w.available_ram_mb >= vm.ram_mb and
-            w.available_disk_gb >= vm.disk_gb):
-            return idx, w
-    return None, None
 
+    # ── 1. Validaciones ──────────────────────────────────────────────────────
+    if not workers:
+        return False, [], "NO_WORKERS_AVAILABLE", "La lista de workers está vacía."
 
-def run_placement(request: PlacementRequest) -> PlacementResponse:
-    global GLOBAL_RR_INDEX  # Declaramos que vamos a usar y modificar la variable global
+    if not vms:
+        return True, [], None, None
 
-    if not request.workers:
-        return PlacementResponse(
-            slice_id=request.slice_id,
-            status=PlacementStatus.FAILED,
-            reason=FailureReason.NO_WORKERS_AVAILABLE,
-            detail="La lista de workers está vacía.",
-        )
+    # ── 2. Ordenar VMs de mayor a menor peso ─────────────────────────────────
+    sorted_vms = sorted(vms, key=lambda v: v.peso, reverse=True)
 
-    workers = [w.model_copy() for w in request.workers]
-    assignments: List[VMAssignment] = []
-    
-    # 🔥 En lugar de empezar en 0, empezamos donde se quedó la última petición
-    rr_index = GLOBAL_RR_INDEX
+    # ── 3. Construir Max Heap ─────────────────────────────────────────────────
+    # heapq es min-heap; negamos disponible para simular max-heap.
+    # Entrada: (-disponible, worker_id, disponible_mutable)
+    # Usamos lista mutable [disponible] para poder actualizar sin reconstruir.
+    heap: List[Tuple[float, int, List[float]]] = []
+    for w in workers:
+        heap.append((-w.disponible, w.worker_id, [w.disponible]))
+    heapq.heapify(heap)  # O(m)
 
-    for vm in request.vms:
-        idx, chosen = _find_worker(vm, workers, rr_index)
+    # ── 4. Asignación iterativa ───────────────────────────────────────────────
+    placement_map: List[PlacementEntry] = []
 
-        if chosen is None:
-            detail = (
-                f"No hay worker con recursos suficientes para '{vm.vm_id}' "
-                f"(vcpus={vm.vcpus}, ram_mb={vm.ram_mb}, disk_gb={vm.disk_gb})."
-            )
-            logger.warning(f"[{request.slice_id}] {detail}")
-            return PlacementResponse(
-                slice_id=request.slice_id,
-                status=PlacementStatus.FAILED,
-                reason=FailureReason.INSUFFICIENT_RESOURCES,
-                detail=detail,
+    for vm in sorted_vms:
+        # O(1): el worker con mayor disponible siempre está en heap[0]
+        neg_disp, worker_id, disp_ref = heap[0]
+        disponible = disp_ref[0]
+
+        # Fórmula 8: condición de fallo
+        if disponible < vm.peso:
+            return (
+                False,
+                [],
+                "INSUFFICIENT_RESOURCES",
+                f"No hay worker con capacidad suficiente para VM '{vm.vm_id}' "
+                f"(peso={vm.peso:.4f}, máx disponible={disponible:.4f}).",
             )
 
-        workers[idx].available_vcpus   -= vm.vcpus
-        workers[idx].available_ram_mb  -= vm.ram_mb
-        workers[idx].available_disk_gb -= vm.disk_gb
+        # Asignar
+        placement_map.append(PlacementEntry(vm_id=vm.vm_id, worker_id=worker_id))
 
-        assignments.append(VMAssignment(vm_id=vm.vm_id, worker_id=chosen.worker_id))
-        logger.info(f"[{request.slice_id}] {vm.vm_id} → {chosen.worker_id}")
-        
-        # Avanzamos el índice para la SIGUIENTE VM
-        rr_index = (idx + 1) % len(workers)
+        # Fórmula 5: descontar peso y reordenar heap → O(log m)
+        nuevo_disp = disponible - vm.peso
+        disp_ref[0] = nuevo_disp
+        heapq.heapreplace(heap, (-nuevo_disp, worker_id, disp_ref))
 
-    # 🔥 GUARDAMOS EL ÍNDICE para el siguiente Slice/Request que llegue en el futuro
-    GLOBAL_RR_INDEX = rr_index
-
-    return PlacementResponse(
-        slice_id=request.slice_id,
-        status=PlacementStatus.SUCCESS,
-        placement_map=assignments,
-    )
+    return True, placement_map, None, None
