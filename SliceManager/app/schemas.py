@@ -3,9 +3,9 @@ from typing import Optional, Dict, Any
 
 # Lo que el Frontend nos envía al presionar "Solicitar Despliegue" (REQ-US-08)
 class DeployRequest(BaseModel):
-    availability_zone: str
+    availability_zone_id: int
     ttl_hours: int
-    motivo: str # El TDR exige este campo de texto
+    motivo: str
     
 # Lo que el Frontend nos envía al guardar un borrador (REQ-US-07)
 class DraftSaveRequest(BaseModel):

@@ -23,8 +23,8 @@ Slice Manager
 
 La comunicación es **HTTP síncrona request/reply**. El Slice Manager construye
 el Servers' State directamente desde la BD (workers de la zona + pesos de VMs
-activas), lo empaqueta junto a las VMs del slice y hace un POST. Este servicio
-responde con el mapa completo antes de que el Slice Manager continúe.
+activas con overprovisioning), lo empaqueta junto a las VMs del slice y hace un POST.
+Este servicio responde con el mapa completo antes de que el Slice Manager continúe.
 
 ---
 
@@ -56,7 +56,7 @@ con un **Max Heap** para acceso O(1) y actualización O(log m).
 1. Ordenar VMs del slice de mayor a menor peso — **O(n log n)**
 2. Para cada VM (en ese orden):
    - Tomar el worker con mayor `D_i` del heap — **O(1)**
-   - Si `D_i < peso_vm` → retornar `FAILED` (fórmula 8)
+   - Si `D_i < peso_vm` → retornar `FAILED` (sin recursos suficientes)
    - Asignar VM al worker y descontar peso del heap — **O(log m)**
 3. Retornar mapa completo.
 
@@ -74,8 +74,7 @@ donde `n` = VMs del slice y `m` = workers disponibles en la zona.
 timeout = n × 1 segundo
 ```
 
-El tiempo máximo de ejecución escala con el tamaño del slice. La ejecución
-real ocurre en milisegundos; el margen es ampliamente suficiente.
+El tiempo máximo de ejecución escala con el tamaño del slice.
 
 ---
 
@@ -85,17 +84,19 @@ El peso de cada VM es calculado por el **Slice Manager al persistir la VM en BD*
 usando la fórmula:
 
 ```
-w = α·vcpus + β·ram_gb + γ·disco_gb
+w = 3·vcpus + 5·ram_gb + 1·disco_gb
 ```
 
-Con coeficientes derivados del cuello de botella del clúster de referencia
-(RAM es el recurso más escaso):
+Con coeficientes derivados del cuello de botella del clúster (RAM es el recurso más escaso):
 
 ```
 β (RAM) : α (vCPU) : γ (disco) = 5 : 3 : 1
 ```
 
 Este servicio **recibe el peso ya calculado** — no lo recomputa.
+
+El Slice Manager envía `peso_actualizado` de cada VM (que el módulo de Observabilidad
+irá corrigiendo con consumo real). Al arrancar el sistema, `peso_actualizado == peso`.
 
 ---
 
@@ -107,21 +108,23 @@ Este servicio **recibe el peso ya calculado** — no lo recomputa.
 ```json
 {
   "slice_id": "42",
-  "availability_zone": "Linux Cluster",
+  "availability_zone": "1",
   "vms": [
     { "vm_id": "n214", "peso": 24.0 },
     { "vm_id": "n215", "peso": 18.0 }
   ],
   "workers": [
-    { "worker_id": 1, "disponible": 340.0 },
-    { "worker_id": 2, "disponible": 280.0 },
-    { "worker_id": 3, "disponible": 410.0 }
+    { "worker_id": 2, "disponible": 36.92 },
+    { "worker_id": 3, "disponible": 36.92 },
+    { "worker_id": 4, "disponible": 36.92 }
   ]
 }
 ```
 
+> `availability_zone` es el ID de la zona (string) — no el nombre.  
 > `disponible` es la capacidad restante del worker en unidades de peso,
-> calculada por el Slice Manager como `C_i - Σ pesos_VMs_activas`.
+> calculada por el Slice Manager como `C_i − Σ peso_actualizado(VMs ACTIVE)`.  
+> Workers con `id=1` (headnode) nunca aparecen — el Slice Manager los excluye.
 
 **Response — éxito (HTTP 200):**
 ```json
@@ -130,7 +133,7 @@ Este servicio **recibe el peso ya calculado** — no lo recomputa.
   "status": "SUCCESS",
   "placement_map": [
     { "vm_id": "n214", "worker_id": 3 },
-    { "vm_id": "n215", "worker_id": 1 }
+    { "vm_id": "n215", "worker_id": 2 }
   ],
   "reason": null,
   "detail": null
@@ -144,7 +147,7 @@ Este servicio **recibe el peso ya calculado** — no lo recomputa.
   "status": "FAILED",
   "placement_map": null,
   "reason": "INSUFFICIENT_RESOURCES",
-  "detail": "No hay worker con capacidad suficiente para VM 'n214' (peso=999.0, máx disponible=410.0)."
+  "detail": "No hay worker con capacidad suficiente para VM 'n214' (peso=999.0, máx disponible=36.92)."
 }
 ```
 
@@ -190,6 +193,24 @@ vm-placement/
 └── requirements.txt
 ```
 
+### Modelos Pydantic
+
+```python
+class VMSpec(BaseModel):
+    vm_id: str
+    peso: float          # Pre-calculado por el Slice Manager al persistir la VM en BD
+
+class WorkerState(BaseModel):
+    worker_id: int
+    disponible: float    # C_i - Σ peso_actualizado(VMs ACTIVE) — calculado por el Slice Manager
+
+class PlacementRequest(BaseModel):
+    slice_id: str
+    availability_zone: str   # ID de la zona como string
+    vms: List[VMSpec]
+    workers: List[WorkerState]
+```
+
 ### Flujo interno de un request
 
 ```
@@ -233,17 +254,15 @@ curl -X POST http://localhost:8080/placement \
   -H "Content-Type: application/json" \
   -d '{
     "slice_id": "42",
-    "availability_zone": "Linux Cluster",
+    "availability_zone": "1",
     "vms": [
-      { "vm_id": "n214", "peso": 50.0 },
-      { "vm_id": "n215", "peso": 30.0 },
-      { "vm_id": "n216", "peso": 20.0 },
-      { "vm_id": "n217", "peso": 10.0 }
+      { "vm_id": "n214", "peso": 18.5 },
+      { "vm_id": "n215", "peso": 5.25 }
     ],
     "workers": [
-      { "worker_id": 1, "disponible": 60.0 },
-      { "worker_id": 2, "disponible": 80.0 },
-      { "worker_id": 3, "disponible": 90.0 }
+      { "worker_id": 2, "disponible": 36.92 },
+      { "worker_id": 3, "disponible": 36.92 },
+      { "worker_id": 4, "disponible": 36.92 }
     ]
   }'
 ```
@@ -252,15 +271,14 @@ curl -X POST http://localhost:8080/placement \
 
 ## Notas para colaboradores
 
-- **El peso llega pre-calculado.** El Slice Manager aplica `w = α·vcpus + β·ram + γ·disco`
-  al persistir la VM en BD. Este servicio no conoce los coeficientes ni los requerimientos
-  crudos — solo opera sobre pesos.
-- **El Servers' State lo construye el Slice Manager.** Consulta la BD por workers de la
-  zona y suma los pesos de VMs activas. Este servicio recibe el estado ya calculado.
+- **El peso llega pre-calculado.** El Slice Manager aplica `w = 3·vcpus + 5·ram_gb + 1·disk_gb`
+  al persistir la VM en BD. Este servicio no conoce los coeficientes ni los recursos crudos.
+- **El Servers' State lo construye el Slice Manager.** Consulta la BD por workers de la zona,
+  aplica `F_OP = 1/0.65 ≈ 1.54` sobre la capacidad nominal y suma los `peso_actualizado`
+  de VMs activas. Este servicio recibe el estado ya calculado en campo `disponible`.
+- **`availability_zone` es el ID como string.** El Slice Manager envía el `id` de la zona,
+  no el nombre (`"1"`, no `"Linux Cluster"`).
 - **Sin placement parcial.** Si una VM no puede asignarse, se retorna `FAILED` sin
   asignar ninguna. El Slice Manager activa rollback (patrón Saga).
-- **Atomicidad concurrente.** Tras un `SUCCESS`, el Slice Manager debe descontar los
-  pesos en BD antes de responder al cliente, para que requests concurrentes vean el
-  estado comprometido y no generen overcommit.
 - **`worker_id` es siempre `int`.** El Slice Manager lo espera así para hacer lookup
   en su `server_inventory`.

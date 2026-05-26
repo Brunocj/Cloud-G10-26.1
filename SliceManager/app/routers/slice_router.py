@@ -9,6 +9,11 @@ import json
 
 router = APIRouter(prefix="/api/v1/slices", tags=["Slices / Topologies"])
 
+def _calcular_peso(vcpus: int, ram_mb: float, disk_gb: float) -> float:
+    """w = 3·vcpus + 5·ram_gb + 1·disk_gb"""
+    ram_gb = ram_mb / 1024.0
+    return round(3 * vcpus + 5 * ram_gb + 1 * disk_gb, 4)
+
 @router.get("/", status_code=200)
 def list_slices(db: Session = Depends(get_db)):
     slices = db.query(Slice).filter(Slice.creator_id == "user-123").order_by(Slice.id.desc()).all()
@@ -70,17 +75,24 @@ def create_draft(request: DraftSaveRequest, db: Session = Depends(get_db)):
             # Si tiene IP externa, forzamos internet=1. Si no, tomamos lo que mande el frontend (o 0)
             int_access = 1 if ext_ip else int(vm_data.get("internet_access", 0))
             
+            vcpus_val = int(vm_data.get("vcores", 1))
+            ram_val   = float(vm_data.get("ram", 512.0))
+            disk_val  = float(vm_data.get("disk", 5.0))
+            peso_val  = _calcular_peso(vcpus_val, ram_val, disk_val)
+
             nueva_vm = Vm(
                 name=vm_data.get("id"),
-                vcore=int(vm_data.get("vcores", 1)),
-                ram=float(vm_data.get("ram", 512.0)),
-                disk=float(vm_data.get("disk", 5.0)),
+                vcore=vcpus_val,
+                ram=ram_val,
+                disk=disk_val,
                 state="DRAFT",
                 slice_id=slice_creado.id,
                 image_id=vm_data.get("image_id"),
                 worker_id=asignado.id if asignado else None,
                 external_ip=ext_ip,
-                internet_access=int_access
+                internet_access=int_access,
+                peso=peso_val,
+                peso_actualizado=peso_val
             )
             
             vm_data["worker"] = asignado.name if asignado else "Unassigned"
@@ -140,17 +152,24 @@ def update_draft(slice_id: int, request: DraftSaveRequest, db: Session = Depends
         ext_ip = vm_data.get("external_ip", None)
         int_access = 1 if ext_ip else int(vm_data.get("internet_access", 0))
 
+        vcpus_val = int(vm_data.get("vcores", 1))
+        ram_val   = float(vm_data.get("ram", 512.0))
+        disk_val  = float(vm_data.get("disk", 5.0))
+        peso_val  = _calcular_peso(vcpus_val, ram_val, disk_val)
+
         nueva_vm = Vm(
             name=vm_data.get("id"),
-            vcore=int(vm_data.get("vcores", 1)),
-            ram=float(vm_data.get("ram", 512.0)),
-            disk=float(vm_data.get("disk", 5.0)),
+            vcore=vcpus_val,
+            ram=ram_val,
+            disk=disk_val,
             state="DRAFT",
             slice_id=slice_id,
             image_id=vm_data.get("image_id"), 
             worker_id=vm_data.get("worker_id"),
             external_ip=ext_ip,
-            internet_access=int_access
+            internet_access=int_access,
+            peso=peso_val,
+            peso_actualizado=peso_val
         )
         db.add(nueva_vm)
         db.flush() # 🔥 Sincroniza temporalmente para obtener el ID de la VM

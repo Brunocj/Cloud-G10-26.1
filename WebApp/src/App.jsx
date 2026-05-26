@@ -1033,7 +1033,7 @@ export default function App() {
 
             // PASO 2: Mandamos a desplegar ese ID que acabamos de crear
             const payloadDeploy = {
-                availability_zone: "Linux Cluster", // Opcional: hacerlo dinámico luego
+                availability_zone_id: 1, // Opcional: hacerlo dinámico luego
                 ttl_hours: 4,
                 motivo: "Despliegue directo desde Canvas"
             };

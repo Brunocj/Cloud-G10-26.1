@@ -34,7 +34,7 @@ def _release_external_ips(db: Session, slice_id: int) -> None:
 async def request_deploy(slice_id: int, request: DeployRequest, db: Session = Depends(get_db)):
     logger.info("="*70)
     logger.info("[DEPLOY] 📥 Solicitud de despliegue recibida para slice_id=%s", slice_id)
-    logger.info("[DEPLOY]    zona=%s  TTL=%sh  motivo=%s", request.availability_zone, request.ttl_hours, getattr(request, 'motivo', 'N/A'))
+    logger.info("[DEPLOY]    zona=%s  TTL=%sh  motivo=%s", request.availability_zone_id, request.ttl_hours, getattr(request, 'motivo', 'N/A'))
     db_slice = db.query(Slice).filter(Slice.id == slice_id).first()
     if not db_slice:
         raise HTTPException(status_code=404, detail="Slice no encontrada")
@@ -48,7 +48,7 @@ async def request_deploy(slice_id: int, request: DeployRequest, db: Session = De
     logger.info("[DEPLOY] 🟡 Estado cambiado a PENDING_APPROVAL")
 
     # Encolamos (Usamos "slice_id" internamente)
-    await placement_queue.put({"slice_id": slice_id, "zone": request.availability_zone})
+    await placement_queue.put({"slice_id": slice_id, "zone_id": request.availability_zone_id})
     logger.info("[DEPLOY] 📤 Solicitud encolada en placement_queue → worker en background la procesará")
     logger.info("="*70)
     return {"status": "ACCEPTED", "message": "Enviado a validación de recursos."}

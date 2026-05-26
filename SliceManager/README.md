@@ -11,7 +11,8 @@ resultados y ejecuta rollback automático ante fallos.
 
 - Exponer la API REST que consume el frontend (borradores, deploy, destroy).
 - Persistir slices y VMs en MySQL (modelo relacional).
-- Consultar métricas reales de los workers desde Prometheus.
+- **Calcular y persistir el peso de cada VM al guardar el borrador** (`peso` y `peso_actualizado`).
+- **Construir el Servers' State desde BD** al momento del deploy: obtiene workers de la zona, aplica factor de overprovisioning y descuenta pesos de VMs activas.
 - Invocar al VM Placement para obtener el mapa `vm → worker`.
 - Enriquecer el contrato con: IPs SSH, llaves PEM, MACs, TAP names (incluido TAP de gestión), VLANs, VNC ports, rutas de imagen, IPs internas de la subred de gestión.
 - Publicar `slice.deploy` y `slice.destroy` en NATS JetStream hacia el Queue Manager.
@@ -21,7 +22,8 @@ resultados y ejecuta rollback automático ante fallos.
 
 **No** ejecuta comandos en workers — eso es del Compute Provisioner.  
 **No** configura red — eso es del Network Orchestrator.  
-**No** decide el algoritmo de placement — eso es del VM Placement.
+**No** decide el algoritmo de placement — eso es del VM Placement.  
+**No** consulta Prometheus para el placement — el Servers' State se construye desde BD.
 
 ---
 
@@ -40,10 +42,52 @@ app/
  ├── repositories/
  │    └── slice_repo.py          → SliceRepository.save_draft()
  └── services/
-      ├── placement_worker.py    → Worker async: placement → enriquecimiento → NATS
+      ├── placement_worker.py    → Worker async: Servers' State → placement → enriquecimiento → NATS
       ├── nats_listener.py       → Listener async: slice.result → actualiza MySQL
-      └── telemetry.py           → Consulta Prometheus (fallback a datos simulados)
+      ├── gc_scheduler.py        → Garbage collector de ISOs, discos y imágenes huérfanas
+      └── telemetry.py           → Módulo de telemetría (reservado para Observabilidad)
 ```
+
+---
+
+## Modelo de pesos
+
+Al guardar un borrador, cada VM persiste su peso calculado con la fórmula:
+
+```
+w = 3·vcpus + 5·ram_gb + 1·disk_gb
+```
+
+Con coeficientes derivados del cuello de botella del clúster (RAM es el recurso más escaso):
+
+```
+β (RAM) : α (vCPU) : γ (disco) = 5 : 3 : 1
+```
+
+Se persisten dos campos en la tabla `vms`:
+- `peso`: peso nominal calculado sobre recursos solicitados. **No cambia.**
+- `peso_actualizado`: arranca igual que `peso`. El módulo de Observabilidad lo irá corrigiendo con consumo real. **Es el que usa el Servers' State.**
+
+---
+
+## Servers' State y factor de overprovisioning
+
+Al recibir una orden de deploy, el `placement_worker` construye el Servers' State desde BD:
+
+```
+F_OP = 1 / 0.65 ≈ 1.54          (factor de overprovisioning inicial)
+
+capacidad_nominal_i = 3·cpu_i + 5·(ram_gb_i) + 1·disk_gb_i
+C_i = capacidad_nominal_i × F_OP
+D_i = C_i − Σ peso_actualizado(VMs ACTIVE en worker_i)
+```
+
+El factor `F_OP` expande la capacidad nominal para reflejar que en la práctica las VMs
+consumen ~65% de lo que solicitan. Cuando el módulo de Observabilidad esté operativo,
+este factor será dinámico.
+
+Solo se incluyen workers de la zona solicitada (`availability_zone_id`) y se excluye
+siempre el worker con `id=1` (headnode).
 
 ---
 
@@ -52,18 +96,22 @@ app/
 ```
 Frontend
     │ POST /api/v1/slices/{id}/deploy
-    │ { availability_zone, ttl_hours, motivo }
+    │ { availability_zone_id, ttl_hours, motivo }
     ▼
 deploy_router.py
     ├─ Valida que el slice exista en MySQL
     ├─ Cambia status → PENDING_APPROVAL
-    └─ Encola en placement_queue (asyncio.Queue)
+    └─ Encola en placement_queue { slice_id, zone_id }
        Responde 202 inmediatamente
     ▼
 placement_worker.py (background)
     │
     ├─ 1. Lee VMs del slice desde MySQL (tabla vms)
-    ├─ 2. Consulta Prometheus → métricas de workers disponibles
+    ├─ 2. Construye Servers' State desde BD:
+    │       - Consulta workers de la zona (excluyendo headnode id=1)
+    │       - Calcula C_i = capacidad_nominal × F_OP
+    │       - Resta SUM(peso_actualizado) de VMs ACTIVE por worker
+    │       - Arma lista { worker_id, disponible }
     ├─ 3. POST http://vm-placement:8080/placement → mapa vm→worker
     │
     │  Si placement == SUCCESS:
@@ -136,6 +184,26 @@ deploy_router.py
 
 ---
 
+## Formato del payload al VM Placement
+
+```json
+{
+  "slice_id": "42",
+  "availability_zone": "1",
+  "vms": [
+    { "vm_id": "n214", "peso": 18.5 },
+    { "vm_id": "n215", "peso": 5.25 }
+  ],
+  "workers": [
+    { "worker_id": 2, "disponible": 36.92 },
+    { "worker_id": 3, "disponible": 36.92 },
+    { "worker_id": 4, "disponible": 36.92 }
+  ]
+}
+```
+
+---
+
 ## Formato del mensaje NATS `slice.deploy`
 
 ```json
@@ -151,12 +219,14 @@ deploy_router.py
       "vcpus": 1,
       "ram_mb": 512.0,
       "disk_gb": 10.0,
-      "image_path": "/images/cirros-0.5.1-x86_64-disk.img",
+      "image_path": "/mnt/cloud_images/cirros-0.5.1-x86_64-disk.img",
       "vnc_port": 5901,
       "vnc_display": 1,
       "internet_access": 1,
       "external_ip": "192.168.100.50",
       "internal_ip": "10.0.42.10",
+      "vm_user": "cirros",
+      "vm_password": "pucp2026",
       "tap_interfaces": [
         { "tap_name": "t-042-n214-m",    "mac": "52:54:00:A3:C7:00" },
         { "tap_name": "t-042-n214-n215", "mac": "52:54:00:A3:C7:01" }
@@ -182,14 +252,8 @@ deploy_router.py
 }
 ```
 
-> El TAP `t-042-n214-m` (sufijo `-m`) es la interfaz de gestión (eth0) que conecta
-> la VM al Gateway L3. Se genera siempre, independientemente de si la VM tiene enlaces.
-
-## Formato del mensaje NATS `slice.destroy`
-
-Mismo formato que `slice.deploy` pero usando los datos guardados en `deployed_vms`
-y `deployed_links` de `slice_json` en MySQL. Se envía la receta completa para que
-Compute y Network puedan limpiar sin depender de estado externo.
+> El TAP `t-042-n214-m` (sufijo `-m`) es la interfaz de gestión (eth0).
+> Se genera siempre, independientemente de si la VM tiene enlaces.
 
 ---
 
@@ -204,18 +268,9 @@ Compute y Network puedan limpiar sin depender de estado externo.
              (incluye el TAP de gestión, que siempre es el primero)
 ```
 
-Ejemplo para `slice_id=42`, 2 VMs con 1 enlace:
-
-| VM | Tipo de TAP | tap_name | MAC |
-|----|-------------|----------|-----|
-| n214 | gestión | t-042-n214-m | `52:54:00:A3:C7:00` |
-| n215 | gestión | t-042-n215-m | `52:54:00:A3:C7:01` |
-| n214 | enlace | t-042-n214-n215 | `52:54:00:A3:C7:02` |
-| n215 | enlace | t-042-n215-n214 | `52:54:00:A3:C7:03` |
+---
 
 ## Esquema de IPs internas (subred de gestión)
-
-La IP interna de cada VM se calcula a partir del `slice_id`:
 
 ```
 subred = 10. (slice_id // 256) % 256 . slice_id % 256 .0/24
@@ -235,26 +290,27 @@ Tablas principales utilizadas por este módulo:
 | Tabla | Descripción |
 |-------|-------------|
 | `slices` | Estado y metadatos del slice, incluye `slice_json` (JSON) con la topología y `deployed_vms`/`deployed_links` post-deploy |
-| `vms` | VMs con recursos, worker asignado, vnc_port, external_ip, internet_access |
+| `vms` | VMs con recursos, `peso`, `peso_actualizado`, worker asignado, vnc_port, external_ip, internet_access |
 | `vlans` | VLANs asignadas por slice (se limpian al destroy o rollback) |
 | `images` | Imágenes disponibles con `path` absoluto en el worker |
-| `workers` | Workers registrados con IP y zona de disponibilidad |
+| `workers` | Workers registrados con IP, zona de disponibilidad, `cpu`, `ram` y `disk_gb` |
 | `ip_pool` | Pool de IPs externas flotantes: `is_used`, `vm_id` (FK) |
-| `users`, `projects` | IAM — usados por routers (actualmente hardcodeado `creator_id = "user-123"`) |
+| `availability_zones` | Zonas de disponibilidad — el deploy filtra workers por `id` |
 
-El campo `slice_json` almacena dos secciones:
-- `nodes` / `edges`: topología del canvas (creada al guardar borrador)
-- `deployed_vms` / `deployed_links`: receta completa post-placement (creada al desplegar)
+### Campos de peso en la tabla `vms`
 
-### Gestión del pool de IPs externas
+| Campo | Descripción |
+|-------|-------------|
+| `peso` | Peso nominal calculado al crear el borrador. No cambia. |
+| `peso_actualizado` | Igual a `peso` al inicio. Actualizado por Observabilidad con consumo real. Usado para construir el Servers' State. |
 
-Al crear o actualizar un borrador con `external_ip` en una VM:
-- Se marca `ip_pool.is_used = 1` y `ip_pool.vm_id = <nueva_vm.id>`.
+### Campos de capacidad en la tabla `workers`
 
-Al actualizar un borrador, las IPs de las VMs anteriores se liberan antes de eliminarlas.
-
-Al destruir un slice (DRAFT), las IPs no se liberan explícitamente aquí — la eliminación
-en cascada de la VM limpia el FK en `ip_pool`.
+| Campo | Descripción |
+|-------|-------------|
+| `cpu` | Número de vCPUs del worker |
+| `ram` | RAM total en MB |
+| `disk_gb` | Disco total en GB — necesario para calcular la capacidad nominal en unidades de peso |
 
 ---
 
@@ -265,28 +321,27 @@ Las credenciales SSH se leen desde archivos `.pem` montados en el contenedor:
 ```
 slice-manager/
 └── keys/
-    ├── worker1.pem   → worker_id=1, IP 10.0.10.1
     ├── worker2.pem   → worker_id=2, IP 10.0.10.2
     ├── worker3.pem   → worker_id=3, IP 10.0.10.3
     └── worker4.pem   → worker_id=4, IP 10.0.10.4
 ```
 
+El worker con `id=1` es el headnode — corre los servicios de orquestación y **no recibe VMs**.
 El mapeo `worker_id → IP` está hardcodeado en `placement_worker.py` (variable `server_inventory`).
-Todos los workers usan el usuario SSH `ubuntu`.
 
----
+### Generar y registrar llaves SSH
 
-## Telemetría y fallback
+```bash
+# En server1: generar un par por cada worker
+ssh-keygen -t rsa -b 2048 -f ~/proyecto/SliceManager/keys/worker2.pem -N ""
+ssh-keygen -t rsa -b 2048 -f ~/proyecto/SliceManager/keys/worker3.pem -N ""
+ssh-keygen -t rsa -b 2048 -f ~/proyecto/SliceManager/keys/worker4.pem -N ""
 
-El módulo consulta Prometheus para obtener métricas reales de los workers antes de
-cada placement:
-
-- `node_memory_MemAvailable_bytes / 1024 / 1024` → RAM disponible en MB
-- `count by(instance)(node_cpu_seconds_total{mode="idle"})` → vCPUs disponibles
-- `node_filesystem_avail_bytes{mountpoint="/"} / 1024 / 1024 / 1024` → disco en GB
-
-Si Prometheus no responde (timeout 5s), usa métricas simuladas para no bloquear
-el pipeline: 10 vCPUs, 16 GB RAM, 500 GB disco por worker.
+# Registrar la llave pública en cada worker
+ssh-copy-id -i ~/proyecto/SliceManager/keys/worker2.pem.pub ubuntu@10.0.10.2
+ssh-copy-id -i ~/proyecto/SliceManager/keys/worker3.pem.pub ubuntu@10.0.10.3
+ssh-copy-id -i ~/proyecto/SliceManager/keys/worker4.pem.pub ubuntu@10.0.10.4
+```
 
 ---
 
@@ -294,13 +349,14 @@ el pipeline: 10 vCPUs, 16 GB RAM, 500 GB disco por worker.
 
 | Variable | Default | Descripción |
 |---|---|---|
-| `NATS_URL` | `nats://localhost:4222` | URL del servidor NATS (Queue Manager) |
+| `NATS_URL` | `nats://localhost:4222` | URL del servidor NATS |
 | `VM_PLACEMENT_URL` | `http://vm-placement:8080/placement` | URL del VM Placement |
-| `PROMETHEUS_URL` | `http://10.0.10.1:9090` | URL de Prometheus |
 | `DB_HOST` | `mysql-db` | Host de MySQL |
 | `DB_USER` | `root` | Usuario MySQL |
 | `DB_PASSWORD` | `root` | Contraseña MySQL |
 | `DB_NAME` | `cloud` | Base de datos MySQL |
+| `GC_INTERVAL_HOURS` | `6` | Intervalo del Garbage Collector en horas |
+| `IMAGES_DIR` | `/mnt/cloud_images` | Directorio NFS de imágenes |
 
 ---
 
@@ -309,11 +365,10 @@ el pipeline: 10 vCPUs, 16 GB RAM, 500 GB disco por worker.
 ```bash
 # 1. Colocar las llaves PEM en ./keys/
 mkdir -p keys
-cp /ruta/a/worker1.pem keys/worker1.pem
-# ... repetir para worker2, worker3, worker4
+# Generar o copiar worker2.pem, worker3.pem, worker4.pem
 
 # 2. Levantar
-docker compose up -d
+docker compose up -d --build
 
 # 3. Verificar
 curl http://localhost:8000/
@@ -323,5 +378,5 @@ curl http://localhost:8000/
 docker compose logs -f slice-manager
 ```
 
-> **Nota:** El Slice Manager se conecta a MySQL en `host.docker.internal` (la
-> máquina host). Asegurarse de que MySQL esté corriendo y accesible antes de levantar.
+> **Nota:** El Slice Manager se conecta a MySQL en `host.docker.internal`.
+> Asegurarse de que MySQL esté corriendo antes de levantar.

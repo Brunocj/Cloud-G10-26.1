@@ -65,6 +65,7 @@ class Worker(Base):
     ip = Column(String(45))
     ram = Column(Float(asdecimal=True))
     cpu = Column(Integer)
+    disk_gb = Column(Float, nullable=True)
     date_created = Column(String(45))
     availability_zones_id = Column(ForeignKey('availability_zones.id'), index=True)
 
@@ -143,6 +144,8 @@ class Vm(Base):
     image_id = Column(ForeignKey('images.id'), index=True)
     vnc_port = Column(Integer)
     worker_id = Column(ForeignKey('workers.id'), index=True)
+    peso = Column(Float, nullable=True)
+    peso_actualizado = Column(Float, nullable=True)
 
     image = relationship('Image')
     slice = relationship('Slice')
