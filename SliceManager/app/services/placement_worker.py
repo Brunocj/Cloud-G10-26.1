@@ -14,6 +14,12 @@ from app.nats_producer import nats_producer
 logger = logging.getLogger("SliceManager.Worker")
 VM_PLACEMENT_URL = os.getenv("VM_PLACEMENT_URL", "http://vm-placement:8080/placement")
 
+# Factores de overcommit de arranque por dimensión (usados si Observabilidad
+# aún no ha calculado OC_r[j] para el worker)
+OC_CPU_DEFAULT   = 2.0
+OC_RAM_DEFAULT   = 1.54   # 1/0.65
+OC_DISCO_DEFAULT = 1.0    # sin overcommit
+
 # Cola global
 placement_queue = asyncio.Queue()
 
@@ -35,7 +41,7 @@ async def process_placement_worker():
                 placement_queue.task_done()
                 continue
 
-            # 1. EXTRACCIÓN DESDE LA BASE DE DATOS RELACIONAL
+            # ── 1. EXTRACCIÓN DE VMs DESDE BD ─────────────────────────────────
             vms_de_bd = db.query(Vm).filter(Vm.slice_id == slice_id).all()
 
             if not vms_de_bd:
@@ -44,12 +50,17 @@ async def process_placement_worker():
                 placement_queue.task_done()
                 continue
 
-            # 2. CONSTRUCCIÓN DEL SERVERS' STATE DESDE BD (con overprovisioning)
-            F_OP = 1.0 / 0.65  # Factor de overprovisioning inicial (~1.54)
+            # ── 2. CONSTRUCCIÓN DEL SERVERS' STATE MULTIDIMENSIONAL ───────────
+            # Para cada worker de la zona:
+            #   C_efectivo_r[j] = C_nominal_r[j] × OC_r[j]
+            #   disponible_r[j] = C_efectivo_r[j] − Σ recurso_r(VMs ACTIVE en j)
+            #
+            # OC_r[j] se lee desde la BD (calculado por Observabilidad).
+            # Si aún no existe, se usa el valor referencial de arranque.
 
             workers_zona = db.query(Worker).filter(
                 Worker.availability_zones_id == zone_id,
-                Worker.id != 1
+                Worker.id != 1  # excluir headnode
             ).all()
 
             if not workers_zona:
@@ -59,48 +70,89 @@ async def process_placement_worker():
                 placement_queue.task_done()
                 continue
 
-            pesos_activos = dict(
-                db.query(Vm.worker_id, func.sum(Vm.peso_actualizado))
+            # Consumo agregado de VMs ACTIVE por worker y por dimensión
+            consumo_cpu = dict(
+                db.query(Vm.worker_id, func.sum(Vm.vcore))
                 .filter(Vm.state == "ACTIVE", Vm.worker_id.isnot(None))
-                .group_by(Vm.worker_id)
-                .all()
+                .group_by(Vm.worker_id).all()
+            )
+            consumo_ram = dict(
+                db.query(Vm.worker_id, func.sum(Vm.ram))
+                .filter(Vm.state == "ACTIVE", Vm.worker_id.isnot(None))
+                .group_by(Vm.worker_id).all()
+            )
+            consumo_disco = dict(
+                db.query(Vm.worker_id, func.sum(Vm.disk))
+                .filter(Vm.state == "ACTIVE", Vm.worker_id.isnot(None))
+                .group_by(Vm.worker_id).all()
             )
 
             servers_state = []
             for w in workers_zona:
-                ram_gb           = float(w.ram) / 1024.0 if w.ram else 0.0
-                disk_gb          = float(w.disk_gb) if w.disk_gb else 0.0
-                capacidad_nominal = 3 * int(w.cpu or 0) + 5 * ram_gb + 1 * disk_gb
-                C_i              = capacidad_nominal * F_OP
-                sum_pesos        = float(pesos_activos.get(w.id, 0.0) or 0.0)
-                D_i              = round(C_i - sum_pesos, 4)
-                servers_state.append({"worker_id": w.id, "available_weight": D_i})
+                # Capacidades nominales del worker
+                cpu_nominal   = float(w.cpu or 0)
+                ram_nominal   = float(w.ram or 0) / 1024.0   # MB → GB
+                disco_nominal = float(w.disk_gb or 0)
+
+                # Factores OC_r[j] desde BD (columnas calculadas por Observabilidad)
+                # Si la columna no existe aún (bootstrap), se usa el valor por defecto
+                oc_cpu   = float(getattr(w, 'oc_cpu',   None) or OC_CPU_DEFAULT)
+                oc_ram   = float(getattr(w, 'oc_ram',   None) or OC_RAM_DEFAULT)
+                oc_disco = float(getattr(w, 'oc_disco', None) or OC_DISCO_DEFAULT)
+
+                # Capacidades efectivas
+                c_ef_cpu   = cpu_nominal   * oc_cpu
+                c_ef_ram   = ram_nominal   * oc_ram
+                c_ef_disco = disco_nominal * oc_disco
+
+                # Consumo ya comprometido por VMs activas
+                usado_cpu   = float(consumo_cpu.get(w.id,   0) or 0)
+                usado_ram   = float(consumo_ram.get(w.id,   0) or 0) / 1024.0  # MB → GB
+                usado_disco = float(consumo_disco.get(w.id, 0) or 0)
+
+                disp_cpu   = round(c_ef_cpu   - usado_cpu,   4)
+                disp_ram   = round(c_ef_ram   - usado_ram,   4)
+                disp_disco = round(c_ef_disco - usado_disco, 4)
+
+                servers_state.append({
+                    "worker_id":        w.id,
+                    "disponible_cpu":   disp_cpu,
+                    "disponible_ram":   disp_ram,
+                    "disponible_disco": disp_disco,
+                })
                 logger.info(
-                    "[SERVERS_STATE] Worker-%d | cap_nominal=%.2f | C_i=%.2f | pesos_activos=%.2f | D_i=%.2f",
-                    w.id, capacidad_nominal, C_i, sum_pesos, D_i
+                    "[SERVERS_STATE] Worker-%d | "
+                    "cpu: nom=%.1f oc=%.2f ef=%.1f usado=%.1f disp=%.1f | "
+                    "ram(GB): nom=%.1f oc=%.2f ef=%.1f usado=%.1f disp=%.1f | "
+                    "disco(GB): nom=%.1f oc=%.2f ef=%.1f usado=%.1f disp=%.1f",
+                    w.id,
+                    cpu_nominal,   oc_cpu,   c_ef_cpu,   usado_cpu,   disp_cpu,
+                    ram_nominal,   oc_ram,   c_ef_ram,   usado_ram,   disp_ram,
+                    disco_nominal, oc_disco, c_ef_disco, usado_disco, disp_disco,
                 )
 
-            # Formateamos VMs con peso para el VM Placement
+            # Formateamos VMs con recursos crudos para el VM Placement
             dynamic_vms = []
             for vm in vms_de_bd:
                 dynamic_vms.append({
-                    "vm_id": vm.name,
-                    "peso": float(vm.peso_actualizado or vm.peso or 0.0)
+                    "vm_id":    vm.name,
+                    "vcpus":    float(vm.vcore  or 1),
+                    "ram_gb":   float(vm.ram    or 512) / 1024.0,  # MB → GB
+                    "disco_gb": float(vm.disk   or 5),
                 })
 
             payload = {
-                "slice_id": str(slice_id),
+                "slice_id":          str(slice_id),
                 "availability_zone": str(zone_id),
-                "vms": dynamic_vms,
-                "workers": [
-                    {"worker_id": w["worker_id"], "disponible": w["available_weight"]}
-                    for w in servers_state
-                ]
+                "vms":     dynamic_vms,
+                "workers": servers_state,
             }
 
-            logger.info("[PLACEMENT] 👉 VM Placement invocado para %d VM(s) en zona_id=%s", len(dynamic_vms), zone_id)
+            logger.info("[PLACEMENT] 👉 VM Placement invocado para %d VM(s) en zona_id=%s",
+                        len(dynamic_vms), zone_id)
             for dv in dynamic_vms:
-                logger.info("[PLACEMENT]    VM: %-20s peso: %.4f", dv['vm_id'], dv['peso'])
+                logger.info("[PLACEMENT]    VM: %-20s vcpus=%.1f ram_gb=%.2f disco_gb=%.1f",
+                            dv['vm_id'], dv['vcpus'], dv['ram_gb'], dv['disco_gb'])
 
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.post(VM_PLACEMENT_URL, json=payload)
@@ -115,9 +167,10 @@ async def process_placement_worker():
                         placement_status, len(placement_map))
             if placement_status == 'SUCCESS':
                 for asig in placement_map:
-                    logger.info("[PLACEMENT]    %s → Worker-%s", asig.get('vm_id'), asig.get('worker_id'))
+                    logger.info("[PLACEMENT]    %s → Worker-%s",
+                                asig.get('vm_id'), asig.get('worker_id'))
 
-            # 3. ENRIQUECIMIENTO DEL CONTRATO SI EL PLACEMENT FUE EXITOSO
+            # ── 3. ENRIQUECIMIENTO DEL CONTRATO SI EL PLACEMENT FUE EXITOSO ──
             if placement_result.get("status") == "SUCCESS":
                 placement_map = placement_result.get("placement_map", [])
 
@@ -139,9 +192,9 @@ async def process_placement_worker():
                     slice_json = json.loads(slice_json)
                 edges = slice_json.get("edges", []) if slice_json else []
 
-                vms_dict       = {vm.name: vm for vm in vms_de_bd}
+                vms_dict          = {vm.name: vm for vm in vms_de_bd}
                 vlans_ocupadas_db = db.query(Vlan.id).all()
-                vlans_ocupadas = [v[0] for v in vlans_ocupadas_db]
+                vlans_ocupadas    = [v[0] for v in vlans_ocupadas_db]
 
                 def obtener_vlan_libre():
                     while True:
@@ -150,18 +203,20 @@ async def process_placement_worker():
                             vlans_ocupadas.append(vid)
                             return vid
 
-                slice_hash       = hashlib.sha256(str(slice_id).encode()).hexdigest()
-                mac_prefix       = f"52:54:00:{slice_hash[:2]}:{slice_hash[2:4]}"
+                slice_hash         = hashlib.sha256(str(slice_id).encode()).hexdigest()
+                mac_prefix         = f"52:54:00:{slice_hash[:2]}:{slice_hash[2:4]}"
                 global_mac_counter = 0
-                network_links    = []
-                vms_payload_data = {vm.name: {"tap_interfaces": []} for vm in vms_de_bd}
+                network_links      = []
+                vms_payload_data   = {vm.name: {"tap_interfaces": []} for vm in vms_de_bd}
 
                 # TAP de gestión para cada VM
                 for vm in vms_de_bd:
                     tap_mgmt = f"t-{str(slice_id)[-3:]}-{vm.name[:4]}-m"
                     mac_mgmt = f"{mac_prefix}:{global_mac_counter:02x}".upper()
                     global_mac_counter += 1
-                    vms_payload_data[vm.name]["tap_interfaces"].append({"tap_name": tap_mgmt, "mac": mac_mgmt})
+                    vms_payload_data[vm.name]["tap_interfaces"].append(
+                        {"tap_name": tap_mgmt, "mac": mac_mgmt}
+                    )
 
                 # Generamos los enlaces
                 for edge in edges:
@@ -210,19 +265,17 @@ async def process_placement_worker():
                     )
 
                 logger.info("[PLACEMENT] ✅ %d enlace(s) procesados: MACs y VLANs asignados", len(edges))
-                logger.info("[PLACEMENT] 🔧 Construyendo vnc_por_worker...")  # AÑADIR
-                vnc_por_worker = {}
 
+                vnc_por_worker = {}
                 for w_id in server_inventory.keys():
                     vnc_ocupados_bd = db.query(Vm.vnc_port).filter(
                         Vm.worker_id == w_id,
                         Vm.vnc_port.isnot(None)
                     ).all()
                     vnc_por_worker[w_id] = set(v[0] for v in vnc_ocupados_bd)
-                logger.info("[PLACEMENT] 🔧 vnc_por_worker construido: %s", list(vnc_por_worker.keys()))  # AÑADIR
-                
-                octeto_2     = (int(slice_id) // 256) % 256
-                octeto_3     = int(slice_id) % 256
+
+                octeto_2        = (int(slice_id) // 256) % 256
+                octeto_3        = int(slice_id) % 256
                 ip_host_counter = 10
 
                 vms_payload = []
@@ -231,7 +284,7 @@ async def process_placement_worker():
                     worker_id   = next(w["worker_id"] for w in placement_map if w["vm_id"] == vm.name)
                     server_info = server_inventory.get(worker_id, {})
                     vm.worker_id = worker_id
-                    logger.info("aaaa")
+
                     if not vm.vnc_port:
                         while True:
                             candidato = random.randint(5901, 5999)
@@ -241,7 +294,7 @@ async def process_placement_worker():
                                 logger.info("[PLACEMENT]    VNC asignado: VM %-20s → Worker-%d puerto %d",
                                             vm.name, worker_id, candidato)
                                 break
-                    logger.info("aaaaasdadsadad")
+
                     image_obj = db.query(Image).filter(Image.id == vm.image_id).first()
                     img_path  = image_obj.path if image_obj and image_obj.path else ""
 
@@ -272,15 +325,11 @@ async def process_placement_worker():
                         "vm_password":     vm_password,
                     })
 
-                # 4. PUBLICACIÓN EN NATS
+                # ── 4. PUBLICACIÓN EN NATS ─────────────────────────────────────
                 logger.info("="*70)
                 logger.info("[PLACEMENT] 📤 Publicando en NATS → QueueManager")
                 logger.info("[PLACEMENT]    slice_id=%s  VMs=%d  links=%d",
                             slice_id, len(vms_payload), len(network_links))
-                for vp in vms_payload:
-                    logger.info("[PLACEMENT]    VM: %-20s worker_ip=%-12s vnc_port=%s  taps=%d",
-                                vp['vm_id'], vp['worker_ip'], vp['vnc_port'],
-                                len(vp.get('tap_interfaces', [])))
 
                 queue_manager_payload = {
                     "slice_id":   str(slice_id),
@@ -299,8 +348,8 @@ async def process_placement_worker():
                 slice_json["deployed_links"] = network_links
                 db_slice.slice_json = dict(slice_json)
 
-                logger.info(f"[PLACEMENT {slice_id}] Guardando deployed_vms ({len(vms_payload)}) y deployed_links ({len(network_links)})")
-
+                logger.info("[PLACEMENT %s] Guardando deployed_vms (%d) y deployed_links (%d)",
+                            slice_id, len(vms_payload), len(network_links))
                 db.commit()
                 logger.info("[PLACEMENT] 💾 deployed_vms/links persistidos en BD")
 
@@ -314,6 +363,7 @@ async def process_placement_worker():
                 db.commit()
                 logger.info("[PLACEMENT] 🏁 Flujo de placement completado para slice=%s", slice_id)
                 logger.info("="*70)
+
             else:
                 db_slice.status = "FAILED"
                 db.commit()
