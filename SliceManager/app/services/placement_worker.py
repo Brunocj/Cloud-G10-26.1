@@ -181,10 +181,10 @@ async def process_placement_worker():
                         return key_file.read()
 
                 server_inventory = {
-                    1: {"ip": "10.0.10.1", "user": "ubuntu", "key_path": "keys/worker1.pem"},
-                    2: {"ip": "10.0.10.2", "user": "ubuntu", "key_path": "keys/worker2.pem"},
-                    3: {"ip": "10.0.10.3", "user": "ubuntu", "key_path": "keys/worker3.pem"},
-                    4: {"ip": "10.0.10.4", "user": "ubuntu", "key_path": "keys/worker4.pem"}
+                    1: {"ip": "192.168.201.1", "user": "ubuntu", "key_path": "keys/id_ed25519"},
+                    2: {"ip": "192.168.201.2", "user": "ubuntu", "key_path": "keys/id_ed25519"},
+                    3: {"ip": "192.168.201.3", "user": "ubuntu", "key_path": "keys/id_ed25519"},
+                    4: {"ip": "192.168.201.4", "user": "ubuntu", "key_path": "keys/id_ed25519"},
                 }
 
                 slice_json = db_slice.slice_json

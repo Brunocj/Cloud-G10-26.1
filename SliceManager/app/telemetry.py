@@ -6,15 +6,16 @@ import os
 logger = logging.getLogger("SliceManager.Telemetry")
 
 # Leemos la URL de Prometheus de las variables de entorno
-PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://10.0.10.1:9090")
+PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://192.168.202.1:9090")
 
 # Inventario de compute nodes (workers de cómputo).
 # ⚠️  Worker 1 (server1) es el HEADNODE: corre los servicios de orquestación
 #     (SliceManager, QueueManager, etc.) y NO recibe VMs de usuario.
 WORKERS_CONFIG = [
-    {"worker_id": 2, "instance": "10.0.10.2:9100"},
-    {"worker_id": 3, "instance": "10.0.10.3:9100"},
-    {"worker_id": 4, "instance": "10.0.10.4:9100"}
+    {"worker_id": 1, "instance": "192.168.201.1:9100"},
+    {"worker_id": 2, "instance": "192.168.201.2:9100"},
+    {"worker_id": 3, "instance": "192.168.201.3:9100"},
+    {"worker_id": 4, "instance": "192.168.201.4:9100"}
 ]
 
 async def get_real_worker_metrics():

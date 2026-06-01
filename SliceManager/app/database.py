@@ -4,8 +4,8 @@ import os
 
 # Leemos las variables de entorno que inyecta docker-compose
 # Si por algún motivo lo corres por fuera, usará los valores por defecto
-DB_USER = os.getenv("DB_USER", "root")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "root")
+DB_USER = os.getenv("DB_USER", "mandarina")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "sandia")
 DB_HOST = os.getenv("DB_HOST", "mysql-db") # <-- ¡El nombre del contenedor MySQL!
 DB_NAME = os.getenv("DB_NAME", "cloud")
 
