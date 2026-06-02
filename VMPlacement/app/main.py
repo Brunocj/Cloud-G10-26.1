@@ -1,6 +1,7 @@
 """
 VM Placement — PUCP Cloud Orchestrator
-Microservicio HTTP que implementa LLF-D para asignación de VMs a workers.
+Microservicio HTTP que implementa CP-SAT (Google OR-Tools) para asignación
+óptima de VMs a workers físicos con overcommit estadístico por dimensión.
 
 El Slice Manager es el único consumidor de este servicio.
 Comunicación: HTTP síncrona POST /placement → JSON response.
@@ -16,7 +17,7 @@ from fastapi.responses import JSONResponse
 from app.models import PlacementRequest, PlacementResponse
 from app.placement_engine import run_placement
 
-# ── Logging ──────────────────────────────────────────────────────────────────
+# ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
@@ -34,8 +35,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="VM Placement",
-    description="Asignación óptima de VMs a workers usando LLF-D.",
-    version="2.0.0",
+    description=(
+        "Asignación óptima de VMs a workers usando CP-SAT (Google OR-Tools). "
+        "Implementa un knapsack determinístico multidimensional con capacidades "
+        "efectivas ajustadas estadísticamente (chance-constraint approximation)."
+    ),
+    version="3.0.0",
     lifespan=lifespan,
 )
 
@@ -50,44 +55,44 @@ def health():
 @app.post("/placement", response_model=PlacementResponse)
 async def placement(request: PlacementRequest):
     """
-    Recibe las VMs a desplegar (con peso pre-calculado) y el Servers' State
-    (workers con capacidad disponible en unidades de peso), y devuelve el
-    mapa vm_id → worker_id usando LLF-D.
+    Recibe las VMs a desplegar (vcpus, ram_gb, disco_gb) y el Servers' State
+    (capacidad efectiva disponible por worker y dimensión, ya con OC_r[j] aplicado
+    por el Slice Manager), y devuelve el mapa vm_id → worker_id usando CP-SAT.
 
-    Timeout dinámico: n × 1 segundo, donde n = número de VMs del slice.
-    Si el proceso no concluye en ese tiempo, retorna FAILED con reason TIMEOUT.
+    Timeout dinámico: n segundos, donde n = número de VMs del slice.
+    El límite se pasa directamente al solver vía max_time_in_seconds.
+    Si el solver no encuentra solución factible en ese tiempo, retorna FAILED.
     """
     n = len(request.vms)
-    timeout_seconds = max(n * 1.0, 1.0)  # mínimo 1 segundo
+    timeout_seconds = max(float(n), 1.0)  # mínimo 1 segundo
 
     logger.info(
         f"[{request.slice_id}] Placement request — zone='{request.availability_zone}' "
         f"vms={n} workers={len(request.workers)} timeout={timeout_seconds}s"
     )
 
-    # Ejecutar placement con timeout dinámico
     try:
-        success, placement_map, reason, detail = await asyncio.wait_for(
-            asyncio.get_event_loop().run_in_executor(
-                None,
-                run_placement,
-                request.vms,
-                request.workers,
-            ),
-            timeout=timeout_seconds,
+        success, placement_map, reason, detail = await asyncio.get_event_loop().run_in_executor(
+            None,
+            run_placement,
+            request.vms,
+            request.workers,
+            timeout_seconds,
         )
-    except asyncio.TimeoutError:
-        logger.warning(f"[{request.slice_id}] Placement TIMEOUT after {timeout_seconds}s")
+    except Exception as exc:
+        logger.error(f"[{request.slice_id}] Unexpected error in placement engine: {exc}", exc_info=True)
         return PlacementResponse(
             slice_id=request.slice_id,
             status="FAILED",
             placement_map=None,
-            reason="TIMEOUT",
-            detail=f"El placement no concluyó en el tiempo máximo permitido ({timeout_seconds}s).",
+            reason="INTERNAL_ERROR",
+            detail="Error inesperado en el motor de placement.",
         )
 
     if success:
-        logger.info(f"[{request.slice_id}] Placement SUCCESS — {len(placement_map)} VMs asignadas.")
+        logger.info(
+            f"[{request.slice_id}] Placement SUCCESS — {len(placement_map)} VMs asignadas."
+        )
         return PlacementResponse(
             slice_id=request.slice_id,
             status="SUCCESS",
@@ -96,7 +101,9 @@ async def placement(request: PlacementRequest):
             detail=None,
         )
     else:
-        logger.warning(f"[{request.slice_id}] Placement FAILED — reason={reason} detail={detail}")
+        logger.warning(
+            f"[{request.slice_id}] Placement FAILED — reason={reason} detail={detail}"
+        )
         return PlacementResponse(
             slice_id=request.slice_id,
             status="FAILED",

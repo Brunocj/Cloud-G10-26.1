@@ -1,9 +1,10 @@
 # VM Placement — PUCP Cloud Orchestrator
 
 Microservicio HTTP de asignación óptima de VMs a workers físicos.
-Recibe las VMs a desplegar (con su peso pre-calculado) y el Servers' State
-(capacidad disponible por worker en la zona de disponibilidad), y devuelve
-el mapa `vm_id → worker_id` usando el algoritmo LLF-D.
+Recibe las VMs a desplegar (vcpus, ram_gb, disco_gb) y el Servers' State
+(capacidad efectiva disponible por worker y dimensión, con overcommit estadístico
+ya aplicado por el Slice Manager), y devuelve el mapa `vm_id → worker_id`
+usando el solver **CP-SAT de Google OR-Tools**.
 
 ---
 
@@ -14,7 +15,8 @@ Slice Manager
     │
     ├─(HTTP POST /placement)──► VM Placement   ← ESTE SERVICIO
     │                                │
-    │                         LLF-D + Max Heap
+    │                         CP-SAT (OR-Tools)
+    │                         knapsack 3D + makespan
     │                                │
     ◄────────(JSON response)─────────┘
     │
@@ -22,81 +24,93 @@ Slice Manager
 ```
 
 La comunicación es **HTTP síncrona request/reply**. El Slice Manager construye
-el Servers' State directamente desde la BD (workers de la zona + pesos de VMs
-activas con overprovisioning), lo empaqueta junto a las VMs del slice y hace un POST.
-Este servicio responde con el mapa completo antes de que el Slice Manager continúe.
+el Servers' State desde la BD (workers de la zona, capacidades nominales × OC_r[j]
+calculados por Observabilidad, menos recursos de VMs activas), lo empaqueta junto
+a las VMs del slice y hace un POST. Este servicio responde con el mapa completo
+antes de que el Slice Manager continúe.
 
 ---
 
-## Algoritmo: LLF-D
+## Algoritmo: CP-SAT multidimensional
 
-**Least Loaded First con ordenamiento Decreciente.**
+El problema se modela como un **knapsack determinístico multidimensional**:
+los recursos solicitados de cada VM son enteros fijos (hard limit) y la capacidad
+efectiva de cada worker por dimensión incorpora el overcommit estadístico calculado
+por Observabilidad (`C_efectivo_r[j] = C_nominal_r[j] × OC_r[j]`).
 
-### Función objetivo
+### Formulación
 
+**Variables de decisión:**
 ```
-min( max( carga_i / C_i ) )   ∀ i ∈ workers de la zona
-```
-
-Minimiza la utilización máxima entre los workers de la zona, lo que equivale
-a maximizar el balance de carga. `carga_i = C_i - D_i`, donde `D_i` es la
-capacidad disponible del worker i en unidades de peso.
-
-### Criterio de selección por iteración
-
-```
-worker* = argmax_i( D_i )
+x[i][j] ∈ {0, 1}   →   1 si VM i se asigna al worker j
 ```
 
-En cada paso se elige el worker con mayor capacidad disponible. Implementado
-con un **Max Heap** para acceso O(1) y actualización O(log m).
-
-### Pasos
-
-1. Ordenar VMs del slice de mayor a menor peso — **O(n log n)**
-2. Para cada VM (en ese orden):
-   - Tomar el worker con mayor `D_i` del heap — **O(1)**
-   - Si `D_i < peso_vm` → retornar `FAILED` (sin recursos suficientes)
-   - Asignar VM al worker y descontar peso del heap — **O(log m)**
-3. Retornar mapa completo.
-
-### Complejidad total
-
+**Restricción de asignación única:**
 ```
-O(n log n + n log m)
+Σ_j x[i][j] = 1   ∀ i
 ```
 
-donde `n` = VMs del slice y `m` = workers disponibles en la zona.
+**Restricciones de capacidad (tres independientes):**
+```
+Σ_i vcpus(i)    · x[i][j] ≤ disponible_cpu[j]    ∀ j
+Σ_i ram_gb(i)   · x[i][j] ≤ disponible_ram[j]    ∀ j
+Σ_i disco_gb(i) · x[i][j] ≤ disponible_disco[j]  ∀ j
+```
+
+**Función objetivo — makespan ponderado:**
+```
+min( max_j( Σ_r α_r · Σ_i recurso_r(i) · x[i][j] / C_efectivo_r[j] ) )
+```
+
+Coeficientes de importancia relativa por dimensión:
+
+| Dimensión | Coeficiente |
+|-----------|-------------|
+| RAM       | β = 5       |
+| vCPU      | α = 3       |
+| Disco     | γ = 1       |
+
+Dado que `OC_r[j]` varía por worker, el makespan refleja la heterogeneidad real
+del clúster: workers con VMs de alto consumo tienen menor `C_efectivo_r[j]` y
+por tanto mayor presión en el objetivo.
 
 ### Timeout dinámico
 
 ```
-timeout = n × 1 segundo
+timeout = n segundos   (mínimo 1s)
 ```
 
-El tiempo máximo de ejecución escala con el tamaño del slice.
+donde `n` = número de VMs del slice. El límite se pasa **directamente al solver**
+vía `parameters.max_time_in_seconds`. Si el solver no encuentra solución factible
+en ese tiempo, retorna `FAILED` con reason `TIMEOUT`.
+
+### Escala interna
+
+CP-SAT opera sobre enteros. Los floats se escalan por `SCALE = 1000` antes de
+construir el modelo y se revierten al interpretar el resultado.
 
 ---
 
-## Modelo de pesos
+## Overcommit estadístico (responsabilidad del Slice Manager)
 
-El peso de cada VM es calculado por el **Slice Manager al persistir la VM en BD**
-usando la fórmula:
-
-```
-w = 3·vcpus + 5·ram_gb + 1·disco_gb
-```
-
-Con coeficientes derivados del cuello de botella del clúster (RAM es el recurso más escaso):
+Este servicio **recibe las capacidades ya ajustadas** — no aplica OC_r.
+El Slice Manager calcula `disponible_r[j]` antes de llamar a este endpoint:
 
 ```
-β (RAM) : α (vCPU) : γ (disco) = 5 : 3 : 1
+disponible_r[j] = C_nominal_r[j] × OC_r[j]  −  Σ_activas recurso_r(vm)
 ```
 
-Este servicio **recibe el peso ya calculado** — no lo recomputa.
+donde `OC_r[j]` es calculado periódicamente por Observabilidad:
 
-El Slice Manager envía `peso_actualizado` de cada VM (que el módulo de Observabilidad
-irá corrigiendo con consumo real). Al arrancar el sistema, `peso_actualizado == peso`.
+```
+OC_r[j] = C_nominal_r[j] / ( μ_consumo_r[j] + z_r · σ_r[j] )
+```
+
+Con factores de seguridad diferenciados:
+- `z_cpu = 2`  → cobertura ~95.4 % (overcommit agresivo, throttling recuperable)
+- `z_ram = 5`  → cobertura ~99.9999 % (overcommit cuidadoso, OOM-killer irreversible)
+- `OC_disco = 1` → sin overcommit (asignación persistente)
+- Techo duro: `OC_ram[j] ≤ 1.6`
 
 ---
 
@@ -110,20 +124,19 @@ irá corrigiendo con consumo real). Al arrancar el sistema, `peso_actualizado ==
   "slice_id": "42",
   "availability_zone": "1",
   "vms": [
-    { "vm_id": "n214", "peso": 24.0 },
-    { "vm_id": "n215", "peso": 18.0 }
+    { "vm_id": "n214", "vcpus": 2.0, "ram_gb": 4.0, "disco_gb": 20.0 },
+    { "vm_id": "n215", "vcpus": 1.0, "ram_gb": 2.0, "disco_gb": 10.0 }
   ],
   "workers": [
-    { "worker_id": 2, "disponible": 36.92 },
-    { "worker_id": 3, "disponible": 36.92 },
-    { "worker_id": 4, "disponible": 36.92 }
+    { "worker_id": 2, "disponible_cpu": 12.5, "disponible_ram": 28.3, "disponible_disco": 180.0 },
+    { "worker_id": 3, "disponible_cpu": 10.0, "disponible_ram": 24.0, "disponible_disco": 200.0 },
+    { "worker_id": 4, "disponible_cpu": 14.0, "disponible_ram": 30.0, "disponible_disco": 150.0 }
   ]
 }
 ```
 
-> `availability_zone` es el ID de la zona (string) — no el nombre.  
-> `disponible` es la capacidad restante del worker en unidades de peso,
-> calculada por el Slice Manager como `C_i − Σ peso_actualizado(VMs ACTIVE)`.  
+> `disponible_r[j]` es la capacidad efectiva restante por dimensión, calculada
+> por el Slice Manager como `C_efectivo_r[j] − Σ recurso_r(VMs ACTIVE)`.
 > Workers con `id=1` (headnode) nunca aparecen — el Slice Manager los excluye.
 
 **Response — éxito (HTTP 200):**
@@ -132,7 +145,7 @@ irá corrigiendo con consumo real). Al arrancar el sistema, `peso_actualizado ==
   "slice_id": "42",
   "status": "SUCCESS",
   "placement_map": [
-    { "vm_id": "n214", "worker_id": 3 },
+    { "vm_id": "n214", "worker_id": 4 },
     { "vm_id": "n215", "worker_id": 2 }
   ],
   "reason": null,
@@ -147,18 +160,20 @@ irá corrigiendo con consumo real). Al arrancar el sistema, `peso_actualizado ==
   "status": "FAILED",
   "placement_map": null,
   "reason": "INSUFFICIENT_RESOURCES",
-  "detail": "No hay worker con capacidad suficiente para VM 'n214' (peso=999.0, máx disponible=36.92)."
+  "detail": "No existe asignación factible: la zona no dispone de capacidad suficiente para todas las VMs del slice."
 }
 ```
 
 | `reason` | Cuándo ocurre |
 |---|---|
 | `NO_WORKERS_AVAILABLE` | Lista de workers vacía |
-| `INSUFFICIENT_RESOURCES` | Ningún worker tiene capacidad para alguna VM del slice |
-| `TIMEOUT` | El placement no concluyó en `n × 1s` |
+| `INSUFFICIENT_RESOURCES` | No existe asignación factible (solver INFEASIBLE) |
+| `TIMEOUT` | El solver no encontró solución factible en `n × 1s` |
+| `INTERNAL_ERROR` | Error inesperado en el motor de placement |
 
 > El slice es atómico: si una VM no puede asignarse, se retorna `FAILED` para
-> todo el slice. El Slice Manager activa rollback (patrón Saga).
+> todo el slice. El Slice Manager retorna error al usuario (no hay rollback porque
+> el placement es el primer paso de la secuencia de despliegue).
 
 ---
 
@@ -184,9 +199,9 @@ Con el servicio corriendo: `http://localhost:8080/docs`
 vm-placement/
 ├── app/
 │   ├── __init__.py
-│   ├── main.py              # FastAPI app: endpoints, timeout dinámico, logging
+│   ├── main.py              # FastAPI app: endpoints, timeout, logging
 │   ├── models.py            # Pydantic: PlacementRequest, PlacementResponse, VMSpec, WorkerState
-│   └── placement_engine.py  # LLF-D con Max Heap
+│   └── placement_engine.py  # CP-SAT: knapsack 3D + makespan ponderado
 ├── docker-compose.yml
 ├── Dockerfile
 ├── README.md
@@ -198,15 +213,19 @@ vm-placement/
 ```python
 class VMSpec(BaseModel):
     vm_id: str
-    peso: float          # Pre-calculado por el Slice Manager al persistir la VM en BD
+    vcpus: float      # vCPUs solicitadas
+    ram_gb: float     # RAM solicitada en GB
+    disco_gb: float   # Disco solicitado en GB
 
 class WorkerState(BaseModel):
     worker_id: int
-    disponible: float    # C_i - Σ peso_actualizado(VMs ACTIVE) — calculado por el Slice Manager
+    disponible_cpu: float    # C_efectivo_cpu[j] - Σ vcpus(VMs ACTIVE)
+    disponible_ram: float    # C_efectivo_ram[j] - Σ ram_gb(VMs ACTIVE)
+    disponible_disco: float  # C_efectivo_disco[j] - Σ disco_gb(VMs ACTIVE)
 
 class PlacementRequest(BaseModel):
     slice_id: str
-    availability_zone: str   # ID de la zona como string
+    availability_zone: str
     vms: List[VMSpec]
     workers: List[WorkerState]
 ```
@@ -216,12 +235,17 @@ class PlacementRequest(BaseModel):
 ```
 POST /placement
   └─► main.py (endpoint /placement)
-        └─► calcula timeout = n × 1s
-        └─► asyncio.wait_for(run_in_executor(run_placement), timeout)
-              └─► placement_engine.run_placement(vms, workers)
-                    └─► sort VMs por peso desc       O(n log n)
-                    └─► heapify workers              O(m)
-                    └─► loop VMs → heapreplace       O(n log m)
+        └─► calcula timeout = max(n, 1) segundos
+        └─► run_in_executor(run_placement, vms, workers, timeout)
+              └─► placement_engine.run_placement(...)
+                    └─► validaciones previas (workers vacíos, recursos excedidos)
+                    └─► construye modelo CP-SAT
+                          └─► variables x[i][j]
+                          └─► restricción asignación única
+                          └─► 3 restricciones de capacidad (cpu, ram, disco)
+                          └─► makespan ponderado (α=3, β=5, γ=1)
+                    └─► solver.Solve(model) con time_limit = timeout
+                    └─► interpreta OPTIMAL / FEASIBLE / INFEASIBLE / UNKNOWN
                     └─► retorna (success, map, reason, detail)
         └─► PlacementResponse serializada como JSON
 ```
@@ -256,13 +280,13 @@ curl -X POST http://localhost:8080/placement \
     "slice_id": "42",
     "availability_zone": "1",
     "vms": [
-      { "vm_id": "n214", "peso": 18.5 },
-      { "vm_id": "n215", "peso": 5.25 }
+      { "vm_id": "n214", "vcpus": 2.0, "ram_gb": 4.0, "disco_gb": 20.0 },
+      { "vm_id": "n215", "vcpus": 1.0, "ram_gb": 2.0, "disco_gb": 10.0 }
     ],
     "workers": [
-      { "worker_id": 2, "disponible": 36.92 },
-      { "worker_id": 3, "disponible": 36.92 },
-      { "worker_id": 4, "disponible": 36.92 }
+      { "worker_id": 2, "disponible_cpu": 12.5, "disponible_ram": 28.3, "disponible_disco": 180.0 },
+      { "worker_id": 3, "disponible_cpu": 10.0, "disponible_ram": 24.0, "disponible_disco": 200.0 },
+      { "worker_id": 4, "disponible_cpu": 14.0, "disponible_ram": 30.0, "disponible_disco": 150.0 }
     ]
   }'
 ```
@@ -271,14 +295,16 @@ curl -X POST http://localhost:8080/placement \
 
 ## Notas para colaboradores
 
-- **El peso llega pre-calculado.** El Slice Manager aplica `w = 3·vcpus + 5·ram_gb + 1·disk_gb`
-  al persistir la VM en BD. Este servicio no conoce los coeficientes ni los recursos crudos.
-- **El Servers' State lo construye el Slice Manager.** Consulta la BD por workers de la zona,
-  aplica `F_OP = 1/0.65 ≈ 1.54` sobre la capacidad nominal y suma los `peso_actualizado`
-  de VMs activas. Este servicio recibe el estado ya calculado en campo `disponible`.
+- **Los recursos llegan sin agregar.** El Slice Manager persiste `{vcpus, ram_gb, disco_gb}`
+  en BD y los envía directamente. Este servicio no calcula ningún peso escalar.
+- **El Servers' State lo construye el Slice Manager.** Lee `OC_r[j]` de BD
+  (calculados por Observabilidad), aplica `C_efectivo_r[j] = C_nominal_r[j] × OC_r[j]`
+  y resta el consumo de VMs activas. Este servicio recibe `disponible_r[j]` ya calculado.
 - **`availability_zone` es el ID como string.** El Slice Manager envía el `id` de la zona,
   no el nombre (`"1"`, no `"Linux Cluster"`).
-- **Sin placement parcial.** Si una VM no puede asignarse, se retorna `FAILED` sin
-  asignar ninguna. El Slice Manager activa rollback (patrón Saga).
+- **Sin placement parcial.** Si el solver retorna INFEASIBLE o UNKNOWN, se retorna
+  `FAILED` para el slice completo. No hay asignaciones parciales.
 - **`worker_id` es siempre `int`.** El Slice Manager lo espera así para hacer lookup
   en su `server_inventory`.
+- **El timeout va al solver, no a asyncio.** `parameters.max_time_in_seconds` controla
+  el límite de tiempo directamente en CP-SAT. No se usa `asyncio.wait_for`.

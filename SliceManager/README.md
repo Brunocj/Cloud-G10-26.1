@@ -55,18 +55,42 @@ app/
 Al guardar un borrador, cada VM persiste su peso calculado con la fórmula:
 
 ```
-w = 3·vcpus + 5·ram_gb + 1·disk_gb
+w = α·vcpus + β·ram_gb + γ·disk_gb
 ```
 
-Con coeficientes derivados del cuello de botella del clúster (RAM es el recurso más escaso):
+Los coeficientes α, β y γ no se asignan arbitrariamente, sino que se derivan del recurso
+que representa el verdadero cuello de botella del clúster: aquel que se agota primero
+conforme se despliegan VMs. Para determinarlo, se estima cuántas VMs típicas caben en
+un worker por cada recurso usando el consumo real observado en el clúster. El recurso con
+menor capacidad relativa recibe el coeficiente más alto, de forma que el peso refleje
+fielmente la presión que cada VM ejerce sobre el recurso más escaso. En el clúster de
+referencia, la RAM resulta ser el cuello de botella, seguida de vCPU y finalmente disco,
+lo que produce la proporción:
 
 ```
 β (RAM) : α (vCPU) : γ (disco) = 5 : 3 : 1
 ```
 
+Este peso se calcula en el momento en que el Slice Manager persiste la VM en BD, de
+forma que el Placement Engine recibe directamente el par `{vm_id, peso}` sin necesidad
+de recomputarlo. Los coeficientes deben recalibrarse si el perfil de uso del clúster cambia
+significativamente.
+
 Se persisten dos campos en la tabla `vms`:
-- `peso`: peso nominal calculado sobre recursos solicitados. **No cambia.**
-- `peso_actualizado`: arranca igual que `peso`. El módulo de Observabilidad lo irá corrigiendo con consumo real. **Es el que usa el Servers' State.**
+- `peso`: peso nominal calculado sobre recursos solicitados al crear el borrador. **No cambia.**
+- `peso_actualizado`: arranca igual que `peso`. El módulo de Observabilidad lo irá
+  corrigiendo con consumo real. **Es el que usa el Servers' State.**
+
+El peso inicial es referencial: refleja lo que el usuario solicitó, no necesariamente lo que
+la VM consumirá en operación. Para capturar esta diferencia, el sistema aplica un factor
+de overprovisioning que ajusta la capacidad efectiva de cada worker. A diferencia de un
+valor estático, este factor se recalcula dinámicamente a partir de la relación entre el peso
+real consumido por las VMs desplegadas en un worker y el peso que estas deberían tener
+según la fórmula: si las VMs de un worker consumen en conjunto menos de lo que su peso
+nominal indica, el factor crece, expandiendo la capacidad efectiva del worker; si consumen
+más, el factor se contrae. Durante la etapa inicial, mientras no existe historial suficiente de
+métricas, el factor parte de un valor referencial fijo de `1 / 0.65 ≈ 1.54`, equivalente a
+asumir que las VMs consumen en promedio el 65% de lo que solicitan.
 
 ---
 
@@ -75,16 +99,12 @@ Se persisten dos campos en la tabla `vms`:
 Al recibir una orden de deploy, el `placement_worker` construye el Servers' State desde BD:
 
 ```
-F_OP = 1 / 0.65 ≈ 1.54          (factor de overprovisioning inicial)
+F_OP = 1 / 0.65 ≈ 1.54          (factor inicial; dinámico cuando Observabilidad esté activo)
 
 capacidad_nominal_i = 3·cpu_i + 5·(ram_gb_i) + 1·disk_gb_i
 C_i = capacidad_nominal_i × F_OP
 D_i = C_i − Σ peso_actualizado(VMs ACTIVE en worker_i)
 ```
-
-El factor `F_OP` expande la capacidad nominal para reflejar que en la práctica las VMs
-consumen ~65% de lo que solicitan. Cuando el módulo de Observabilidad esté operativo,
-este factor será dinámico.
 
 Solo se incluyen workers de la zona solicitada (`availability_zone_id`) y se excluye
 siempre el worker con `id=1` (headnode).
@@ -301,8 +321,8 @@ Tablas principales utilizadas por este módulo:
 
 | Campo | Descripción |
 |-------|-------------|
-| `peso` | Peso nominal calculado al crear el borrador. No cambia. |
-| `peso_actualizado` | Igual a `peso` al inicio. Actualizado por Observabilidad con consumo real. Usado para construir el Servers' State. |
+| `peso` | Peso nominal calculado al crear el borrador con `w = 3·vcpus + 5·ram_gb + 1·disk_gb`. No cambia. |
+| `peso_actualizado` | Igual a `peso` al inicio. Actualizado periódicamente por el módulo de Observabilidad en función del consumo real medido desde Prometheus. Es el campo que usa el Servers' State al momento del deploy. |
 
 ### Campos de capacidad en la tabla `workers`
 
