@@ -7,6 +7,7 @@ services:
     environment:
       NATS_URL:        nats://nats:4222
       COMPUTE_TIMEOUT: 300
+      NETWORK_TIMEOUT: 120
       LOG_LEVEL:       INFO
     depends_on:
       nats:

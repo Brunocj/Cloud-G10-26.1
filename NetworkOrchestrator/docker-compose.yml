@@ -8,6 +8,7 @@ services:
     environment:
       NATS_URL:        nats://nats:4222
       LOG_LEVEL:       DEBUG
+      SSH_TIMEOUT: "60"
     ports:
       - "8084:8084"
     networks:
