@@ -14,15 +14,16 @@ const KEYSYMS = {
     at:         { sym: 0x0040, code: "Digit2" },
 };
 
-const VmConsole = ({ workerIp, vncPort }) => {
+const VmConsole = ({ workerIp, workerPort, vncPort }) => {
     const vncRef = useRef(null);
 
     // display = vncPort - 5900  (ej: 5944 - 5900 = 44)
     // QEMU abre WebSocket en puerto 5700 + display  (ej: 5744)
-    // El ApiGW proxea:  ws://localhost:8085/vnc/{workerIp}/{wsPort}  →  ws://10.0.10.x:{wsPort}
+    // El ApiGW tuneliza via SSH:  ws://localhost:8085/vnc/{gatewayIp}/{sshPort}/{wsPort}
     const display = vncPort - 5900;
     const wsPort = 5700 + display;
-    const wsUrl = "ws://" + API_GW + "/vnc/" + workerIp + "/" + wsPort;
+    const sshPort = workerPort || 22;   // puerto SSH en el gateway (5811-5814)
+    const wsUrl = `ws://${API_GW}/vnc/${workerIp}/${sshPort}/${wsPort}`;
 
     // Send a single key press (down + up) using X11 keysym
     const sendKey = (sym, code) => {
@@ -62,7 +63,7 @@ const VmConsole = ({ workerIp, vncPort }) => {
             <div style={{ padding: "8px 10px 6px", backgroundColor: "#1a1a2e", color: "#e0e0e0", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid #333" }}>
                 <div>
                     <span style={{ fontWeight: 700, marginRight: 8 }}>💻 Consola VNC</span>
-                    <span style={{ fontSize: 11, color: "#888", fontFamily: "monospace" }}>{workerIp} → WS :{wsPort}</span>
+                    <span style={{ fontSize: 11, color: "#888", fontFamily: "monospace" }}>{workerIp}:{sshPort} → WS :{wsPort}</span>
                 </div>
                 <button
                     onClick={() => vncRef.current && vncRef.current.sendCtrlAltDel()}

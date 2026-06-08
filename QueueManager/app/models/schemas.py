@@ -39,7 +39,8 @@ class VMSpec(BaseModel):
     se reenvía íntegra al Compute Provisioner.
     """
     vm_id:           str                = Field(..., description="ID único de la VM")
-    worker_ip:       str                = Field(..., description="IP del worker destino")
+    worker_ip:       str                = Field(..., description="IP del gateway SSH para este worker")
+    worker_port:     int                = Field(default=22, description="Puerto SSH en el gateway (ej: 5811-5814)")
     ssh_user:        str                = Field(..., description="Usuario SSH del worker")
     ssh_private_key: str                = Field(..., description="Llave privada PEM como string")
     vcpus:           int                = Field(..., ge=1)
@@ -84,6 +85,7 @@ class NetworkLink(BaseModel):
     # Datos del extremo 1
     vm1_id: str
     vm1_worker_ip: str
+    vm1_worker_port: int = 22
     vm1_tap: str
     vm1_ssh_user: str
     vm1_ssh_private_key: str
@@ -91,6 +93,7 @@ class NetworkLink(BaseModel):
     # Datos del extremo 2
     vm2_id: str
     vm2_worker_ip: str
+    vm2_worker_port: int = 22
     vm2_tap: str
     vm2_ssh_user: str
     vm2_ssh_private_key: str

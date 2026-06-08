@@ -20,11 +20,13 @@ logger = logging.getLogger("SliceManager.GC")
 
 GC_INTERVAL_HOURS: float = float(os.getenv("GC_INTERVAL_HOURS", "6"))
 
+GATEWAY_IP = "10.20.11.119"
+_KEY = "/app/keys/id_ed25519"  # ruta absoluta — montada vía docker volume
 _WORKER_INVENTORY = {
-    1: {"ip": "10.0.10.1", "user": "ubuntu", "key_path": "keys/worker1.pem"},
-    2: {"ip": "10.0.10.2", "user": "ubuntu", "key_path": "keys/worker2.pem"},
-    3: {"ip": "10.0.10.3", "user": "ubuntu", "key_path": "keys/worker3.pem"},
-    4: {"ip": "10.0.10.4", "user": "ubuntu", "key_path": "keys/worker4.pem"},
+    1: {"ip": GATEWAY_IP, "port": 5811, "user": "ubuntu", "key_path": _KEY},
+    2: {"ip": GATEWAY_IP, "port": 5812, "user": "ubuntu", "key_path": _KEY},
+    3: {"ip": GATEWAY_IP, "port": 5813, "user": "ubuntu", "key_path": _KEY},
+    4: {"ip": GATEWAY_IP, "port": 5814, "user": "ubuntu", "key_path": _KEY},
 }
 
 VMS_DIR = "/vms"
@@ -39,7 +41,10 @@ def _ssh_delete_image_file(file_path: str) -> None:
     try:
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect(worker["ip"], username=worker["user"], key_filename=worker["key_path"], timeout=15)
+        client.connect(
+            worker["ip"], port=worker.get("port", 22),
+            username=worker["user"], key_filename=worker["key_path"], timeout=15
+        )
         _, stdout, stderr = client.exec_command(f"sudo rm -f {file_path}")
         exit_code = stdout.channel.recv_exit_status()
         client.close()
@@ -55,7 +60,10 @@ def _ssh_exec(worker: dict, command: str) -> tuple:
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
-        client.connect(worker["ip"], username=worker["user"], key_filename=worker["key_path"], timeout=15)
+        client.connect(
+            worker["ip"], port=worker.get("port", 22),
+            username=worker["user"], key_filename=worker["key_path"], timeout=15
+        )
         _, stdout, stderr = client.exec_command(command)
         exit_code = stdout.channel.recv_exit_status()
         return exit_code, stdout.read().decode().strip(), stderr.read().decode().strip()

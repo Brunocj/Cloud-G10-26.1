@@ -253,7 +253,7 @@ const NodeEditor = ({ node, availableImages, sliceStatus, onSave, onDelete, onCl
                         {/* REQ-US-11: Botón de Consola Web */}
                         <button
                             // 🔥 FIX: Usamos la prop que recibimos
-                            onClick={() => onOpenConsole({ workerIp: node.worker_ip, vncPort: node.vnc_port })}
+                            onClick={() => onOpenConsole({ workerIp: node.worker_ip, workerPort: node.worker_port, vncPort: node.vnc_port })}
                             disabled={sliceStatus !== "ACTIVE"}
                             style={btnBase({ width: "100%", background: T.text, color: "#fff", border: "none", padding: "8px 0", opacity: sliceStatus === "ACTIVE" ? 1 : 0.5 })}>
                             Abrir Consola Web
@@ -743,7 +743,7 @@ const ConfirmModal = ({ title, msg, onOk, onCancel }) => (
     </Overlay>
 );
 
-const ConsoleModal = ({ workerIp, vncPort, onClose }) => (
+const ConsoleModal = ({ workerIp, workerPort, vncPort, onClose }) => (
     <Overlay>
         <div style={{
             background: T.surface,
@@ -761,7 +761,7 @@ const ConsoleModal = ({ workerIp, vncPort, onClose }) => (
             </div>
 
             {/* Aquí inyectamos tu componente VmConsole */}
-            <VmConsole workerIp={workerIp} vncPort={vncPort} />
+            <VmConsole workerIp={workerIp} workerPort={workerPort} vncPort={vncPort} />
         </div>
     </Overlay>
 );
@@ -1355,6 +1355,7 @@ export default function App() {
             {consoleVm && (
                 <ConsoleModal
                     workerIp={consoleVm.workerIp}
+                    workerPort={consoleVm.workerPort}
                     vncPort={consoleVm.vncPort}
                     onClose={() => setConsoleVm(null)}
                 />

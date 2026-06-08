@@ -176,15 +176,20 @@ async def process_placement_worker():
 
                 def get_ssh_key(filepath: str) -> str:
                     if not os.path.exists(filepath):
+                        logger.warning(f"[PLACEMENT] ⚠️ Clave SSH no encontrada en {filepath}. Se enviará vacía.")
                         return ""
                     with open(filepath, "r") as key_file:
                         return key_file.read()
 
+                # Nueva topología: App VM → gateway (10.20.11.119) → workers
+                # Clave SSH compartida en ruta absoluta (montada vía docker volume)
+                GATEWAY_IP = "10.20.11.119"
+                _KEY = "/app/keys/id_ed25519"
                 server_inventory = {
-                    1: {"ip": "192.168.201.1", "user": "ubuntu", "key_path": "keys/id_ed25519"},
-                    2: {"ip": "192.168.201.2", "user": "ubuntu", "key_path": "keys/id_ed25519"},
-                    3: {"ip": "192.168.201.3", "user": "ubuntu", "key_path": "keys/id_ed25519"},
-                    4: {"ip": "192.168.201.4", "user": "ubuntu", "key_path": "keys/id_ed25519"},
+                    1: {"ip": GATEWAY_IP, "port": 5811, "user": "ubuntu", "key_path": _KEY},
+                    2: {"ip": GATEWAY_IP, "port": 5812, "user": "ubuntu", "key_path": _KEY},
+                    3: {"ip": GATEWAY_IP, "port": 5813, "user": "ubuntu", "key_path": _KEY},
+                    4: {"ip": GATEWAY_IP, "port": 5814, "user": "ubuntu", "key_path": _KEY},
                 }
 
                 slice_json = db_slice.slice_json
@@ -247,11 +252,13 @@ async def process_placement_worker():
                         "vlan_id":             vlan_actual,
                         "vm1_id":              vm1_id,
                         "vm1_worker_ip":       worker1.get("ip", "0.0.0.0"),
+                        "vm1_worker_port":     worker1.get("port", 22),
                         "vm1_tap":             tap1,
                         "vm1_ssh_user":        worker1.get("user", "ubuntu"),
                         "vm1_ssh_private_key": get_ssh_key(worker1.get("key_path", "")),
                         "vm2_id":              vm2_id,
                         "vm2_worker_ip":       worker2.get("ip", "0.0.0.0"),
+                        "vm2_worker_port":     worker2.get("port", 22),
                         "vm2_tap":             tap2,
                         "vm2_ssh_user":        worker2.get("user", "ubuntu"),
                         "vm2_ssh_private_key": get_ssh_key(worker2.get("key_path", ""))
@@ -309,6 +316,7 @@ async def process_placement_worker():
                     vms_payload.append({
                         "vm_id":           vm.name,
                         "worker_ip":       server_info.get("ip", "0.0.0.0"),
+                        "worker_port":     server_info.get("port", 22),
                         "ssh_user":        server_info.get("user", "ubuntu"),
                         "ssh_private_key": get_ssh_key(server_info.get("key_path", "")),
                         "vcpus":           int(vm.vcore),

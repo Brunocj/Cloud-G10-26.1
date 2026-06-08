@@ -10,8 +10,8 @@ services:
     environment:
       - NATS_URL=nats://nats:4222
       - VM_PLACEMENT_URL=http://vm-placement:8080/placement
-      - PROMETHEUS_URL=http://10.0.10.1:9090
-      - DB_HOST=host.docker.internal 
+      - PROMETHEUS_URL=http://10.20.11.212:9090
+      - DB_HOST=10.20.11.212
       - DB_USER=mandarina
       - DB_PASSWORD=sandia
       - DB_NAME=cloud

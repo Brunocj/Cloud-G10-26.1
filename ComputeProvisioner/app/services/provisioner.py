@@ -84,9 +84,9 @@ class Provisioner:
 
         for attempt in range(1, settings.SSH_MAX_RETRIES + 1):
             try:
-                logger.info("[CP]    🔌 Abriendo SSH a %s (intento %d/%d)...",
-                            vm.worker_ip, attempt, settings.SSH_MAX_RETRIES)
-                with SSHClient(vm.worker_ip, vm.ssh_user, vm.ssh_private_key) as ssh:
+                logger.info("[CP]    🔌 Abriendo SSH a %s:%d (intento %d/%d)...",
+                            vm.worker_ip, vm.worker_port, attempt, settings.SSH_MAX_RETRIES)
+                with SSHClient(vm.worker_ip, vm.ssh_user, vm.ssh_private_key, port=vm.worker_port) as ssh:
                     executor = QEMUExecutor(ssh)
 
                     # 1. Disco

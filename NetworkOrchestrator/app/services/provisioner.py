@@ -25,24 +25,30 @@ class NetworkProvisioner:
     def deploy(self, request: DeployNetworkRequest) -> DeployNetworkResponse:
         logger.info(f"[slice={request.slice_id}] Iniciando despliegue de red ({len(request.links)} enlaces)")
 
-        # 1. Agrupar Enlaces
+        # 1. Agrupar por (worker_ip, worker_port) — clave compuesta porque varios
+        #    workers pueden compartir el mismo gateway IP con distintos puertos SSH
         endpoints_by_worker = defaultdict(list)
         for link in request.links:
-            endpoints_by_worker[link.vm1_worker_ip].append({
+            key1 = (link.vm1_worker_ip, link.vm1_worker_port)
+            endpoints_by_worker[key1].append({
                 "link_id": link.connection_id, "vlan": link.vlan_id, 
                 "tap": link.vm1_tap, "rules": link.vm1_security_rules,
-                "user": link.vm1_ssh_user, "key": link.vm1_ssh_private_key
+                "user": link.vm1_ssh_user, "key": link.vm1_ssh_private_key,
+                "port": link.vm1_worker_port,
             })
-            endpoints_by_worker[link.vm2_worker_ip].append({
+            key2 = (link.vm2_worker_ip, link.vm2_worker_port)
+            endpoints_by_worker[key2].append({
                 "link_id": link.connection_id, "vlan": link.vlan_id, 
                 "tap": link.vm2_tap, "rules": link.vm2_security_rules,
-                "user": link.vm2_ssh_user, "key": link.vm2_ssh_private_key
+                "user": link.vm2_ssh_user, "key": link.vm2_ssh_private_key,
+                "port": link.vm2_worker_port,
             })
 
-        # 2. Agrupar VMs 
+        # 2. Agrupar VMs por (worker_ip, worker_port)
         vms_by_worker = defaultdict(list)
         for vm in request.vms:
-            vms_by_worker[vm.worker_ip].append(vm)
+            key = (vm.worker_ip, getattr(vm, 'worker_port', 22))
+            vms_by_worker[key].append(vm)
 
         successful_links = set()
         failed_links_errors = {}
@@ -51,22 +57,22 @@ class NetworkProvisioner:
         with ThreadPoolExecutor(max_workers=settings.MAX_CONCURRENT_WORKERS) as pool:
             futures = {}
 
-            # 🔥 Convertimos las llaves a lista para elegir al primer worker como LÍDER del Gateway
-            worker_ips = list(endpoints_by_worker.keys())
-            if not worker_ips and vms_by_worker:
-                 worker_ips = list(vms_by_worker.keys()) # Por si hay VMs pero 0 enlaces
+            worker_keys = list(endpoints_by_worker.keys())
+            if not worker_keys and vms_by_worker:
+                worker_keys = list(vms_by_worker.keys())
 
-            for worker_ip in worker_ips:
-                endpoints = endpoints_by_worker.get(worker_ip, [])
-                vms_list = vms_by_worker.get(worker_ip, [])
+            for worker_key in worker_keys:
+                worker_ip, worker_port = worker_key
+                endpoints = endpoints_by_worker.get(worker_key, [])
+                vms_list = vms_by_worker.get(worker_key, [])
                 
-                # 🔥 Solo el primer worker será el encargado del Gateway y el NAT
-                is_gateway_leader = (worker_ip == worker_ips[0]) 
+                is_gateway_leader = (worker_key == worker_keys[0]) 
 
-                futures[pool.submit(self._deploy_on_worker, worker_ip, endpoints, vms_list, request.slice_id, is_gateway_leader)] = worker_ip
+                futures[pool.submit(self._deploy_on_worker, worker_ip, worker_port, endpoints, vms_list, request.slice_id, is_gateway_leader)] = worker_key
 
             for future in as_completed(futures):
-                worker_ip = futures[future]
+                worker_key = futures[future]
+                worker_ip = worker_key[0] if isinstance(worker_key, tuple) else worker_key
                 try:
                     ok_endpoints, fail_endpoints = future.result()
                     for ep in ok_endpoints:
@@ -91,16 +97,16 @@ class NetworkProvisioner:
             status=status, links_ok=links_ok, links_failed=links_failed
         )
 
-    def _deploy_on_worker(self, worker_ip: str, endpoints: List[dict], vms_list: list, slice_id: str, is_gateway_leader: bool) -> Tuple[List[dict], List[Tuple[dict, str]]]:
+    def _deploy_on_worker(self, worker_ip: str, worker_port: int, endpoints: List[dict], vms_list: list, slice_id: str, is_gateway_leader: bool) -> Tuple[List[dict], List[Tuple[dict, str]]]:
         ok_eps, fail_eps = [], []
         executor = NetworkExecutor(worker_ip)
         
         try:
-            # Extraemos credenciales (asumimos que si hay VMs pero no enlaces, sacamos credenciales de la primera VM)
             user = endpoints[0]["user"] if endpoints else vms_list[0].ssh_user
             key = endpoints[0]["key"] if endpoints else vms_list[0].ssh_private_key
+            port = endpoints[0].get("port", worker_port) if endpoints else getattr(vms_list[0], 'worker_port', worker_port)
 
-            with SSHClient(worker_ip, user, key) as ssh:
+            with SSHClient(worker_ip, user, key, port=port) as ssh:
                 # A. Configurar Enlaces L2 (VLANs)
                 for ep in endpoints:
                     try:
@@ -138,35 +144,35 @@ class NetworkProvisioner:
         logger.info(f"[slice={request.slice_id}] Iniciando destrucción REAL de red...")
 
         endpoints_by_worker = defaultdict(list)
-        # 1. Agrupamos los enlaces a destruir (si existen)
         if hasattr(request, 'links') and request.links:
             for link in request.links:
-                endpoints_by_worker[link.vm1_worker_ip].append({"tap": link.vm1_tap, "user": link.vm1_ssh_user, "key": link.vm1_ssh_private_key})
-                endpoints_by_worker[link.vm2_worker_ip].append({"tap": link.vm2_tap, "user": link.vm2_ssh_user, "key": link.vm2_ssh_private_key})
+                key1 = (link.vm1_worker_ip, link.vm1_worker_port)
+                endpoints_by_worker[key1].append({"tap": link.vm1_tap, "user": link.vm1_ssh_user, "key": link.vm1_ssh_private_key, "port": link.vm1_worker_port})
+                key2 = (link.vm2_worker_ip, link.vm2_worker_port)
+                endpoints_by_worker[key2].append({"tap": link.vm2_tap, "user": link.vm2_ssh_user, "key": link.vm2_ssh_private_key, "port": link.vm2_worker_port})
 
         vms_by_worker = defaultdict(list)
-        # 2. Agrupamos las VMs para saber quién era el Gateway Líder y limpiar NAT
         if hasattr(request, 'vms') and request.vms:
             for vm in request.vms:
-                vms_by_worker[vm.worker_ip].append(vm)
+                key = (vm.worker_ip, getattr(vm, 'worker_port', 22))
+                vms_by_worker[key].append(vm)
 
-        # Unimos a todos los workers involucrados (por enlaces o por VMs sueltas)
-        worker_ips = list(set(list(endpoints_by_worker.keys()) + list(vms_by_worker.keys())))
+        worker_keys = list(set(list(endpoints_by_worker.keys()) + list(vms_by_worker.keys())))
 
-        if not worker_ips:
+        if not worker_keys:
             logger.warning(f"[slice={request.slice_id}] Sin links ni vms en el JSON. Nada que destruir en red.")
             return DestroyNetworkResponse(slice_id=request.slice_id, request_id=request.request_id, status=ProvisioningStatus.SUCCESS)
 
         with ThreadPoolExecutor(max_workers=settings.MAX_CONCURRENT_WORKERS) as pool:
             futures = {}
-            for worker_ip in worker_ips:
-                endpoints = endpoints_by_worker.get(worker_ip, [])
-                vms_list = vms_by_worker.get(worker_ip, [])
+            for worker_key in worker_keys:
+                worker_ip, worker_port = worker_key
+                endpoints = endpoints_by_worker.get(worker_key, [])
+                vms_list = vms_by_worker.get(worker_key, [])
                 
-                # Identificamos al LÍDER (para borrar el gateway)
-                is_gateway_leader = (worker_ip == worker_ips[0])
+                is_gateway_leader = (worker_key == worker_keys[0])
 
-                futures[pool.submit(self._destroy_on_worker, worker_ip, endpoints, vms_list, request.slice_id, is_gateway_leader)] = worker_ip
+                futures[pool.submit(self._destroy_on_worker, worker_ip, worker_port, endpoints, vms_list, request.slice_id, is_gateway_leader)] = worker_key
                 
             for future in as_completed(futures):
                 try:
@@ -177,14 +183,14 @@ class NetworkProvisioner:
         logger.info(f"[slice={request.slice_id}] Destrucción física completada.")
         return DestroyNetworkResponse(slice_id=request.slice_id, request_id=request.request_id, status=ProvisioningStatus.SUCCESS)
 
-    def _destroy_on_worker(self, worker_ip: str, endpoints: List[dict], vms_list: list, slice_id: str, is_gateway_leader: bool) -> None:
+    def _destroy_on_worker(self, worker_ip: str, worker_port: int, endpoints: List[dict], vms_list: list, slice_id: str, is_gateway_leader: bool) -> None:
         executor = NetworkExecutor(worker_ip)
         try:
-            # Encontramos la credencial de donde sea posible (enlace o VM)
             user = endpoints[0]["user"] if endpoints else vms_list[0].ssh_user
             key = endpoints[0]["key"] if endpoints else vms_list[0].ssh_private_key
+            port = endpoints[0].get("port", worker_port) if endpoints else getattr(vms_list[0], 'worker_port', worker_port)
 
-            with SSHClient(worker_ip, user, key) as ssh:
+            with SSHClient(worker_ip, user, key, port=port) as ssh:
                 # 1. Limpiar los puertos TAPs L2 (Si hay)
                 for ep in endpoints:
                     try:

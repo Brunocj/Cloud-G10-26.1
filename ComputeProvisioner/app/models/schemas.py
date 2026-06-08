@@ -26,7 +26,8 @@ class TapInterface(BaseModel):
 class VMSpec(BaseModel):
     """Especificación de una VM individual a desplegar."""
     vm_id:           str                 = Field(..., description="ID único de la VM")
-    worker_ip:       str                 = Field(..., description="IP del worker destino")
+    worker_ip:       str                 = Field(..., description="IP del gateway SSH para este worker")
+    worker_port:     int                 = Field(default=22, description="Puerto SSH en el gateway (ej: 5811-5814)")
     ssh_user:        str                 = Field(..., description="Usuario SSH del worker")
     ssh_private_key: str                 = Field(..., description="Llave privada PEM como string")
     vcpus:           int                 = Field(..., ge=1)

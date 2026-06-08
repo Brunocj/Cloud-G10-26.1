@@ -29,11 +29,13 @@ router = APIRouter(prefix="/api/v1/slices/utils/images", tags=["Image Management
 # ── Configuración ────────────────────────────────────────────────────────────
 IMAGES_DIR = os.getenv("IMAGES_DIR", "/mnt/cloud_images")
 
+GATEWAY_IP = "10.20.11.119"
+_KEY = "/app/keys/id_ed25519"  # ruta absoluta — montada vía docker volume
 _WORKER_INVENTORY = {
-    1: {"ip": "10.0.10.1", "user": "ubuntu", "key_path": "keys/worker1.pem"},
-    2: {"ip": "10.0.10.2", "user": "ubuntu", "key_path": "keys/worker2.pem"},
-    3: {"ip": "10.0.10.3", "user": "ubuntu", "key_path": "keys/worker3.pem"},
-    4: {"ip": "10.0.10.4", "user": "ubuntu", "key_path": "keys/worker4.pem"},
+    1: {"ip": GATEWAY_IP, "port": 5811, "user": "ubuntu", "key_path": _KEY},
+    2: {"ip": GATEWAY_IP, "port": 5812, "user": "ubuntu", "key_path": _KEY},
+    3: {"ip": GATEWAY_IP, "port": 5813, "user": "ubuntu", "key_path": _KEY},
+    4: {"ip": GATEWAY_IP, "port": 5814, "user": "ubuntu", "key_path": _KEY},
 }
 
 # Estados que se consideran "activos" (la imagen no se puede borrar)
@@ -49,6 +51,7 @@ def _ssh_exec(worker: dict, command: str) -> tuple:
     try:
         client.connect(
             worker["ip"],
+            port=worker.get("port", 22),
             username=worker["user"],
             key_filename=worker["key_path"],
             timeout=15,

@@ -30,7 +30,8 @@ class NetworkLink(BaseModel):
     
     # Datos del Extremo A (VM 1)
     vm1_id:              str = Field(..., description="ID de la VM 1")
-    vm1_worker_ip:       str = Field(..., description="IP del servidor físico donde está la VM 1")
+    vm1_worker_ip:       str = Field(..., description="IP del gateway SSH para el worker de la VM 1")
+    vm1_worker_port:     int = Field(default=22, description="Puerto SSH en el gateway para el worker de la VM 1")
     vm1_tap:             str = Field(..., description="Interfaz TAP creada por Compute (ej: tap-vm1)")
     vm1_ssh_user:        str = Field(..., description="Usuario SSH del worker 1")
     vm1_ssh_private_key: str = Field(..., description="Llave PEM del worker 1")
@@ -38,7 +39,8 @@ class NetworkLink(BaseModel):
     
     # Datos del Extremo B (VM 2)
     vm2_id:              str = Field(..., description="ID de la VM 2")
-    vm2_worker_ip:       str = Field(..., description="IP del servidor físico donde está la VM 2")
+    vm2_worker_ip:       str = Field(..., description="IP del gateway SSH para el worker de la VM 2")
+    vm2_worker_port:     int = Field(default=22, description="Puerto SSH en el gateway para el worker de la VM 2")
     vm2_tap:             str = Field(..., description="Interfaz TAP creada por Compute (ej: tap-vm2)")
     vm2_ssh_user:        str = Field(..., description="Usuario SSH del worker 2")
     vm2_ssh_private_key: str = Field(..., description="Llave PEM del worker 2")
@@ -52,6 +54,7 @@ class VMNetworkSpec(BaseModel):
     """Información de la VM necesaria para configurar su Gateway e Iptables."""
     vm_id:           str
     worker_ip:       str
+    worker_port:     int = 22
     ssh_user:        str
     ssh_private_key: str
     tap_interfaces:  List[TapInterface] = Field(default_factory=list)

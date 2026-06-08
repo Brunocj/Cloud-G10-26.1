@@ -11,24 +11,47 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 class SSHClient:
-    def __init__(self, host: str, ssh_user: str, ssh_private_key: str):
+    def __init__(self, host: str, ssh_user: str, ssh_private_key: str, port: int = 22):
         self.host            = host
+        self.port            = port
         self.user            = ssh_user
         self.ssh_private_key = ssh_private_key
         self.timeout         = settings.SSH_TIMEOUT
         self._client: paramiko.SSHClient | None = None
 
     def connect(self) -> None:
-        pkey = paramiko.RSAKey.from_private_key(io.StringIO(self.ssh_private_key))
+        # Intentar cargar la clave PEM desde string en memoria — soporta RSA y Ed25519
+        pkey = None
+        key_content = self.ssh_private_key.strip() if self.ssh_private_key else ""
+
+        if not key_content:
+            raise ValueError(f"ssh_private_key vacío para {self.host}:{self.port}")
+
+        key_stream = io.StringIO(key_content)
+        last_exc: Exception | None = None
+        for key_class in (paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey):
+            try:
+                key_stream.seek(0)
+                pkey = key_class.from_private_key(key_stream)
+                break
+            except Exception as exc:
+                last_exc = exc
+
+        if pkey is None:
+            raise ValueError(
+                f"No se pudo cargar la clave SSH para {self.host}:{self.port}: {last_exc}"
+            )
+
         self._client = paramiko.SSHClient()
         self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         self._client.connect(
             hostname=self.host,
+            port=self.port,
             username=self.user,
             pkey=pkey,
             timeout=self.timeout,
         )
-        logger.debug(f"SSH conectado a {self.host} como {self.user}")
+        logger.debug(f"SSH conectado a {self.host}:{self.port} como {self.user}")
 
     def disconnect(self) -> None:
         if self._client:
