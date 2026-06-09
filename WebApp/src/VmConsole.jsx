@@ -62,7 +62,7 @@ const VmConsole = ({ workerIp, workerPort, vncPort }) => {
             {/* Toolbar row 1: title + Ctrl+Alt+Del */}
             <div style={{ padding: "8px 10px 6px", backgroundColor: "#1a1a2e", color: "#e0e0e0", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid #333" }}>
                 <div>
-                    <span style={{ fontWeight: 700, marginRight: 8 }}>💻 Consola VNC</span>
+                    <span style={{ fontWeight: 700, marginRight: 8 }}>Consola VNC</span>
                     <span style={{ fontSize: 11, color: "#888", fontFamily: "monospace" }}>{workerIp}:{sshPort} → WS :{wsPort}</span>
                 </div>
                 <button

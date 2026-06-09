@@ -1,0 +1,141 @@
+import { useState, useRef } from "react";
+import { T, btnBase, inp } from "../../theme/tokens";
+import { Label } from "../ui/Label";
+import { Upload, RefreshCcw, Trash2, CheckCircle, Circle, Lock, Package, Loader } from "../ui/Icon";
+
+const API_BASE = "http://localhost:8085/api/v1";
+
+export const ImagePanel = ({ fullImages, onRefresh, flash, refreshImageList }) => {
+    const [uploading,   setUploading]   = useState(false);
+    const [gcRunning,   setGcRunning]   = useState(false);
+    const [uploadForm,  setUploadForm]  = useState({ name: "", file: null });
+    const [showUpload,  setShowUpload]  = useState(false);
+    const fileRef = useRef(null);
+
+    const handleUpload = async () => {
+        if (!uploadForm.file || !uploadForm.name.trim()) {
+            flash("Completa el nombre y selecciona un archivo", "error"); return;
+        }
+        setUploading(true);
+        const fd = new FormData();
+        fd.append("name",       uploadForm.name.trim());
+        fd.append("is_general", 0);
+        fd.append("file",       uploadForm.file);
+        try {
+            const res  = await fetch(`${API_BASE}/slices/utils/images/upload`, { method: "POST", body: fd });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || "Error al subir");
+            flash(`Imagen '${uploadForm.name}' subida correctamente.`);
+            setShowUpload(false);
+            setUploadForm({ name: "", file: null });
+            onRefresh();
+            if (refreshImageList) refreshImageList();
+        } catch (e) { flash(e.message, "error"); }
+        finally { setUploading(false); }
+    };
+
+    const handleDelete = async (img) => {
+        if (!window.confirm(`¿Eliminar la imagen '${img.name}'?`)) return;
+        try {
+            const res  = await fetch(`${API_BASE}/slices/utils/images/${img.id}`, { method: "DELETE" });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || "Error al eliminar");
+            flash(data.message);
+            onRefresh();
+        } catch (e) { flash(e.message, "error"); }
+    };
+
+    const handleGC = async () => {
+        setGcRunning(true);
+        try {
+            const res  = await fetch(`${API_BASE}/slices/utils/images/gc/run`, { method: "POST" });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || "Error GC");
+            flash(data.message);
+            setTimeout(() => { onRefresh(); if (refreshImageList) refreshImageList(); }, 3000);
+        } catch (e) { flash(e.message, "error"); }
+        finally { setTimeout(() => setGcRunning(false), 3500); }
+    };
+
+    return (
+        <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+            {/* Action buttons */}
+            <div style={{ padding: "10px 12px", borderBottom: `1px solid ${T.border}`, display: "flex", gap: 6, flexShrink: 0 }}>
+                <button onClick={() => setShowUpload(v => !v)}
+                    style={btnBase({ flex: 1, fontSize: 11, padding: "6px 8px", background: T.accent, color: "#fff", border: "none",
+                        display: "flex", alignItems: "center", justifyContent: "center", gap: 5 })}>
+                    <Upload size={12} /> Subir Imagen
+                </button>
+                <button onClick={handleGC} disabled={gcRunning}
+                    style={btnBase({ flex: 1, fontSize: 11, padding: "6px 8px", background: gcRunning ? T.surfaceElevated : T.yellowLight, color: gcRunning ? T.textMuted : T.yellow, border: `1px solid ${T.yellow}44`,
+                        display: "flex", alignItems: "center", justifyContent: "center", gap: 5 })}>
+                    {gcRunning
+                        ? <><Loader size={11} style={{ animation: "spin 0.8s linear infinite" }} /> Limpiando...</>
+                        : <><RefreshCcw size={11} /> Ejecutar GC</>}
+                </button>
+            </div>
+
+            {/* Upload form (collapsible) */}
+            {showUpload && (
+                <div style={{ padding: "10px 12px", borderBottom: `1px solid ${T.border}`, background: T.accentLight, flexShrink: 0 }}>
+                    <Label>Nombre de la imagen</Label>
+                    <input value={uploadForm.name}
+                        onChange={e => setUploadForm(p => ({ ...p, name: e.target.value }))}
+                        placeholder="ej: ubuntu-custom-v1" style={{ ...inp, marginBottom: 8 }} />
+                    <Label>Archivo (.qcow2 / .img / .iso)</Label>
+                    <input type="file" accept=".qcow2,.img,.iso" ref={fileRef}
+                        onChange={e => setUploadForm(p => ({ ...p, file: e.target.files[0] }))}
+                        style={{ fontSize: 11, color: T.text, marginBottom: 8, width: "100%" }} />
+                    <button onClick={handleUpload} disabled={uploading}
+                        style={btnBase({ width: "100%", background: T.accent, color: "#fff", border: "none", opacity: uploading ? 0.6 : 1,
+                            display: "flex", alignItems: "center", justifyContent: "center", gap: 6 })}>
+                        {uploading
+                            ? <><Loader size={13} style={{ animation: "spin 0.8s linear infinite" }} /> Subiendo...</>
+                            : <><CheckCircle size={13} /> Confirmar Subida</>}
+                    </button>
+                </div>
+            )}
+
+            {/* Image list */}
+            <div style={{ flex: 1, overflowY: "auto", padding: "8px 10px", display: "flex", flexDirection: "column", gap: 6 }}>
+                {fullImages.length === 0 && (
+                    <div style={{ color: T.textFaint, fontSize: 12, textAlign: "center", padding: 16 }}>Sin imágenes registradas</div>
+                )}
+                {fullImages.map(img => (
+                    <div key={img.id} style={{ background: T.surface, border: `1px solid ${img.in_use ? T.accent + "44" : T.border}`, borderRadius: 10, padding: "9px 10px", boxShadow: T.shadow }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontSize: 12, fontWeight: 700, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                                        display: "flex", alignItems: "center", gap: 5 }}>
+                                    {img.is_general
+                                        ? <Lock size={11} color={T.textMuted} />
+                                        : <Package size={11} color={T.accent} />}
+                                    {img.name}
+                                </div>
+                                <div style={{ fontSize: 10, color: T.textMuted, marginTop: 2, display: "flex", alignItems: "center", gap: 4 }}>
+                                    {img.in_use
+                                        ? <><CheckCircle size={10} color={T.accent} /><span style={{ color: T.accent, fontWeight: 600 }}>En uso ({img.active_vm_count} VM{img.active_vm_count > 1 ? "s" : ""})</span></>
+                                        : <><Circle size={10} color={img.is_general ? T.textMuted : T.yellow} /><span style={{ color: img.is_general ? T.textMuted : T.yellow }}>Sin VMs activas</span></>}
+                                </div>
+                                <div style={{ fontSize: 9, color: T.textFaint, marginTop: 2, fontFamily: "monospace" }}>{img.path}</div>
+                            </div>
+                            {img.is_general !== 1 && (
+                                <button
+                                    onClick={() => handleDelete(img)}
+                                    disabled={img.in_use}
+                                    title={img.in_use ? "No se puede eliminar: tiene VMs activas" : "Eliminar imagen"}
+                                    style={btnBase({ padding: "4px 8px", fontSize: 13, marginLeft: 6, flexShrink: 0, cursor: img.in_use ? "not-allowed" : "pointer",
+                                        background: img.in_use ? T.surfaceElevated : T.redLight,
+                                        color: img.in_use ? T.textFaint : T.red,
+                                        border: `1px solid ${img.in_use ? T.border : T.red + "44"}`,
+                                        display: "flex", alignItems: "center" })}>
+                                    <Trash2 size={13} />
+                                </button>
+                            )}
+                        </div>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+};
