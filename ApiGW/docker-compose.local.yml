@@ -1,0 +1,9 @@
+# ============================================================
+#  Override LOCAL — JWT_ISSUER apunta a localhost para pruebas
+#  Uso:
+#    docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
+# ============================================================
+services:
+  api-gateway:
+    environment:
+      JWT_ISSUER: "http://localhost:8086/realms/pucp-cloud"

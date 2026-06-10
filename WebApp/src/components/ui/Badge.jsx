@@ -10,6 +10,14 @@ export const Badge = ({ status }) => {
         TERMINATED:       ["#616161",   "#eeeeee"],
     };
     const [c, bg] = map[status] || map.DRAFT;
+    const labels = {
+        ACTIVE:           "ACTIVO",
+        DRAFT:            "BORRADOR",
+        PROVISIONING:     "PROVISIONANDO",
+        PENDING_APPROVAL: "PENDIENTE",
+        FAILED:           "FALLIDO",
+        TERMINATED:       "TERMINADO",
+    };
     return (
         <span style={{
             display: "inline-flex", alignItems: "center", gap: 4,
@@ -19,7 +27,7 @@ export const Badge = ({ status }) => {
             letterSpacing: "0.05em",
         }}>
             <span style={{ width: 5, height: 5, borderRadius: "50%", background: c }} />
-            {status}
+            {labels[status] || status}
         </span>
     );
 };

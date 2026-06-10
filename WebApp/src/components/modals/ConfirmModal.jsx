@@ -10,10 +10,10 @@ export const ConfirmModal = ({ title, msg, onOk, onCancel }) => (
             </div>
             <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 22, lineHeight: 1.6 }}>{msg}</div>
             <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-                <button onClick={onCancel} style={btnBase()}>Cancel</button>
+                <button onClick={onCancel} style={btnBase()}>Cancelar</button>
                 <button onClick={onOk} style={btnBase({ background: T.redLight, color: T.red, border: `1px solid ${T.red}44`,
                     display: "flex", alignItems: "center", gap: 6 })}>
-                    <Trash2 size={13} /> Yes, Destroy
+                    <Trash2 size={13} /> Sí, Eliminar
                 </button>
             </div>
         </div>

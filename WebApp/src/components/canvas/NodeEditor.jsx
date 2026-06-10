@@ -106,7 +106,7 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, onSave, onDelet
                         ? <Settings2 size={14} color={T.accent} />
                         : <Settings size={14} color={T.accent} />}
                     <span style={{ fontSize: 12, fontWeight: 800, color: T.accent }}>
-                        {isReadOnly ? "Control de Nodo" : "Node Properties"}
+                        {isReadOnly ? "Control de Nodo" : "Propiedades del Nodo"}
                     </span>
                 </div>
                 <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: T.textMuted, padding: "2px", display: "flex", alignItems: "center" }}>
@@ -127,18 +127,18 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, onSave, onDelet
                 {activeTab === "props" && (
                     <div style={{ display: "flex", flexDirection: "column", gap: 11 }}>
                         <div>
-                            <Label>VM Name</Label>
+                            <Label>Nombre de la VM</Label>
                             <input value={f.label} disabled={isReadOnly} onChange={e => u("label", e.target.value)} style={inp} />
                         </div>
                         <div>
-                            <Label>OS Image</Label>
+                            <Label>Imagen de S.O.</Label>
                             <select value={f.image_id || ""} disabled={isReadOnly}
                                 onChange={e => {
                                     const id = Number(e.target.value);
                                     const name = availableImages.find(i => i.id === id)?.name;
                                     setF(p => ({ ...p, image_id: id, image: name }));
                                 }} style={inp}>
-                                <option value="" disabled>Select an OS…</option>
+                                <option value="" disabled>Seleccione un S.O.…</option>
                                 {availableImages?.map(i => <option key={i.id} value={i.id}>{i.name}</option>)}
                             </select>
                         </div>
@@ -172,7 +172,7 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, onSave, onDelet
                         )}
 
                         <div style={{ background: T.surfaceElevated, borderRadius: 9, padding: "10px 12px", border: `1px solid ${T.border}` }}>
-                            <Label>Resources</Label>
+                            <Label>Recursos</Label>
                             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
                                 {[["vcores","vCPU",1,16,1],["ram","RAM MB",128,16384,128],["disk","Disk GB",1,500,1]].map(([k,l,mn,mx,st]) => (
                                     <div key={k}>
@@ -347,7 +347,7 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, onSave, onDelet
                         <button onClick={() => { onSave(f); onClose(); }}
                             style={btnBase({ flex: 1, background: T.accent, color: "#fff", border: "none",
                                 display: "flex", alignItems: "center", justifyContent: "center", gap: 6 })}>
-                            <Save size={14} /> Save
+                            <Save size={14} /> Guardar
                         </button>
                         <button onClick={() => { onDelete(node.id); onClose(); }}
                             style={btnBase({ background: T.redLight, color: T.red, border: `1px solid ${T.red}33`,

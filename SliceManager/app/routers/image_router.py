@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Image, Vm
 from app.services.gc_scheduler import run_gc_cycle
+from app.auth import CurrentUser, get_current_user, require_roles
 
 logger = logging.getLogger("SliceManager.Images")
 
@@ -77,9 +78,16 @@ def _delete_file_via_ssh(file_path: str) -> None:
 # ── Endpoints ────────────────────────────────────────────────────────────────
 
 @router.get("/", status_code=200)
-def list_images(db: Session = Depends(get_db)):
-    """Lista todas las imágenes con información de uso."""
-    images = db.query(Image).filter(Image.is_general.isnot(None)).all()
+def list_images(db: Session = Depends(get_db), current_user: CurrentUser = Depends(get_current_user)):
+    """Lista todas las imágenes con información de uso (filtrado por rol/dueño)."""
+    if current_user.can_manage_all():
+        images = db.query(Image).filter(Image.is_general.isnot(None)).all()
+    else:
+        images = db.query(Image).filter(
+            Image.is_general.isnot(None),
+            (Image.is_general == 1) | (Image.user_id == current_user.user_id)
+        ).all()
+
     if not images:
         return []
 
@@ -103,19 +111,30 @@ def list_images(db: Session = Depends(get_db)):
 
 
 @router.get("/unused", status_code=200)
-def get_unused_images(db: Session = Depends(get_db)):
-    """Imágenes de usuario sin VMs activas — candidatas al GC."""
+def get_unused_images(db: Session = Depends(get_db), current_user: CurrentUser = Depends(get_current_user)):
+    """Imágenes de usuario sin VMs activas — candidatas al GC (filtrado por dueño)."""
     used_ids_query = (
         db.query(Vm.image_id)
         .filter(Vm.image_id.isnot(None), Vm.state.in_(_ACTIVE_VM_STATES))
         .distinct()
     )
 
-    unused = (
-        db.query(Image)
-        .filter(Image.id.notin_(used_ids_query), Image.is_general == 0)
-        .all()
-    )
+    if current_user.can_manage_all():
+        unused = (
+            db.query(Image)
+            .filter(Image.id.notin_(used_ids_query), Image.is_general == 0)
+            .all()
+        )
+    else:
+        unused = (
+            db.query(Image)
+            .filter(
+                Image.id.notin_(used_ids_query),
+                Image.is_general == 0,
+                Image.user_id == current_user.user_id
+            )
+            .all()
+        )
 
     return [
         {
@@ -134,8 +153,16 @@ async def upload_image(
     is_general: int = Form(0),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
 ):
     """Sube un archivo de imagen al NFS y lo registra en BD."""
+    # Validación de rol: solo admins/superadmins pueden crear imágenes generales
+    if is_general == 1 and not current_user.can_manage_all():
+        raise HTTPException(
+            status_code=403,
+            detail="Solo administradores pueden registrar imágenes generales del sistema.",
+        )
+
     allowed = (".qcow2", ".img", ".iso")
     if not any(file.filename.lower().endswith(ext) for ext in allowed):
         raise HTTPException(
@@ -170,9 +197,15 @@ async def upload_image(
         )
 
     if existing and existing.is_general is None:
-        # Reactivar registro soft-deleted
+        # Reactivar registro soft-deleted: validamos propiedad o rol admin
+        if existing.user_id != current_user.user_id and not current_user.can_manage_all():
+            raise HTTPException(
+                status_code=403,
+                detail="No tiene permisos para modificar o reactivar esta imagen.",
+            )
         existing.name = name
         existing.is_general = is_general
+        existing.user_id = current_user.user_id
         existing.date_uploaded = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         db.commit()
         db.refresh(existing)
@@ -185,7 +218,7 @@ async def upload_image(
         }
 
     nueva_imagen = Image(
-        user_id="user-123",
+        user_id=current_user.user_id,
         name=name,
         date_uploaded=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
         is_general=is_general,
@@ -205,7 +238,7 @@ async def upload_image(
 
 
 @router.delete("/{image_id}", status_code=200)
-def delete_image(image_id: int, db: Session = Depends(get_db)):
+def delete_image(image_id: int, db: Session = Depends(get_db), current_user: CurrentUser = Depends(get_current_user)):
     """
     Elimina una imagen de disco y BD.
     Bloquea si hay VMs activas usando la imagen o si es imagen base.
@@ -213,6 +246,13 @@ def delete_image(image_id: int, db: Session = Depends(get_db)):
     img = db.query(Image).filter(Image.id == image_id).first()
     if not img:
         raise HTTPException(status_code=404, detail="Imagen no encontrada")
+
+    # Validar propiedad (solo dueño o administradores)
+    if img.user_id != current_user.user_id and not current_user.can_manage_all():
+        raise HTTPException(
+            status_code=403,
+            detail="No tiene permisos para eliminar esta imagen de otro usuario.",
+        )
 
     if img.is_general == 1:
         raise HTTPException(
@@ -252,12 +292,15 @@ def delete_image(image_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/gc/run", status_code=200)
-def run_gc_now(background_tasks: BackgroundTasks):
+def run_gc_now(
+    background_tasks: BackgroundTasks,
+    current_user: CurrentUser = Depends(require_roles("admin", "superAdmin")),
+):
     """
     Dispara un ciclo de Garbage Collection inmediatamente en background.
     Limpia ISOs de cloud-init y discos QCOW2 huerfanos en todos los workers.
     """
     background_tasks.add_task(run_gc_cycle)
-    logger.info("[GC] Ciclo manual disparado desde la API.")
+    logger.info("[GC] Ciclo manual disparado desde la API por %s.", current_user.user_id)
     return {"message": "Ciclo de GC iniciado en background. Revisa los logs para ver el resultado."}
 

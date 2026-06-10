@@ -1,4 +1,4 @@
-﻿import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 
 // Theme
 import { T, btnBase, getGlobalCss } from "./theme/tokens";
@@ -9,6 +9,7 @@ import { Label }       from "./components/ui/Label";
 import { Toast }       from "./components/ui/Toast";
 import { UserAvatar }  from "./components/ui/UserAvatar";
 import { ThemePicker } from "./components/ui/ThemePicker";
+import { AzureVm }     from "./components/ui/AzureIcons";
 import {
     Cloud, Monitor, Wrench, ChevronDown,
     LayoutList, Image,
@@ -36,11 +37,10 @@ import { ConsoleModal }   from "./components/modals/ConsoleModal";
 
 // Utilities
 import { mkSlice, refreshMeta } from "./utils/topology";
+import { createApiFetch }       from "./utils/api";
 
 // Profile
 import { ProfilePage } from "./components/profile/ProfilePage";
-
-const API_BASE = "http://localhost:8085/api/v1";
 
 // ─── ROOT ─────────────────────────────────────────────────────────────────────
 export default function App() {
@@ -49,7 +49,10 @@ export default function App() {
     // IMPORTANT: useAuth must be called first, but ALL other hooks below must
     // also be declared unconditionally (Rules of Hooks).
     // The early return for unauthenticated users happens AFTER all hooks.
-    const { isAuthenticated, user, login, logout, isDemoMode } = useAuth();
+    const { isAuthenticated, user, token, login, logout, isDemoMode } = useAuth();
+
+    // ── apiFetch — fetch autenticado (añade Bearer token automáticamente) ─────
+    const apiFetch = useMemo(() => createApiFetch(token), [token]);
 
     // ── View — "canvas" | "profile" ───────────────────────────────────────────
     const [view, setView] = useState("canvas");
@@ -86,21 +89,22 @@ export default function App() {
     // ── Data fetching — skip when not authenticated ───────────────────────────
     const fetchSlices = async () => {
         try {
-            const res = await fetch(`${API_BASE}/slices`);
+            const res = await apiFetch("/slices");
             if (res.ok) setSlices(await res.json());
+            else if (res.status === 401) logout();
         } catch (e) { console.error("fetchSlices:", e); }
     };
 
     const fetchImageList = async () => {
         try {
-            const res = await fetch(`${API_BASE}/slices/utils/images`);
+            const res = await apiFetch("/slices/utils/images");
             if (res.ok) setImageList(await res.json());
         } catch (e) { console.error("fetchImageList:", e); }
     };
 
     const fetchFullImages = async () => {
         try {
-            const res = await fetch(`${API_BASE}/slices/utils/images/`);
+            const res = await apiFetch("/slices/utils/images/");
             if (res.ok) setFullImages(await res.json());
         } catch (e) { console.error("fetchFullImages:", e); }
     };
@@ -126,11 +130,11 @@ export default function App() {
         const sl = slices.find(s => s.id === id);
         setModal({
             type: "confirm",
-            title: "Destroy Slice",
-            msg: `Are you sure you want to destroy "${sl?.name}"?`,
+            title: "Eliminar Slice",
+            msg: `¿Está seguro de que desea eliminar "${sl?.name}"?`,
             onOk: async () => {
                 try {
-                    const res  = await fetch(`${API_BASE}/slices/${id}`, { method: "DELETE" });
+                    const res  = await apiFetch(`/slices/${id}`, { method: "DELETE" });
                     if (!res.ok) throw new Error();
                     const data = await res.json();
                     if (data.status === "DELETED") {
@@ -155,17 +159,15 @@ export default function App() {
                 image:    n.image    || defaultImg.name,
             }));
 
-            const resDraft = await fetch(`${API_BASE}/slices/draft`, {
+            const resDraft = await apiFetch("/slices/draft", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ name, slice_json: { nodes: processedNodes, edges } }),
             });
             if (!resDraft.ok) throw new Error();
             const { slice_id: newSliceId } = await resDraft.json();
 
-            const resDeploy = await fetch(`${API_BASE}/slices/${newSliceId}/deploy`, {
+            const resDeploy = await apiFetch(`/slices/${newSliceId}/deploy`, {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ availability_zone_id: 1, ttl_hours: 4, motivo: "Despliegue directo desde Canvas" }),
             });
             if (!resDeploy.ok) throw new Error();
@@ -187,9 +189,8 @@ export default function App() {
                 image_id: n.image_id || defaultImg.id,
                 image:    n.image    || defaultImg.name,
             }));
-            const res = await fetch(`${API_BASE}/slices/draft`, {
+            const res = await apiFetch("/slices/draft", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ name, slice_json: { nodes: processedNodes, edges } }),
             });
             if (!res.ok) throw new Error();
@@ -199,15 +200,14 @@ export default function App() {
             setSlices(p => [sl, ...p]);
             setNodes([]); setEdges([]);
             setModal(null);
-            flash(`"${name}" saved as draft`);
+            flash(`"${name}" guardado como borrador`);
         } catch { flash("Error de conexión con el servidor", "error"); }
     };
 
     const deployDraft = async (id) => {
         try {
-            const res = await fetch(`${API_BASE}/slices/${id}/deploy`, {
+            const res = await apiFetch(`/slices/${id}/deploy`, {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ availability_zone: "Linux Cluster", ttl_hours: 4, motivo: "Despliegue desde la UI" }),
             });
             if (!res.ok) throw new Error();
@@ -336,13 +336,13 @@ export default function App() {
                             <div style={{ maxHeight: 300, overflowY: "auto", borderTop: `1px solid ${T.border}` }}>
                                 {/* VM Drag */}
                                 <div style={{ padding: "12px 14px 10px" }}>
-                                    <Label>Drag VM to canvas</Label>
+                                    <Label>Arrastra una VM al lienzo</Label>
                                     <div draggable onDragStart={e => e.dataTransfer.setData("nodeType", "vm")}
                                         style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", background: T.surfaceElevated, border: `1.5px dashed ${T.borderHover}`, borderRadius: 10, cursor: "grab" }}>
-                                        <Monitor size={20} color={T.accent} />
+                                        <AzureVm size={24} />
                                         <div>
-                                            <div style={{ fontSize: 12, fontWeight: 700, color: T.text }}>Virtual Machine</div>
-                                            <div style={{ fontSize: 10, color: T.textMuted }}>Configurable node</div>
+                                            <div style={{ fontSize: 12, fontWeight: 700, color: T.text }}>Máquina Virtual</div>
+                                            <div style={{ fontSize: 10, color: T.textMuted }}>Nodo configurable</div>
                                         </div>
                                     </div>
                                 </div>
@@ -375,11 +375,11 @@ export default function App() {
                 {sidebarTab === "slices" && (
                     <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
                         <div style={{ padding: "12px 16px 8px", display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
-                            <Label style={{ marginBottom: 0 }}>My Slices <span style={{ color: T.accent, marginLeft: 5 }}>{slices.length}</span></Label>
+                            <Label style={{ marginBottom: 0 }}>Mis Slices <span style={{ color: T.accent, marginLeft: 5 }}>{slices.length}</span></Label>
                             <button onClick={() => setActiveId(null)}
                                 style={btnBase({ padding: "4px 10px", fontSize: 10, background: T.accentLight, color: T.accent, border: `1px solid ${T.accent}44`, boxShadow: "none",
                                     display: "flex", alignItems: "center", gap: 4 })}>
-                                <Plus size={11} /> New
+                                <Plus size={11} /> Nuevo
                             </button>
                         </div>
                         <div style={{ flex: 1, overflowY: "auto", padding: "0 10px 12px", display: "flex", flexDirection: "column", gap: 8 }}>
@@ -389,7 +389,7 @@ export default function App() {
                                     onDestroy={destroySlice}
                                     onDeploy={deployDraft} />
                             ))}
-                            {slices.length === 0 && <div style={{ color: T.textFaint, fontSize: 12, textAlign: "center", padding: 16 }}>No slices yet</div>}
+                            {slices.length === 0 && <div style={{ color: T.textFaint, fontSize: 12, textAlign: "center", padding: 16 }}>Aún no hay slices</div>}
                         </div>
                     </div>
                 )}
@@ -397,7 +397,7 @@ export default function App() {
                 {/* Images tab */}
                 {sidebarTab === "images" && (
                     <div style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
-                        <ImagePanel fullImages={fullImages} onRefresh={fetchFullImages} flash={flash} refreshImageList={fetchImageList} />
+                        <ImagePanel fullImages={fullImages} onRefresh={fetchFullImages} flash={flash} refreshImageList={fetchImageList} apiFetch={apiFetch} user={user} />
                     </div>
                 )}
             </div>
@@ -411,7 +411,7 @@ export default function App() {
                         <>
                             <button onClick={() => setActiveId(null)}
                                 style={btnBase({ padding: "5px 12px", fontSize: 11, boxShadow: "none", display: "flex", alignItems: "center", gap: 5 })}>
-                                <ArrowLeft size={13} /> Back
+                                <ArrowLeft size={13} /> Volver
                             </button>
                             <div style={{ width: 1, height: 22, background: T.border }} />
                             <span style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{activeSlice.name}</span>
@@ -420,13 +420,13 @@ export default function App() {
                             {activeSlice.status === "DRAFT" && (
                                 <button onClick={() => deployDraft(activeSlice.id)}
                                     style={btnBase({ fontSize: 12, padding: "6px 16px", background: T.accent, color: "#fff", border: "none", boxShadow: `0 3px 12px ${T.accent}44`, display: "flex", alignItems: "center", gap: 6 })}>
-                                    <Zap size={13} /> Deploy
+                                    <Zap size={13} /> Desplegar
                                 </button>
                             )}
                             {activeSlice.status !== "TERMINATED" && (
                                 <button onClick={() => destroySlice(activeSlice.id)}
                                     style={btnBase({ fontSize: 12, padding: "6px 14px", background: T.redLight, color: T.red, border: `1px solid ${T.red}33`, boxShadow: "none", display: "flex", alignItems: "center", gap: 6 })}>
-                                    <Flame size={13} /> Destroy
+                                    <Flame size={13} /> Eliminar
                                 </button>
                             )}
                             <div style={{ width: 1, height: 22, background: T.border }} />
@@ -435,8 +435,8 @@ export default function App() {
                         </>
                     ) : (
                         <>
-                            <span style={{ fontSize: 14, fontWeight: 700, color: T.text }}>Topology Designer</span>
-                            <span style={{ fontSize: 11, color: T.textMuted }}>— New Slice</span>
+                            <span style={{ fontSize: 14, fontWeight: 700, color: T.text }}>Diseñador de Topología</span>
+                            <span style={{ fontSize: 11, color: T.textMuted }}>— Nuevo Slice</span>
                             <div style={{ flex: 1 }} />
                             <ThemePicker onThemeChange={reTheme} />
                             <label style={btnBase({ fontSize: 12, padding: "6px 14px", background: T.surface, color: T.text, boxShadow: "none", cursor: "pointer", display: "flex", alignItems: "center", gap: 6 })}>
@@ -453,13 +453,13 @@ export default function App() {
                             {nodes.length > 0 && (
                                 <button onClick={() => setModal("draft")}
                                     style={btnBase({ fontSize: 12, padding: "6px 14px", background: T.surfaceElevated, color: T.textMuted, boxShadow: "none", display: "flex", alignItems: "center", gap: 6 })}>
-                                    <Save size={13} /> Save Draft
+                                    <Save size={13} /> Guardar Borrador
                                 </button>
                             )}
                             <button
-                                onClick={() => nodes.length > 0 ? setModal("deploy") : flash("Add at least one VM first", "error")}
+                                onClick={() => nodes.length > 0 ? setModal("deploy") : flash("Agregue al menos una VM primero", "error")}
                                 style={btnBase({ fontSize: 13, fontWeight: 700, padding: "7px 20px", background: T.accent, color: "#fff", border: "none", boxShadow: `0 4px 16px ${T.accent}44`, display: "flex", alignItems: "center", gap: 6 })}>
-                                <Zap size={14} /> Deploy Slice
+                                <Zap size={14} /> Desplegar Slice
                             </button>
                             <div style={{ width: 1, height: 22, background: T.border }} />
                             <UserAvatar user={user} onLogout={logout} onProfile={() => setView("profile")} />

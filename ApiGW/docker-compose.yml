@@ -7,10 +7,12 @@ services:
       SLICE_MANAGER_URL: http://slice-manager:8000
       FORWARD_TIMEOUT:   30.0
       LOG_LEVEL:         INFO
-      # ── JWT (desactivado — activar cuando Keycloak esté listo) ──
-      JWT_ENABLED:       "false"
-      JWT_JWKS_URL:      ""
-      JWT_ISSUER:        ""
+      # ── JWT — Keycloak ──────────────────────────────────────────
+      # JWT_JWKS_URL: usa nombre de servicio Docker (red interna)
+      # JWT_ISSUER:   debe coincidir con KC_HOSTNAME_URL de Keycloak
+      JWT_ENABLED:       "true"
+      JWT_JWKS_URL:      "http://keycloak:8080/realms/pucp-cloud/protocol/openid-connect/certs"
+      JWT_ISSUER:        "http://10.20.11.212:8086/realms/pucp-cloud"
       JWT_AUDIENCE:      ""
       # ── VNC SSH Tunnel ──────────────────────────────────────────
       VNC_SSH_KEY_PATH:  /app/keys/id_ed25519
@@ -19,7 +21,8 @@ services:
       - "8085:8080"
     volumes:
       # Claves SSH para el túnel VNC a través del gateway
-      - ../SliceManager/keys:/app/keys:ro
+      # Ruta absoluta en la VM — las claves viven fuera del repo
+      - /home/ubuntu/SliceManager/keys:/app/keys:ro
     networks:
       - pucp_cloud_net
 

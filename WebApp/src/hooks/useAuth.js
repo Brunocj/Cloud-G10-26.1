@@ -1,36 +1,17 @@
 import { useState, useCallback } from "react";
 
-// ─── Config ──────────────────────────────────────────────────────────────────
+// ─── Config (desde variables de entorno Vite) ─────────────────────────────────
+const KEYCLOAK_URL    = import.meta.env.VITE_KEYCLOAK_URL       ?? "http://10.20.11.212:8086";
+const REALM           = import.meta.env.VITE_KEYCLOAK_REALM     ?? "pucp-cloud";
+const CLIENT_ID       = import.meta.env.VITE_KEYCLOAK_CLIENT_ID ?? "pucp-cloud-webapp";
+const DEMO_MODE       = import.meta.env.VITE_DEMO_MODE === "true";
+
+const TOKEN_URL = `${KEYCLOAK_URL}/realms/${REALM}/protocol/openid-connect/token`;
 
 const TOKEN_KEY = "pucp_cloud_token";
 const USER_KEY  = "pucp_cloud_user";
-const API_BASE  = "http://localhost:8085/api/v1";
 
-/**
- * DEMO_MODE — set to true while Keycloak is not yet deployed.
- *
- * When true:
- *   - Skips the real API call.
- *   - Accepts  demo@pucp.edu.pe / pucp2026  as valid credentials.
- *   - Any other combo → "invalid".
- *
- * When Keycloak is ready, set to false (or use an env var).
- * The rest of the code does NOT change.
- */
-const DEMO_MODE = true;
-
-const DEMO_CREDENTIALS = {
-    email:    "demo@pucp.edu.pe",
-    password: "pucp2026",
-};
-
-const DEMO_USER = {
-    name:  "Demo PUCP",
-    email: "demo@pucp.edu.pe",
-    role:  "Investigador",
-};
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── Helpers de almacenamiento ────────────────────────────────────────────────
 
 const readStoredUser = () => {
     try { return JSON.parse(localStorage.getItem(USER_KEY)); } catch { return null; }
@@ -46,7 +27,32 @@ const clear = () => {
     localStorage.removeItem(USER_KEY);
 };
 
-// ─── Demo login (no Keycloak needed) ─────────────────────────────────────────
+// ─── JWT decoder (sin verificar firma — solo para extraer payload) ─────────────
+
+const decodeJwtPayload = (token) => {
+    try {
+        const base64 = token.split(".")[1]
+            .replace(/-/g, "+")
+            .replace(/_/g, "/");
+        return JSON.parse(atob(base64));
+    } catch {
+        return {};
+    }
+};
+
+// Extrae el rol de mayor prioridad del JWT
+const ROLE_PRIORITY = ["usuario", "jefeProyecto", "admin", "superAdmin"];
+const extractTopRole = (roles = []) => {
+    const known = roles.filter(r => ROLE_PRIORITY.includes(r));
+    if (!known.length) return "usuario";
+    known.sort((a, b) => ROLE_PRIORITY.indexOf(b) - ROLE_PRIORITY.indexOf(a));
+    return known[0];
+};
+
+// ─── Demo mode (sin Keycloak) ─────────────────────────────────────────────────
+
+const DEMO_CREDENTIALS = { email: "demo@pucp.edu.pe", password: "pucp2026" };
+const DEMO_USER = { name: "Demo PUCP", email: "demo@pucp.edu.pe", role: "usuario" };
 
 const demoLogin = ({ email, password }) => {
     if (
@@ -60,36 +66,49 @@ const demoLogin = ({ email, password }) => {
     return { success: false, reason: "invalid" };
 };
 
-// ─── Keycloak / real API login ────────────────────────────────────────────────
-//
-// Keycloak OIDC token endpoint (Resource Owner Password Credentials grant):
-//   POST /realms/{realm}/protocol/openid-connect/token
-//   Content-Type: application/x-www-form-urlencoded
-//   Body: grant_type=password&client_id=...&username=...&password=...
-//
-// The ApiGW proxies this via identity.py → /api/v1/auth/**
-// Future: replace with Authorization Code flow (PKCE) for production.
-//
+// ─── Keycloak login (Resource Owner Password Credentials) ─────────────────────
+
 const keycloakLogin = async ({ email, password }) => {
     try {
-        const res  = await fetch(`${API_BASE}/auth/login`, {
-            method:  "POST",
-            headers: { "Content-Type": "application/json" },
-            body:    JSON.stringify({ email, password }),
+        const body = new URLSearchParams({
+            grant_type: "password",
+            client_id:  CLIENT_ID,
+            username:   email.trim(),  // Keycloak acepta email o username
+            password:   password,
         });
 
-        const data = await res.json().catch(() => ({}));
+        const res = await fetch(TOKEN_URL, {
+            method:  "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body:    body.toString(),
+        });
 
-        if (res.status === 403) return { success: false, reason: "pending" };
-        if (!res.ok)            return { success: false, reason: "invalid" };
+        if (res.status === 401) return { success: false, reason: "invalid" };
+        if (!res.ok)           return { success: false, reason: "network" };
 
-        const token = data.access_token ?? data.token ?? "";
-        const user  = data.user ?? { name: data.name ?? email, email, role: data.role ?? "Investigador" };
+        const data = await res.json();
+        const accessToken = data.access_token;
 
-        persist(token, user);
-        return { success: true, token, user };
+        // Decodificar payload del JWT para obtener info del usuario
+        const payload = decodeJwtPayload(accessToken);
+        const roles   = payload?.realm_access?.roles ?? [];
+        const topRole = extractTopRole(roles);
 
-    } catch {
+        const user = {
+            id:       payload.sub,
+            name:     payload.name ?? payload.preferred_username ?? email,
+            email:    payload.email ?? email,
+            username: payload.preferred_username ?? email,
+            role:     topRole,
+            // Guardar todos los roles para referencia
+            allRoles: roles.filter(r => ROLE_PRIORITY.includes(r)),
+        };
+
+        persist(accessToken, user);
+        return { success: true, token: accessToken, user };
+
+    } catch (err) {
+        console.error("keycloakLogin error:", err);
         return { success: false, reason: "network" };
     }
 };
@@ -97,13 +116,15 @@ const keycloakLogin = async ({ email, password }) => {
 // ─── Hook ─────────────────────────────────────────────────────────────────────
 
 /**
- * useAuth — manages authentication state across the app.
+ * useAuth — gestiona el estado de autenticación con Keycloak.
  *
- * Switch to Keycloak:
- *   1. Set DEMO_MODE = false (or read from import.meta.env.VITE_DEMO_MODE)
- *   2. Register identity.py router in ApiGW/main.py
- *   3. Configure KEYCLOAK_URL in ApiGW docker-compose / .env
- *   4. (Optional) Migrate to PKCE Authorization Code flow for production
+ * Expone:
+ *   token          → JWT access_token (para adjuntar en requests)
+ *   user           → { id, name, email, role, allRoles }
+ *   isAuthenticated
+ *   login(credentials)  → { success, reason? }
+ *   logout()
+ *   isDemoMode
  */
 export const useAuth = () => {
     const [token, setToken] = useState(() => localStorage.getItem(TOKEN_KEY));

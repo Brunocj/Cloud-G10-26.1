@@ -22,6 +22,8 @@ export {
     Menu,
     MousePointer2,
     Maximize2,
+    ZoomIn,
+    ZoomOut,
 
     // Actions
     Plus,

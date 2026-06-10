@@ -1,0 +1,50 @@
+# ============================================================
+#  Keycloak — Identity & Access Management
+#  Puerto externo (admin): 8086
+#  Puerto interno (red Docker): 8080
+# ============================================================
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0.4
+    container_name: keycloak
+    restart: unless-stopped
+    command: start-dev --import-realm
+    environment:
+      # ── Credenciales del admin ──────────────────────────────
+      KEYCLOAK_ADMIN:          admin
+      KEYCLOAK_ADMIN_PASSWORD: admin123
+
+      # ── Base URL pública (para que los tokens tengan el issuer correcto) ──
+      # Esta IP es la de la VM donde corren los contenedores.
+      # El campo `iss` del JWT llevará esta URL — debe ser accesible
+      # tanto desde el browser del alumno como desde el API Gateway.
+      KC_HOSTNAME_URL:         http://10.20.11.212:8086
+      KC_HOSTNAME_ADMIN_URL:   http://10.20.11.212:8086
+
+      # ── Configuración HTTP ──────────────────────────────────
+      KC_HTTP_ENABLED:         "true"
+      KC_HOSTNAME_STRICT:      "false"
+
+      # ── Health checks ───────────────────────────────────────
+      KC_HEALTH_ENABLED:       "true"
+
+    ports:
+      - "8086:8080"          # Admin Console accesible en http://10.20.11.212:8086
+
+    volumes:
+      # El realm exportado se importa automáticamente al arrancar con --import-realm
+      - ./realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+
+    networks:
+      - pucp_cloud_net
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health/ready || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+networks:
+  pucp_cloud_net:
+    external: true

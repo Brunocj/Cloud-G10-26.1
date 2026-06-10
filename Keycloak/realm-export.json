@@ -1,0 +1,187 @@
+{
+  "id": "pucp-cloud",
+  "realm": "pucp-cloud",
+  "displayName": "PUCP Cloud Orchestrator",
+  "displayNameHtml": "<b>PUCP</b> Cloud Orchestrator",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": true,
+  "editUsernameAllowed": false,
+  "bruteForceProtected": false,
+  "accessTokenLifespan": 3600,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
+  "roles": {
+    "realm": [
+      {
+        "name": "superAdmin",
+        "description": "Puede gestionar todo, infraestrucutura física por ejemplo",
+        "composite": false,
+        "clientRole": false,
+        "containerId": "pucp-cloud"
+      },
+      {
+        "name": "admin",
+        "description": "Puede gestionar usuarios, recursos globales y overrides",
+        "composite": false,
+        "clientRole": false,
+        "containerId": "pucp-cloud"
+      },
+      {
+        "name": "jefeProyecto",
+        "description": "Puede crear y gestionar slices de su curso, ver métricas",
+        "composite": false,
+        "clientRole": false,
+        "containerId": "pucp-cloud"
+      },
+      {
+        "name": "usuario",
+        "description": "Usuarios en general, pueden crear slices y gestionar su VM",
+        "composite": false,
+        "clientRole": false,
+        "containerId": "pucp-cloud"
+      }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "pucp-cloud-webapp",
+      "name": "PUCP Cloud WebApp",
+      "description": "Cliente público para la SPA React",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "http://localhost:5173/*",
+        "http://localhost:8085/*",
+        "http://10.20.11.212:5173/*",
+        "http://10.20.11.212:8085/*"
+      ],
+      "webOrigins": [
+        "http://localhost:5173",
+        "http://localhost:8085",
+        "http://10.20.11.212:5173",
+        "http://10.20.11.212:8085"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      },
+      "protocol": "openid-connect",
+      "fullScopeAllowed": true
+    },
+    {
+      "clientId": "pucp-cloud-api",
+      "name": "PUCP Cloud API (Backend)",
+      "description": "Cliente confidencial para el API Gateway — verifica tokens",
+      "enabled": true,
+      "publicClient": false,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "bearerOnly": true,
+      "protocol": "openid-connect",
+      "fullScopeAllowed": true
+    }
+  ],
+  "clientScopes": [
+    {
+      "name": "roles",
+      "description": "Incluye los roles del realm en el token",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "true"
+      },
+      "protocolMappers": [
+        {
+          "name": "realm roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "multivalued": "true",
+            "userinfo.token.claim": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "realm_access.roles",
+            "jsonType.label": "String"
+          }
+        }
+      ]
+    }
+  ],
+  "defaultDefaultClientScopes": [
+    "roles",
+    "profile",
+    "email",
+    "web-origins"
+  ],
+  "users": [
+    {
+      "username": "superadmin.pucp",
+      "email": "superadmin@pucp.edu.pe",
+      "firstName": "Super",
+      "lastName": "Admin",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        { "type": "password", "value": "Super123!", "temporary": false }
+      ],
+      "realmRoles": ["superAdmin"]
+    },
+    {
+      "username": "admin.pucp",
+      "email": "admin@pucp.edu.pe",
+      "firstName": "Admin",
+      "lastName": "PUCP",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        { "type": "password", "value": "Admin123!", "temporary": false }
+      ],
+      "realmRoles": ["admin"]
+    },
+    {
+      "username": "jefe.garcia",
+      "email": "garcia@pucp.edu.pe",
+      "firstName": "Carlos",
+      "lastName": "García",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        { "type": "password", "value": "Jefe123!", "temporary": false }
+      ],
+      "realmRoles": ["jefeProyecto"]
+    },
+    {
+      "username": "usuario.lopez",
+      "email": "lopez@pucp.edu.pe",
+      "firstName": "María",
+      "lastName": "López",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        { "type": "password", "value": "Usuario123!", "temporary": false }
+      ],
+      "realmRoles": ["usuario"]
+    },
+    {
+      "username": "usuario.torres",
+      "email": "torres@pucp.edu.pe",
+      "firstName": "Pedro",
+      "lastName": "Torres",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        { "type": "password", "value": "Usuario123!", "temporary": false }
+      ],
+      "realmRoles": ["usuario"]
+    }
+  ]
+}

@@ -79,13 +79,12 @@ class Image(Base):
     __tablename__ = 'images'
 
     id = Column(Integer, primary_key=True)
-    user_id = Column(ForeignKey('users.id'), index=True)
+    # user_id almacena el UUID de Keycloak (sub del JWT)
+    user_id = Column(String(100), index=True)
     name = Column(String(45))
     date_uploaded = Column(String(100))
     is_general = Column(TINYINT)
     path = Column(String(150))
-
-    user = relationship('User')
 
 
 class Slice(Base):
@@ -100,11 +99,12 @@ class Slice(Base):
     date_destruction = Column(String(45))
     date_deployed = Column(String(45))
     project_id = Column(ForeignKey('projects.id'), index=True)
-    creator_id = Column(ForeignKey('users.id'), index=True)
+    # creator_id almacena el UUID de Keycloak (sub del JWT).
+    # Ya NO es FK hacia users — Keycloak es la fuente de verdad de identidad.
+    creator_id = Column(String(100), index=True)
     slice_json = Column(MutableDict.as_mutable(JSON))
 
     availability_zone = relationship('AvailabilityZone')
-    creator = relationship('User')
     project = relationship('Project')
 
 

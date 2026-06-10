@@ -22,7 +22,7 @@ export const SliceCard = ({ slice, active, onClick, onDestroy, onDeploy }) => (
                 <button
                     onClick={e => { e.stopPropagation(); onDestroy(slice.id); }}
                     style={{ background: "none", border: "none", cursor: "pointer", color: T.textMuted, padding: 4, display: "flex" }}
-                    title="Destroy slice">
+                    title="Eliminar slice">
                     <Trash2 size={15} />
                 </button>
             )}
@@ -30,7 +30,7 @@ export const SliceCard = ({ slice, active, onClick, onDestroy, onDeploy }) => (
 
         {/* Stats grid */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 5, marginTop: 6 }}>
-            {[["VMs", slice.nodeCount], ["Links", slice.edgeCount], ["vCPU", slice.vcpus], ["RAM", slice.ramLabel]].map(([l, v]) => (
+            {[["VMs", slice.nodeCount], ["Enlaces", slice.edgeCount], ["vCPU", slice.vcpus], ["RAM", slice.ramLabel]].map(([l, v]) => (
                 <div key={l} style={{ textAlign: "center", background: T.surfaceElevated, borderRadius: 6, padding: "5px 2px", border: `1px solid ${T.border}` }}>
                     <div style={{ fontSize: 13, fontWeight: 800, color: T.accent }}>{v}</div>
                     <div style={{ fontSize: 8, color: T.textMuted, textTransform: "uppercase" }}>{l}</div>
@@ -44,7 +44,7 @@ export const SliceCard = ({ slice, active, onClick, onDestroy, onDeploy }) => (
                 onClick={e => { e.stopPropagation(); onDeploy(slice.id); }}
                 style={btnBase({ width: "100%", marginTop: 10, background: T.accent, color: "#fff", border: "none", padding: "7px 0", fontSize: 12,
                     display: "flex", alignItems: "center", justifyContent: "center", gap: 6 })}>
-                <Zap size={13} /> Request Deployment
+                <Zap size={13} /> Solicitar Despliegue
             </button>
         )}
     </div>

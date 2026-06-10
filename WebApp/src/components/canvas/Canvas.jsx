@@ -2,7 +2,8 @@ import { useState, useRef } from "react";
 import { T, btnBase } from "../../theme/tokens";
 import { buildLinear, buildRing, buildMesh, buildTree, buildBus, mkNode } from "../../utils/topology";
 import { NodeEditor } from "./NodeEditor";
-import { MousePointer2, Link2, Monitor, Trash2, Maximize2, AlertTriangle } from "../ui/Icon";
+import { MousePointer2, Link2, Monitor, Trash2, Maximize2, AlertTriangle, ZoomIn, ZoomOut } from "../ui/Icon";
+import { AzureVm, AzureNetwork, UbuntuLogo, WindowsLogo } from "../ui/AzureIcons";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -21,20 +22,23 @@ const buildIfaceMap = (edges) => {
 // ─── Canvas ──────────────────────────────────────────────────────────────────
 export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlice, onOpenConsole }) => {
     const svgRef   = useRef();
-    const groupRef = useRef();           // root <g> — updated imperatively during pan
+    const groupRef = useRef();           // root <g> — updated imperatively during pan/zoom
 
     const [mode,     setMode]     = useState("select");
     const [linkFrom, setLinkFrom] = useState(null);
     const [mouse,    setMouse]    = useState({ x: 0, y: 0 }); // world coords, for link preview
     const [editId,   setEditId]   = useState(null);
 
-    // Pan offset – stored in a ref for zero-latency imperative updates;
-    // committed to state only on pointerup so React can re-render consistently.
+    // Pan and Zoom – stored in refs for zero-latency imperative updates;
+    // committed to state only on pointerup/wheel/buttons so React can re-render consistently.
     const panRef  = useRef({ x: 0, y: 0 });
     const [pan, setPan] = useState({ x: 0, y: 0 });
+    const zoomRef = useRef(1);
+    const [zoom, setZoom] = useState(1);
 
     // Active drag refs (no state → no re-renders mid-drag)
     const nodeDrag = useRef(null); // { id, startNodeX, startNodeY, startWorldX, startWorldY }
+    const nodePositionsRef = useRef({}); // maps node.id -> {x, y} during drag
     const bgDrag   = useRef(null); // { startScreenX, startScreenY, startPanX, startPanY }
     const lastTap  = useRef({ id: null, t: 0 });
     const cursor   = useRef("default"); // updated imperatively
@@ -50,17 +54,73 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
     /** Convert a screen point to world (canvas) coordinates. */
     const toWorld = (e) => {
         const s = toScreen(e);
-        return { x: s.x - panRef.current.x, y: s.y - panRef.current.y };
+        return {
+            x: (s.x - panRef.current.x) / zoomRef.current,
+            y: (s.y - panRef.current.y) / zoomRef.current
+        };
     };
 
-    /** Apply pan imperatively (avoids React re-render during drag). */
-    const applyPan = (x, y) => {
+    /** Apply transform imperatively (avoids React re-render during drag). */
+    const applyTransform = (x, y, z) => {
         panRef.current = { x, y };
-        if (groupRef.current) groupRef.current.setAttribute("transform", `translate(${x},${y})`);
+        zoomRef.current = z;
+        if (groupRef.current) {
+            groupRef.current.setAttribute("transform", `translate(${x},${y}) scale(${z})`);
+        }
     };
 
-    /** Commit pan to React state (triggers re-render once, on pointer-up). */
-    const commitPan = () => setPan({ ...panRef.current });
+    /** Update connected edges imperatively during drag */
+    const updateEdgeCoords = (edgeId) => {
+        const edge = edges.find(e => e.id === edgeId);
+        if (!edge) return;
+        const A = nodePositionsRef.current[edge.from];
+        const B = nodePositionsRef.current[edge.to];
+        if (!A || !B) return;
+        
+        const lines = document.querySelectorAll(`[data-edge-id="${edgeId}"]`);
+        lines.forEach(line => {
+            line.setAttribute("x1", A.x);
+            line.setAttribute("y1", A.y);
+            line.setAttribute("x2", B.x);
+            line.setAttribute("y2", B.y);
+        });
+
+        const labelsGroup = document.getElementById(`edge-labels-${edgeId}`);
+        if (labelsGroup) {
+            const fx = A.x + 0.28 * (B.x - A.x);
+            const fy = A.y + 0.28 * (B.y - A.y);
+            const tx = A.x + 0.72 * (B.x - A.x);
+            const ty = A.y + 0.72 * (B.y - A.y);
+            
+            const fromRect = labelsGroup.querySelector('.label-from-rect');
+            const fromText = labelsGroup.querySelector('.label-from-text');
+            const toRect = labelsGroup.querySelector('.label-to-rect');
+            const toText = labelsGroup.querySelector('.label-to-text');
+
+            if (fromRect) {
+                fromRect.setAttribute("x", fx - 17);
+                fromRect.setAttribute("y", fy - 8);
+            }
+            if (fromText) {
+                fromText.setAttribute("x", fx);
+                fromText.setAttribute("y", fy + 0.5);
+            }
+            if (toRect) {
+                toRect.setAttribute("x", tx - 17);
+                toRect.setAttribute("y", ty - 8);
+            }
+            if (toText) {
+                toText.setAttribute("x", tx);
+                toText.setAttribute("y", ty + 0.5);
+            }
+        }
+    };
+
+    /** Commit transform to React state (triggers re-render once, on pointer-up/wheel). */
+    const commitTransform = () => {
+        setPan({ ...panRef.current });
+        setZoom(zoomRef.current);
+    };
 
     // ── Hit test ─────────────────────────────────────────────────────────────
 
@@ -126,6 +186,12 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
             return;
         }
 
+        // Initialize node positions reference
+        nodePositionsRef.current = {};
+        nodes.forEach(n => {
+            nodePositionsRef.current[n.id] = { x: n.x, y: n.y };
+        });
+
         // Start node drag
         nodeDrag.current = {
             id: hit.id,
@@ -146,11 +212,24 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
         // ── Node drag ──────────────────────────────────────────────────────
         if (nodeDrag.current) {
             const { id, startNodeX, startNodeY, startWorldX, startWorldY } = nodeDrag.current;
-            setNodes(prev => prev.map(n =>
-                n.id === id
-                    ? { ...n, x: startNodeX + world.x - startWorldX, y: startNodeY + world.y - startWorldY }
-                    : n
-            ));
+            const newX = startNodeX + world.x - startWorldX;
+            const newY = startNodeY + world.y - startWorldY;
+            
+            // 1. Update mutable ref position
+            nodePositionsRef.current[id] = { x: newX, y: newY };
+            
+            // 2. Update node DOM element transform
+            const nodeEl = document.getElementById(`node-${id}`);
+            if (nodeEl) {
+                nodeEl.setAttribute("transform", `translate(${newX},${newY})`);
+            }
+            
+            // 3. Update all connected edges and their labels
+            edges.forEach(ed => {
+                if (ed.from === id || ed.to === id) {
+                    updateEdgeCoords(ed.id);
+                }
+            });
             return;
         }
 
@@ -159,15 +238,24 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
             const { startScreenX, startScreenY, startPanX, startPanY } = bgDrag.current;
             const newX = startPanX + (screen.x - startScreenX);
             const newY = startPanY + (screen.y - startScreenY);
-            applyPan(newX, newY);   // imperative: no React re-render mid-drag
+            applyTransform(newX, newY, zoomRef.current);   // imperative: no React re-render mid-drag
         }
     };
 
     const onPointerUp = () => {
-        nodeDrag.current = null;
+        if (nodeDrag.current) {
+            const { id } = nodeDrag.current;
+            const finalPos = nodePositionsRef.current[id];
+            if (finalPos) {
+                setNodes(prev => prev.map(n =>
+                    n.id === id ? { ...n, x: finalPos.x, y: finalPos.y } : n
+                ));
+            }
+            nodeDrag.current = null;
+        }
         if (bgDrag.current) {
             bgDrag.current = null;
-            commitPan();            // one React re-render to sync state
+            commitTransform();            // one React re-render to sync state
         }
         if (svgRef.current) {
             svgRef.current.style.cursor = mode === "link" ? "crosshair" : "default";
@@ -220,6 +308,30 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
         if (svgRef.current) svgRef.current.style.cursor = m === "link" ? "crosshair" : "default";
     };
 
+    // ── Interactive Zoom Handler ──────────────────────────────────────────────
+
+    const onWheel = (e) => {
+        if (nodeDrag.current || bgDrag.current) return;
+        e.preventDefault();
+        const s = toScreen(e);
+        const currentZoom = zoomRef.current;
+        const currentPan = panRef.current;
+        
+        const worldX = (s.x - currentPan.x) / currentZoom;
+        const worldY = (s.y - currentPan.y) / currentZoom;
+        
+        const zoomFactor = 1.15;
+        const nextZoom = e.deltaY < 0 
+            ? Math.min(3.0, currentZoom * zoomFactor) 
+            : Math.max(0.3, currentZoom / zoomFactor);
+            
+        const nextPanX = s.x - worldX * nextZoom;
+        const nextPanY = s.y - worldY * nextZoom;
+        
+        applyTransform(nextPanX, nextPanY, nextZoom);
+        commitTransform();
+    };
+
     // ── Derived values ────────────────────────────────────────────────────────
 
     const editingNode  = editId   ? nodes.find(n => n.id === editId)   : null;
@@ -236,8 +348,8 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
             {/* ── Mode bar ── */}
             <div style={{ padding: "8px 14px", borderBottom: `1px solid ${T.border}`, background: T.surfaceElevated,
                 display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-                {[  ["select", <MousePointer2 size={12} />, "Select & Move"],
-                    ["link",   <Link2 size={12} />,          "Link Nodes"],
+                {[  ["select", <MousePointer2 size={12} />, "Seleccionar y Mover"],
+                    ["link",   <Link2 size={12} />,          "Enlazar Nodos"],
                 ].map(([m, icon, lbl]) => (
                     <button key={m} onClick={() => switchMode(m)}
                         style={btnBase({
@@ -255,25 +367,82 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                     <span style={{ fontSize: 11, color: T.accent, background: T.accentLight,
                         padding: "4px 12px", borderRadius: 6, border: `1px solid ${T.accent}44` }}>
                         {linkFrom
-                            ? "Click the destination node to connect — or click background to cancel"
-                            : "Click the source node to start a link"}
+                            ? "Haga clic en el nodo de destino para conectar — o en el fondo para cancelar"
+                            : "Haga clic en el nodo de origen para comenzar el enlace"}
                     </span>
                 )}
                 {mode === "select" && (
                     <span style={{ fontSize: 11, color: T.textMuted }}>
-                        Drag node to move · Drag background to pan · Double-click to edit · Click edge to delete
+                        Arrastre el nodo para moverlo · Arrastre el fondo para desplazar · Doble clic para editar · Clic en enlace para eliminar
                     </span>
                 )}
 
                 <div style={{ flex: 1 }} />
 
-                {/* Fit to screen button */}
+                {/* Controles de Zoom */}
+                <div style={{ display: "flex", alignItems: "center", gap: 4, marginRight: 4, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 8, padding: "2px" }}>
+                    <button
+                        title="Acercar"
+                        onClick={() => {
+                            const nextZoom = Math.min(3.0, zoomRef.current * 1.25);
+                            if (svgRef.current) {
+                                const rect = svgRef.current.getBoundingClientRect();
+                                const cx = rect.width / 2;
+                                const cy = rect.height / 2;
+                                const worldX = (cx - panRef.current.x) / zoomRef.current;
+                                const worldY = (cy - panRef.current.y) / zoomRef.current;
+                                const nextPanX = cx - worldX * nextZoom;
+                                const nextPanY = cy - worldY * nextZoom;
+                                applyTransform(nextPanX, nextPanY, nextZoom);
+                                commitTransform();
+                            } else {
+                                applyTransform(panRef.current.x, panRef.current.y, nextZoom);
+                                commitTransform();
+                            }
+                        }}
+                        style={{ background: "none", border: "none", cursor: "pointer", color: T.textMuted, padding: "4px 8px", display: "flex", alignItems: "center" }}
+                        onMouseEnter={e => e.currentTarget.style.color = T.accent}
+                        onMouseLeave={e => e.currentTarget.style.color = T.textMuted}
+                    >
+                        <ZoomIn size={14} />
+                    </button>
+                    <span style={{ fontSize: 10, color: T.textMuted, minWidth: 36, textAlign: "center", fontWeight: 700 }}>
+                        {Math.round(zoom * 100)}%
+                    </span>
+                    <button
+                        title="Alejar"
+                        onClick={() => {
+                            const nextZoom = Math.max(0.3, zoomRef.current / 1.25);
+                            if (svgRef.current) {
+                                const rect = svgRef.current.getBoundingClientRect();
+                                const cx = rect.width / 2;
+                                const cy = rect.height / 2;
+                                const worldX = (cx - panRef.current.x) / zoomRef.current;
+                                const worldY = (cy - panRef.current.y) / zoomRef.current;
+                                const nextPanX = cx - worldX * nextZoom;
+                                const nextPanY = cy - worldY * nextZoom;
+                                applyTransform(nextPanX, nextPanY, nextZoom);
+                                commitTransform();
+                            } else {
+                                applyTransform(panRef.current.x, panRef.current.y, nextZoom);
+                                commitTransform();
+                            }
+                        }}
+                        style={{ background: "none", border: "none", cursor: "pointer", color: T.textMuted, padding: "4px 8px", display: "flex", alignItems: "center" }}
+                        onMouseEnter={e => e.currentTarget.style.color = T.accent}
+                        onMouseLeave={e => e.currentTarget.style.color = T.textMuted}
+                    >
+                        <ZoomOut size={14} />
+                    </button>
+                </div>
+
+                {/* Restablecer Vista */}
                 <button
-                    title="Reset view"
-                    onClick={() => { applyPan(0, 0); commitPan(); }}
+                    title="Restablecer vista"
+                    onClick={() => { applyTransform(0, 0, 1); commitTransform(); }}
                     style={btnBase({ boxShadow: "none", fontSize: 11, padding: "5px 10px", color: T.textMuted, border: `1px solid ${T.border}`,
                         display: "flex", alignItems: "center", gap: 5 })}>
-                    <Maximize2 size={12} /> Reset View
+                    <Maximize2 size={12} /> Restablecer Vista
                 </button>
 
                 <button
@@ -285,7 +454,7 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                     style={btnBase({ boxShadow: "none", fontSize: 11, padding: "5px 12px",
                         color: T.red, border: `1px solid ${T.red}33`, background: T.redLight,
                         display: "flex", alignItems: "center", gap: 5 })}>
-                    <Trash2 size={12} /> Clear
+                    <Trash2 size={12} /> Limpiar
                 </button>
             </div>
 
@@ -302,12 +471,13 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                     onPointerMove={onPointerMove}
                     onPointerUp={onPointerUp}
                     onContextMenu={onContextMenu}
+                    onWheel={onWheel}
                 >
                     {/* ── Background (static, outside pan group) ── */}
                     <defs>
                         {/* Grid dots shift with pan for infinite-canvas feel */}
                         <pattern id="dots2" width="24" height="24" patternUnits="userSpaceOnUse"
-                            patternTransform={`translate(${pan.x % 24},${pan.y % 24})`}>
+                            patternTransform={`translate(${pan.x},${pan.y}) scale(${zoom})`}>
                             <circle cx="0.8" cy="0.8" r="0.8" fill={T.border} />
                         </pattern>
                     </defs>
@@ -315,7 +485,7 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                     <rect width="100%" height="100%" fill="url(#dots2)" />
 
                     {/* ── All canvas content inside a panned group ── */}
-                    <g ref={groupRef} transform={`translate(${pan.x},${pan.y})`}>
+                    <g ref={groupRef} transform={`translate(${pan.x},${pan.y}) scale(${zoom})`}>
 
                         {/* Temp link line (world space) */}
                         {linkFromNode && (
@@ -333,29 +503,41 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                             const fx = A.x + 0.28 * (B.x - A.x), fy = A.y + 0.28 * (B.y - A.y);
                             const tx = A.x + 0.72 * (B.x - A.x), ty = A.y + 0.72 * (B.y - A.y);
                             return (
-                                <g key={ed.id}>
+                                <g key={ed.id} id={`edge-group-${ed.id}`}>
                                     {/* Visible line */}
                                     <line x1={A.x} y1={A.y} x2={B.x} y2={B.y}
+                                        data-edge-id={ed.id} data-from={ed.from} data-to={ed.to}
                                         stroke={T.accentMid} strokeWidth="2.5" opacity="0.5" strokeLinecap="round"
                                         style={{ pointerEvents: "none" }} />
                                     {/* Wide invisible hit area for delete */}
                                     <line x1={A.x} y1={A.y} x2={B.x} y2={B.y}
+                                        data-edge-id={ed.id} data-from={ed.from} data-to={ed.to}
                                         stroke="transparent" strokeWidth="18" strokeLinecap="round"
                                         style={{ cursor: "pointer" }}
                                         onPointerDown={ev => onEdgePointerDown(ev, ed.id)} />
                                     {/* Interface labels */}
-                                    {[{ x: fx, y: fy, label: iface.fromIface }, { x: tx, y: ty, label: iface.toIface }].map(({ x, y, label }) =>
-                                        label ? (
-                                            <g key={label + x} style={{ pointerEvents: "none" }}>
-                                                <rect x={x - 17} y={y - 8} width={34} height={14} rx={4}
+                                    <g id={`edge-labels-${ed.id}`} style={{ pointerEvents: "none" }}>
+                                        {iface.fromIface && (
+                                            <g>
+                                                <rect className="label-from-rect" x={fx - 17} y={fy - 8} width={34} height={14} rx={4}
                                                     fill={T.accentLight} stroke={T.accent + "66"} strokeWidth={1} />
-                                                <text x={x} y={y + 0.5} textAnchor="middle" dominantBaseline="middle"
+                                                <text className="label-from-text" x={fx} y={fy + 0.5} textAnchor="middle" dominantBaseline="middle"
                                                     style={{ fontSize: 7.5, fill: T.accent, fontFamily: "monospace", fontWeight: 800 }}>
-                                                    {label}
+                                                    {iface.fromIface}
                                                 </text>
                                             </g>
-                                        ) : null
-                                    )}
+                                        )}
+                                        {iface.toIface && (
+                                            <g>
+                                                <rect className="label-to-rect" x={tx - 17} y={ty - 8} width={34} height={14} rx={4}
+                                                    fill={T.accentLight} stroke={T.accent + "66"} strokeWidth={1} />
+                                                <text className="label-to-text" x={tx} y={ty + 0.5} textAnchor="middle" dominantBaseline="middle"
+                                                    style={{ fontSize: 7.5, fill: T.accent, fontFamily: "monospace", fontWeight: 800 }}>
+                                                    {iface.toIface}
+                                                </text>
+                                            </g>
+                                        )}
+                                    </g>
                                 </g>
                             );
                         })}
@@ -366,48 +548,61 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                             const isEditing    = editId   === node.id;
                             const isLinkTarget = mode === "link" && linkFrom && linkFrom !== node.id;
                             const ram = node.ram >= 1024 ? `${node.ram / 1024}GB` : `${node.ram}MB`;
+                            const isUbuntu = node.image?.toLowerCase().includes("ubuntu");
+                            const isWindows = node.image?.toLowerCase().includes("win");
+
                             return (
-                                <g key={node.id} transform={`translate(${node.x},${node.y})`}
+                                <g key={node.id} id={`node-${node.id}`} transform={`translate(${node.x},${node.y})`}
                                     style={{ pointerEvents: "none" }}>
-                                    {/* Drop shadow */}
-                                    <rect x="-28" y="-24" width="56" height="52" rx="12"
-                                        fill="rgba(20,50,22,0.12)" transform="translate(2,3)" />
+                                    {/* Drop shadow (subtle Azure style) */}
+                                    <rect x="-36" y="-30" width="72" height="60" rx="6"
+                                        fill="rgba(0,120,212,0.08)" transform="translate(1.5,2.5)" />
                                     {/* Card body */}
-                                    <rect x="-28" y="-24" width="56" height="52" rx="12"
+                                    <rect x="-36" y="-30" width="72" height="60" rx="6"
                                         fill={T.surface}
                                         stroke={isLinkSrc ? T.accent : isEditing ? T.accentMid : isLinkTarget ? T.accentMid + "88" : T.border}
-                                        strokeWidth={isLinkSrc || isEditing ? 2 : 1.5} />
-                                    {/* Top color stripe */}
-                                    <rect x="-28" y="-24" width="56" height="8"  rx="12" fill={isLinkSrc ? T.accent : T.accentMid} />
-                                    <rect x="-28" y="-18" width="56" height="4"         fill={isLinkSrc ? T.accent : T.accentMid} />
-                                    {/* Icon — SVG foreignObject lets us embed Lucide */}
-                                    <foreignObject x="-11" y="-18" width="22" height="22" style={{ pointerEvents: "none", overflow: "visible" }}>
-                                        <Monitor
-                                            xmlns="http://www.w3.org/2000/svg"
-                                            size={18}
-                                            color={isLinkSrc ? T.accent : T.textMuted}
-                                            style={{ display: "block" }}
-                                        />
+                                        strokeWidth={isLinkSrc || isEditing ? 2 : 1.25} />
+                                    
+                                    {/* Accent top border highlight */}
+                                    {(isLinkSrc || isEditing) && (
+                                        <path d="M-30 -30 H30" stroke={T.accent} strokeWidth="2.5" strokeLinecap="round" />
+                                    )}
+
+                                    {/* Icon — SVG foreignObject lets us embed AzureVm */}
+                                    <foreignObject x="-14" y="-22" width="28" height="28" style={{ pointerEvents: "none", overflow: "visible" }}>
+                                        <AzureVm size={28} />
                                     </foreignObject>
+
+                                    {/* Operating System Badge Logo inside node card */}
+                                    <g transform="translate(22, -18)" style={{ pointerEvents: "none" }}>
+                                        {isUbuntu ? (
+                                            <UbuntuLogo size={11} />
+                                        ) : isWindows ? (
+                                            <WindowsLogo size={11} />
+                                        ) : (
+                                            <circle cx="0" cy="0" r="4.5" fill={T.border} />
+                                        )}
+                                    </g>
+
                                     {/* Worker badge */}
-                                    <rect x="-22" y="5" width="44" height="12" rx="3" fill={T.accentLight} />
-                                    <text x="0" y="11" textAnchor="middle" dominantBaseline="middle"
-                                        style={{ fontSize: 7.5, fill: T.accent, fontFamily: "monospace", fontWeight: 700 }}>
+                                    <rect x="-26" y="8" width="52" height="11" rx="3" fill={T.accentLight} />
+                                    <text x="0" y="13.5" textAnchor="middle" dominantBaseline="middle"
+                                        style={{ fontSize: 7, fill: T.accent, fontFamily: "monospace", fontWeight: 800 }}>
                                         {node.worker}
                                     </text>
                                     {/* Label */}
-                                    <text x="0" y="25" textAnchor="middle"
-                                        style={{ fontSize: 10, fontWeight: 700, fill: T.text }}>
+                                    <text x="0" y="27.5" textAnchor="middle"
+                                        style={{ fontSize: 9.5, fontWeight: 700, fill: T.text }}>
                                         {node.label}
                                     </text>
                                     {/* Specs */}
-                                    <text x="0" y="36" textAnchor="middle"
-                                        style={{ fontSize: 8, fill: T.textMuted }}>
+                                    <text x="0" y="38.5" textAnchor="middle"
+                                        style={{ fontSize: 7.5, fill: T.textMuted, fontWeight: 500 }}>
                                         {node.vcores}vCPU · {ram} · {node.disk}GB
                                     </text>
                                     {/* Link-source ring */}
                                     {isLinkSrc && (
-                                        <circle r="36" fill="none" stroke={T.accent}
+                                        <circle r="44" fill="none" stroke={T.accent}
                                             strokeWidth="1.5" strokeDasharray="5,3" opacity="0.45" />
                                     )}
                                 </g>
@@ -419,12 +614,12 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                 {/* ── Empty state hint ── */}
                 {nodes.length === 0 && (
                     <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column",
-                        alignItems: "center", justifyContent: "center", pointerEvents: "none", gap: 8 }}>
-                        <Monitor size={52} color={T.border} style={{ opacity: 0.4 }} />
+                        alignItems: "center", justifyContent: "center", pointerEvents: "none", gap: 12 }}>
+                        <AzureVm size={64} />
                         <div style={{ color: T.textMuted, fontSize: 13, fontWeight: 600 }}>
-                            Drag VMs here or drop a template from the sidebar
+                            Arrastre VMs aquí o suelte una plantilla del panel lateral
                         </div>
-                        <div style={{ color: T.textFaint, fontSize: 11 }}>Double-click any node to edit it</div>
+                        <div style={{ color: T.textFaint, fontSize: 11 }}>Doble clic en cualquier nodo para editarlo</div>
                     </div>
                 )}
 
@@ -451,10 +646,10 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                     background: T.surfaceElevated, display: "flex", gap: 20, flexShrink: 0 }}>
                     {[
                         ["VMs",        nodes.length],
-                        ["Links",      edges.length],
-                        ["Total vCPU", nodes.reduce((s, n) => s + n.vcores, 0)],
-                        ["Total RAM",  totalRam >= 1024 ? `${(totalRam / 1024).toFixed(1)} GB` : `${totalRam} MB`],
-                        ["Total Disk", `${nodes.reduce((s, n) => s + n.disk, 0)} GB`],
+                        ["Enlaces",      edges.length],
+                        ["vCPU Totales", nodes.reduce((s, n) => s + n.vcores, 0)],
+                        ["RAM Total",  totalRam >= 1024 ? `${(totalRam / 1024).toFixed(1)} GB` : `${totalRam} MB`],
+                        ["Disco Total", `${nodes.reduce((s, n) => s + n.disk, 0)} GB`],
                     ].map(([l, v]) => (
                         <div key={l} style={{ display: "flex", alignItems: "baseline", gap: 5 }}>
                             <span style={{ fontSize: 14, fontWeight: 800, color: T.accent }}>{v}</span>

@@ -1,0 +1,10 @@
+# ============================================================
+#  Override LOCAL — sobreescribe KC_HOSTNAME_URL a localhost
+#  Uso:
+#    docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+# ============================================================
+services:
+  keycloak:
+    environment:
+      KC_HOSTNAME_URL:       http://localhost:8086
+      KC_HOSTNAME_ADMIN_URL: http://localhost:8086

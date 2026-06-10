@@ -1,7 +1,10 @@
 import React, { useRef } from "react";
 import { VncScreen } from "react-vnc";
 
-const API_GW = "localhost:8085";
+// Extraemos solo el host:puerto de la URL base del API Gateway (sin ws:// ni path)
+// VITE_API_BASE = "http://10.20.11.212:8085/api/v1" → API_GW = "10.20.11.212:8085"
+const _apiBase = import.meta.env.VITE_API_BASE ?? "http://10.20.11.212:8085/api/v1";
+const API_GW   = _apiBase.replace(/^https?:\/\//, "").replace(/\/.*$/, "");
 
 // X11 keysyms for common special characters
 const KEYSYMS = {

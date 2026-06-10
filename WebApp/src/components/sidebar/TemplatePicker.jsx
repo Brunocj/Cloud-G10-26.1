@@ -1,14 +1,14 @@
 import { useState } from "react";
 import { T, inp } from "../../theme/tokens";
 import { Label } from "../ui/Label";
-import { Link2, Circle, Network, GitBranch, Server } from "../ui/Icon";
+import { AzureTemplate, AzureNetwork } from "../ui/AzureIcons";
 
 const TEMPLATES = [
-    { id: "linear", Icon: Link2,      name: "Cadena Lineal",    desc: "Nodos en serie",         minCount: 2, maxCount: 10 },
-    { id: "ring",   Icon: Circle,     name: "Anillo (Ring)",    desc: "Nodos en bucle cerrado", minCount: 3, maxCount: 10 },
-    { id: "mesh",   Icon: Network,    name: "Malla (Full Mesh)", desc: "Todos conectados",       minCount: 3, maxCount:  6 },
-    { id: "tree",   Icon: GitBranch,  name: "\u00c1rbol Binario",   desc: "Jerarqu\u00eda padre-hijo",  minCount: 3, maxCount: 15 },
-    { id: "bus",    Icon: Server,     name: "Bus (Hub)",         desc: "Hub central + clientes", minCount: 2, maxCount: 10 },
+    { id: "linear", name: "Cadena Lineal",    desc: "Nodos en serie",         minCount: 2, maxCount: 10 },
+    { id: "ring",   name: "Anillo (Ring)",    desc: "Nodos en bucle cerrado", minCount: 3, maxCount: 10 },
+    { id: "mesh",   name: "Malla (Full Mesh)", desc: "Todos conectados",       minCount: 3, maxCount:  6 },
+    { id: "tree",   name: "Árbol Binario",   desc: "Jerarquía padre-hijo",  minCount: 3, maxCount: 15 },
+    { id: "bus",    name: "Bus (Hub)",         desc: "Hub central + clientes", minCount: 2, maxCount: 10 },
 ];
 
 export const TemplatePicker = () => {
@@ -17,15 +17,19 @@ export const TemplatePicker = () => {
 
     return (
         <div style={{ padding: "12px 14px 12px", borderBottom: `1px solid ${T.border}` }}>
-            <Label>Templates — arrastrar al canvas</Label>
-            <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+            <Label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <AzureTemplate size={16} /> Plantillas de Despliegue
+            </Label>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
                 {TEMPLATES.map(tpl => (
                     <div key={tpl.id}
                         style={{
                             border: `1px solid ${dragging === tpl.id ? T.accent : T.border}`,
-                            borderRadius: 10, overflow: "hidden",
-                            background: dragging === tpl.id ? T.accentLight : T.surface,
-                            boxShadow: T.shadow, transition: "border-color 0.15s, background 0.15s",
+                            borderRadius: 6, overflow: "hidden",
+                            background: T.surface,
+                            boxShadow: "0 1.6px 3.6px 0 rgba(0,0,0,0.1), 0 0.3px 0.9px 0 rgba(0,0,0,0.1)",
+                            transition: "border-color 0.15s, background 0.15s, transform 0.1s",
+                            transform: dragging === tpl.id ? "scale(0.98)" : "none",
                         }}>
                         {/* Header */}
                         <div style={{
@@ -33,14 +37,14 @@ export const TemplatePicker = () => {
                             background: T.surfaceElevated,
                             display: "flex", alignItems: "center", gap: 6,
                         }}>
-                            <tpl.Icon size={14} color={dragging === tpl.id ? T.accent : T.textMuted} />
-                            <span style={{ fontSize: 11, fontWeight: 700, color: T.text, flex: 1 }}>{tpl.name}</span>
-                            <span style={{ fontSize: 9, color: T.textMuted }}>VMs:</span>
+                            <AzureNetwork size={14} />
+                            <span style={{ fontSize: 11, fontWeight: 600, color: T.text, flex: 1 }}>{tpl.name}</span>
+                            <span style={{ fontSize: 9, color: T.textMuted, fontWeight: 700 }}>VMs:</span>
                             <select
                                 value={counts[tpl.id]}
                                 onChange={e => setCounts(c => ({ ...c, [tpl.id]: Number(e.target.value) }))}
                                 onClick={e => e.stopPropagation()}
-                                style={{ ...inp, padding: "2px 4px", width: 48, fontSize: 12, fontWeight: 700, color: T.accent, cursor: "pointer" }}
+                                style={{ ...inp, padding: "1px 4px", width: 48, fontSize: 11, fontWeight: 700, color: T.accent, cursor: "pointer", border: `1px solid ${T.border}`, background: T.surface }}
                             >
                                 {Array.from(
                                     { length: tpl.maxCount - tpl.minCount + 1 },
@@ -59,14 +63,14 @@ export const TemplatePicker = () => {
                             }}
                             onDragEnd={() => setDragging(null)}
                             style={{
-                                padding: "7px 10px", display: "flex", alignItems: "center", gap: 8,
+                                padding: "8px 10px", display: "flex", alignItems: "center", gap: 8,
                                 cursor: "grab",
                             }}
                         >
-                            <tpl.Icon size={18} color={dragging === tpl.id ? T.accent : T.textMuted} />
+                            <AzureTemplate size={24} />
                             <div>
                                 <div style={{ fontSize: 11, fontWeight: 600, color: T.text }}>
-                                    {counts[tpl.id]} nodos · arrastrar para colocar
+                                    {counts[tpl.id]} Nodos (Arrastrar al Lienzo)
                                 </div>
                                 <div style={{ fontSize: 10, color: T.textMuted }}>{tpl.desc}</div>
                             </div>

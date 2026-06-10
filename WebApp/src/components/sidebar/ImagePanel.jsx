@@ -3,12 +3,10 @@ import { T, btnBase, inp } from "../../theme/tokens";
 import { Label } from "../ui/Label";
 import { Upload, RefreshCcw, Trash2, CheckCircle, Circle, Lock, Package, Loader } from "../ui/Icon";
 
-const API_BASE = "http://localhost:8085/api/v1";
-
-export const ImagePanel = ({ fullImages, onRefresh, flash, refreshImageList }) => {
+export const ImagePanel = ({ fullImages, onRefresh, flash, refreshImageList, apiFetch, user }) => {
     const [uploading,   setUploading]   = useState(false);
     const [gcRunning,   setGcRunning]   = useState(false);
-    const [uploadForm,  setUploadForm]  = useState({ name: "", file: null });
+    const [uploadForm,  setUploadForm]  = useState({ name: "", file: null, isGeneral: false });
     const [showUpload,  setShowUpload]  = useState(false);
     const fileRef = useRef(null);
 
@@ -19,15 +17,15 @@ export const ImagePanel = ({ fullImages, onRefresh, flash, refreshImageList }) =
         setUploading(true);
         const fd = new FormData();
         fd.append("name",       uploadForm.name.trim());
-        fd.append("is_general", 0);
+        fd.append("is_general", uploadForm.isGeneral ? 1 : 0);
         fd.append("file",       uploadForm.file);
         try {
-            const res  = await fetch(`${API_BASE}/slices/utils/images/upload`, { method: "POST", body: fd });
+            const res  = await apiFetch("/slices/utils/images/upload", { method: "POST", body: fd });
             const data = await res.json();
             if (!res.ok) throw new Error(data.detail || "Error al subir");
             flash(`Imagen '${uploadForm.name}' subida correctamente.`);
             setShowUpload(false);
-            setUploadForm({ name: "", file: null });
+            setUploadForm({ name: "", file: null, isGeneral: false });
             onRefresh();
             if (refreshImageList) refreshImageList();
         } catch (e) { flash(e.message, "error"); }
@@ -37,7 +35,7 @@ export const ImagePanel = ({ fullImages, onRefresh, flash, refreshImageList }) =
     const handleDelete = async (img) => {
         if (!window.confirm(`¿Eliminar la imagen '${img.name}'?`)) return;
         try {
-            const res  = await fetch(`${API_BASE}/slices/utils/images/${img.id}`, { method: "DELETE" });
+            const res  = await apiFetch(`/slices/utils/images/${img.id}`, { method: "DELETE" });
             const data = await res.json();
             if (!res.ok) throw new Error(data.detail || "Error al eliminar");
             flash(data.message);
@@ -48,7 +46,7 @@ export const ImagePanel = ({ fullImages, onRefresh, flash, refreshImageList }) =
     const handleGC = async () => {
         setGcRunning(true);
         try {
-            const res  = await fetch(`${API_BASE}/slices/utils/images/gc/run`, { method: "POST" });
+            const res  = await apiFetch("/slices/utils/images/gc/run", { method: "POST" });
             const data = await res.json();
             if (!res.ok) throw new Error(data.detail || "Error GC");
             flash(data.message);
@@ -66,13 +64,15 @@ export const ImagePanel = ({ fullImages, onRefresh, flash, refreshImageList }) =
                         display: "flex", alignItems: "center", justifyContent: "center", gap: 5 })}>
                     <Upload size={12} /> Subir Imagen
                 </button>
-                <button onClick={handleGC} disabled={gcRunning}
-                    style={btnBase({ flex: 1, fontSize: 11, padding: "6px 8px", background: gcRunning ? T.surfaceElevated : T.yellowLight, color: gcRunning ? T.textMuted : T.yellow, border: `1px solid ${T.yellow}44`,
-                        display: "flex", alignItems: "center", justifyContent: "center", gap: 5 })}>
-                    {gcRunning
-                        ? <><Loader size={11} style={{ animation: "spin 0.8s linear infinite" }} /> Limpiando...</>
-                        : <><RefreshCcw size={11} /> Ejecutar GC</>}
-                </button>
+                {(user?.role === "admin" || user?.role === "superAdmin") && (
+                    <button onClick={handleGC} disabled={gcRunning}
+                        style={btnBase({ flex: 1, fontSize: 11, padding: "6px 8px", background: gcRunning ? T.surfaceElevated : T.yellowLight, color: gcRunning ? T.textMuted : T.yellow, border: `1px solid ${T.yellow}44`,
+                            display: "flex", alignItems: "center", justifyContent: "center", gap: 5 })}>
+                        {gcRunning
+                            ? <><Loader size={11} style={{ animation: "spin 0.8s linear infinite" }} /> Limpiando...</>
+                            : <><RefreshCcw size={11} /> Ejecutar GC</>}
+                    </button>
+                )}
             </div>
 
             {/* Upload form (collapsible) */}
@@ -86,6 +86,15 @@ export const ImagePanel = ({ fullImages, onRefresh, flash, refreshImageList }) =
                     <input type="file" accept=".qcow2,.img,.iso" ref={fileRef}
                         onChange={e => setUploadForm(p => ({ ...p, file: e.target.files[0] }))}
                         style={{ fontSize: 11, color: T.text, marginBottom: 8, width: "100%" }} />
+                    
+                    {(user?.role === "admin" || user?.role === "superAdmin") && (
+                        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: T.text, marginBottom: 8, cursor: "pointer" }}>
+                            <input type="checkbox" checked={uploadForm.isGeneral}
+                                onChange={e => setUploadForm(p => ({ ...p, isGeneral: e.target.checked }))} />
+                            ¿Hacer imagen pública general del sistema?
+                        </label>
+                    )}
+
                     <button onClick={handleUpload} disabled={uploading}
                         style={btnBase({ width: "100%", background: T.accent, color: "#fff", border: "none", opacity: uploading ? 0.6 : 1,
                             display: "flex", alignItems: "center", justifyContent: "center", gap: 6 })}>
