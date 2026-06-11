@@ -5,9 +5,21 @@ services:
     ports:
       - "8080:8080"
     restart: unless-stopped
+    environment:
+      # ── OpenStack (Nova Hypervisors API — BYOS) ──
+      OS_AUTH_URL:              "http://192.168.202.1:5000/v3"
+      OS_USERNAME:              cloud_admin
+      OS_PASSWORD:              "66c5f106f03328bbb47bd5ec609c320e"
+      OS_PROJECT_NAME:          cloud_admin
+      OS_USER_DOMAIN_NAME:      Cloud
+      OS_PROJECT_DOMAIN_NAME:   Cloud
+      OS_IDENTITY_API_VERSION:  "3"
+      OS_IMAGE_API_VERSION:     "2"
+      OPENSTACK_AZ_ID:          "2"
+      LINUX_AZ_ID:              "1"
     networks:
       - pucp_cloud_net
  
 networks:
   pucp_cloud_net:
-    external: true
+    external: true
