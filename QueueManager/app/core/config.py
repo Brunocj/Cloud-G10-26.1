@@ -22,16 +22,20 @@ class Settings(BaseSettings):
     SUBJECT_COMPUTE_DEPLOY:  str = "compute.deploy"
     SUBJECT_COMPUTE_DESTROY: str = "compute.destroy"
     SUBJECT_COMPUTE_RESULT:  str = "compute.result"
-    SUBJECT_NETWORK_DEPLOY: str = "network.deploy"
+    SUBJECT_NETWORK_DEPLOY:  str = "network.deploy"
     SUBJECT_NETWORK_DESTROY: str = "network.destroy"
-    SUBJECT_NETWORK_RESULT: str = "network.result"
+    SUBJECT_NETWORK_RESULT:  str = "network.result"
+    # Nuevos subjects de la Saga (Fase 2)
+    SUBJECT_PLACEMENT:       str = "slice.placement.process"   # Orquestador → VMPlacement
+    SUBJECT_STATE_UPDATE:    str = "slice.state.update"        # Orquestador → Slice Manager
     # JetStream: nombre del stream y KV bucket para estado
     JS_STREAM_NAME:  str = "SLICES"
     JS_KV_BUCKET:    str = "slice-state"
 
     # ── Timeouts ─────────────────────────────────────────────────────────────
-    COMPUTE_TIMEOUT: int = 300   # segundos — tiempo máximo para que compute responda
-    NETWORK_TIMEOUT: int = 60
+    PLACEMENT_TIMEOUT: int = 30    # segundos — tiempo máximo para que VMPlacement responda
+    COMPUTE_TIMEOUT:   int = 300   # segundos — tiempo máximo para que compute responda
+    NETWORK_TIMEOUT:   int = 60
     # ── Healthcheck ──────────────────────────────────────────────────────────
     HEALTH_PORT: int = 8080
 

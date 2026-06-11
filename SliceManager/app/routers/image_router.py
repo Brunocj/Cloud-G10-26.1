@@ -3,7 +3,7 @@
 Router para gestión de imágenes de VMs.
 
 Funcionalidades:
-  - GET  /utils/images          → Lista todas las imágenes
+  - GET  /utils/images          → Lista catálogo híbrido (BD local + OpenStack Glance)
   - GET  /utils/images/unused   → Lista imágenes sin VMs activas (candidatas a borrar)
   - POST /utils/images/upload   → Sube un archivo .qcow2/.img al NFS y registra en BD
   - DELETE /utils/images/{id}   → Elimina imagen (verifica que no esté en uso)
@@ -12,14 +12,17 @@ Funcionalidades:
 import logging
 import os
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from typing import List
 
 import paramiko
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.database import get_db
-from app.models import Image, Vm
+from app.models import AvailabilityZone, Image, Vm
+from app.schemas import ImageResponse
 from app.services.gc_scheduler import run_gc_cycle
 from app.auth import CurrentUser, get_current_user, require_roles
 
@@ -41,6 +44,9 @@ _WORKER_INVENTORY = {
 
 # Estados que se consideran "activos" (la imagen no se puede borrar)
 _ACTIVE_VM_STATES = ("DRAFT", "PROVISIONING", "ACTIVE", "PENDING_APPROVAL")
+
+# ID de zona OpenStack (se asume id=2 si no se configura via env)
+OPENSTACK_AZ_ID = int(os.getenv("OPENSTACK_AZ_ID", "2"))
 
 
 # ── Helpers SSH ──────────────────────────────────────────────────────────────
@@ -75,38 +81,142 @@ def _delete_file_via_ssh(file_path: str) -> None:
         logger.warning("No se pudo borrar %s via SSH: %s", file_path, exc)
 
 
-# ── Endpoints ────────────────────────────────────────────────────────────────
+# ── OpenStack Glance helper ───────────────────────────────────────────────────
 
-@router.get("/", status_code=200)
-def list_images(db: Session = Depends(get_db), current_user: CurrentUser = Depends(get_current_user)):
-    """Lista todas las imágenes con información de uso (filtrado por rol/dueño)."""
-    if current_user.can_manage_all():
-        images = db.query(Image).filter(Image.is_general.isnot(None)).all()
-    else:
-        images = db.query(Image).filter(
-            Image.is_general.isnot(None),
-            (Image.is_general == 1) | (Image.user_id == current_user.user_id)
-        ).all()
+def _fetch_openstack_images() -> List[dict]:
+    """
+    Se conecta a OpenStack Glance usando openstacksdk y devuelve la lista
+    de imágenes disponibles como dicts normalizados.
 
-    if not images:
+    Lee las credenciales desde variables de entorno:
+      OS_AUTH_URL, OS_USERNAME, OS_PASSWORD, OS_PROJECT_NAME,
+      OS_USER_DOMAIN_NAME, OS_PROJECT_DOMAIN_NAME
+
+    Si OpenStack está caído o faltan credenciales, retorna lista vacía
+    y loguea el error (no lanza excepción — fail-safe).
+    """
+    try:
+        import openstack  # openstacksdk
+
+        auth_url = os.getenv("OS_AUTH_URL")
+        if not auth_url:
+            logger.warning("[OpenStack] OS_AUTH_URL no configurado — omitiendo imágenes de OpenStack")
+            return []
+
+        conn = openstack.connect(
+            auth_url=auth_url,
+            username=os.getenv("OS_USERNAME", "admin"),
+            password=os.getenv("OS_PASSWORD", ""),
+            project_name=os.getenv("OS_PROJECT_NAME", "admin"),
+            user_domain_name=os.getenv("OS_USER_DOMAIN_NAME", "Default"),
+            project_domain_name=os.getenv("OS_PROJECT_DOMAIN_NAME", "Default"),
+        )
+
+        images = []
+        for img in conn.image.images():
+            images.append({
+                "name":   img.name,
+                "os_id":  img.id,           # UUID de Glance
+                "status": img.status,
+                "size":   img.size,
+            })
+
+        logger.info("[OpenStack] Glance devolvió %d imágenes", len(images))
+        return images
+
+    except Exception as exc:
+        logger.error("[OpenStack] Error conectando a Glance: %s", exc)
         return []
 
+
+# ── Endpoints ────────────────────────────────────────────────────────────────
+
+@router.get("/", status_code=200, response_model=List[ImageResponse])
+def list_images(db: Session = Depends(get_db), current_user: CurrentUser = Depends(get_current_user)):
+    """
+    Catálogo híbrido de imágenes.
+
+    1. Consulta la BD local (con JOIN a AvailabilityZone para saber el az_name).
+    2. Consulta Glance de OpenStack en un thread-pool (no bloquea el event loop).
+    3. Para cada imagen de Glance que NO exista ya en la BD (por nombre),
+       crea un registro efímero en memoria (no en BD) con az_name="OpenStack".
+    4. Si OpenStack falla, se retorna igualmente con las imágenes locales.
+    """
+    # ── 1. Imágenes desde la BD local ────────────────────────────────────────
+    if current_user.can_manage_all():
+        db_images = (
+            db.query(Image)
+            .options(joinedload(Image.availability_zone))
+            .filter(Image.is_general.isnot(None))
+            .all()
+        )
+    else:
+        db_images = (
+            db.query(Image)
+            .options(joinedload(Image.availability_zone))
+            .filter(
+                Image.is_general.isnot(None),
+                (Image.is_general == 1) | (Image.user_id == current_user.user_id),
+            )
+            .all()
+        )
+
     result = []
-    for img in images:
+    db_image_names = set()
+
+    for img in db_images:
         active_count = db.query(Vm).filter(
             Vm.image_id == img.id,
             Vm.state.in_(_ACTIVE_VM_STATES),
         ).count()
 
-        result.append({
-            "id": img.id,
-            "name": img.name,
-            "path": img.path,
-            "is_general": img.is_general,
-            "date_uploaded": img.date_uploaded,
-            "in_use": active_count > 0,
-            "active_vm_count": active_count,
-        })
+        az_name = img.availability_zone.name if img.availability_zone else None
+
+        result.append(ImageResponse(
+            id=img.id,
+            name=img.name,
+            availability_zone_id=img.availability_zone_id,
+            az_name=az_name,
+            path=img.path,
+            is_general=img.is_general,
+            date_uploaded=img.date_uploaded,
+            in_use=active_count > 0,
+            active_vm_count=active_count,
+        ))
+        db_image_names.add(img.name)
+
+    # ── 2. Imágenes desde OpenStack Glance (en thread-pool) ─────────────────
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_fetch_openstack_images)
+            os_images = future.result(timeout=10)
+    except Exception as exc:
+        logger.error("[OpenStack] Timeout o error en thread-pool Glance: %s", exc)
+        os_images = []
+
+    # ── 3. Sincronización: añadir imágenes de OpenStack no presentes en BD ───
+    # Buscamos el AZ de OpenStack en la BD para obtener su nombre oficial
+    os_az = db.query(AvailabilityZone).filter(AvailabilityZone.id == OPENSTACK_AZ_ID).first()
+    os_az_name = os_az.name if os_az else "OpenStack"
+
+    next_virtual_id = -1  # IDs virtuales negativos para imágenes efímeras de Glance
+    for os_img in os_images:
+        if os_img["name"] not in db_image_names and os_img.get("status") == "active":
+            result.append(ImageResponse(
+                id=next_virtual_id,          # ID virtual — no persiste en BD
+                name=os_img["name"],
+                availability_zone_id=OPENSTACK_AZ_ID,
+                az_name=os_az_name,
+                path=None,
+                is_general=1,
+                date_uploaded=None,
+                in_use=False,
+                active_vm_count=0,
+            ))
+            next_virtual_id -= 1
+
+    logger.info("[Images] Catálogo híbrido: %d imágenes BD + %d de OpenStack (total=%d)",
+                len(db_images), max(0, -next_virtual_id - 1), len(result))
     return result
 
 
@@ -151,11 +261,12 @@ def get_unused_images(db: Session = Depends(get_db), current_user: CurrentUser =
 async def upload_image(
     name: str = Form(...),
     is_general: int = Form(0),
+    availability_zone_id: int = Form(1),  # Por defecto: Linux Cluster (id=1)
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    """Sube un archivo de imagen al NFS y lo registra en BD."""
+    """Sube un archivo de imagen al NFS y lo registra en BD, asociado a una AZ."""
     # Validación de rol: solo admins/superadmins pueden crear imágenes generales
     if is_general == 1 and not current_user.can_manage_all():
         raise HTTPException(
@@ -178,7 +289,6 @@ async def upload_image(
         if existing.is_general is None:
             # Imagen soft-deleted: reutilizamos el registro y sobreescribimos el archivo
             logger.info("Imagen '%s' estaba soft-deleted — se reutiliza el registro (id=%d)", name, existing.id)
-            # El archivo se sobreescribirá más abajo
         else:
             raise HTTPException(
                 status_code=409,
@@ -197,7 +307,6 @@ async def upload_image(
         )
 
     if existing and existing.is_general is None:
-        # Reactivar registro soft-deleted: validamos propiedad o rol admin
         if existing.user_id != current_user.user_id and not current_user.can_manage_all():
             raise HTTPException(
                 status_code=403,
@@ -207,6 +316,7 @@ async def upload_image(
         existing.is_general = is_general
         existing.user_id = current_user.user_id
         existing.date_uploaded = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        existing.availability_zone_id = availability_zone_id
         db.commit()
         db.refresh(existing)
         logger.info("Imagen '%s' reactivada → %s", name, dest_path)
@@ -223,12 +333,13 @@ async def upload_image(
         date_uploaded=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
         is_general=is_general,
         path=dest_path,
+        availability_zone_id=availability_zone_id,
     )
     db.add(nueva_imagen)
     db.commit()
     db.refresh(nueva_imagen)
 
-    logger.info("Imagen '%s' subida → %s", name, dest_path)
+    logger.info("Imagen '%s' subida → %s (AZ=%d)", name, dest_path, availability_zone_id)
     return {
         "id": nueva_imagen.id,
         "name": nueva_imagen.name,
@@ -303,4 +414,3 @@ def run_gc_now(
     background_tasks.add_task(run_gc_cycle)
     logger.info("[GC] Ciclo manual disparado desde la API por %s.", current_user.user_id)
     return {"message": "Ciclo de GC iniciado en background. Revisa los logs para ver el resultado."}
-

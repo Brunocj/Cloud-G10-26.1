@@ -17,6 +17,7 @@ Flujo de destroy por VM:
 
 import logging
 import time
+import asyncio
 from typing import List, Optional
 
 from app.core.config import settings
@@ -28,6 +29,7 @@ from app.models.schemas import (
 from app.services.qemu_executor import QEMUExecutor
 from app.services.ssh_client import SSHClient
 from app.services.vnc_port_manager import VNCPortManager
+from app.services.openstack_compute_executor import OpenStackComputeExecutor, get_connection
 
 logger = logging.getLogger(__name__)
 
@@ -42,16 +44,28 @@ class Provisioner:
     # Deploy
     # ------------------------------------------------------------------
 
-    def deploy(self, request: DeployRequest) -> DeployReply:
+    async def deploy(self, request: DeployRequest) -> DeployReply:
         logger.info(
-            "Deploy slice=%s, request=%s, vms=%d",
-            request.slice_id, request.request_id, len(request.vms),
+            "Deploy slice=%s, request=%s, vms=%d, AZ=%d",
+            request.slice_id, request.request_id, len(request.vms), request.availability_zone_id
         )
 
-        results: List[VMResult] = [
-            self._deploy_vm_sync(vm, request.slice_id)
-            for vm in request.vms
-        ]
+        if request.availability_zone_id == 2:
+            # Estrategia: OpenStack Nova API
+            logger.info(f"[CP] Strategy: OpenStack (slice_id={request.slice_id})")
+            try:
+                conn = await asyncio.to_thread(get_connection)
+                os_executor = OpenStackComputeExecutor()
+                tasks = [os_executor.deploy_vm(conn, vm, request.slice_id) for vm in request.vms]
+                results = await asyncio.gather(*tasks)
+            except Exception as e:
+                logger.error(f"[CP] Error conectando a OpenStack: {e}")
+                results = [VMResult(vm_id=vm.vm_id, worker_ip=vm.worker_ip, error=str(e)) for vm in request.vms]
+        else:
+            # Estrategia: Linux Cluster (QEMU/KVM local)
+            logger.info(f"[CP] Strategy: Linux Cluster (slice_id={request.slice_id})")
+            tasks = [asyncio.to_thread(self._deploy_vm_sync, vm, request.slice_id) for vm in request.vms]
+            results = await asyncio.gather(*tasks)
 
         ok     = [r for r in results if r.error is None]
         failed = [r for r in results if r.error is not None]
@@ -143,13 +157,13 @@ class Provisioner:
     # Destroy
     # ------------------------------------------------------------------
 
-    def destroy(self, request: DestroyRequest, vm_records: List[dict]) -> DestroyReply:
+    async def destroy(self, request: DestroyRequest, vm_records: List[dict]) -> DestroyReply:
         """
         Destruye las VMs de un slice.
         vm_records: lista de dicts con vm_id, worker_ip, ssh_user, ssh_private_key,
                     y tap_interfaces (si aplica). Viene del KV via worker.py.
         """
-        logger.info("Destroy slice=%s, vms=%d", request.slice_id, len(vm_records))
+        logger.info("Destroy slice=%s, vms=%d, AZ=%d", request.slice_id, len(vm_records), request.availability_zone_id)
 
         if not vm_records:
             logger.warning("No hay VMs registradas para slice=%s", request.slice_id)
@@ -159,10 +173,23 @@ class Provisioner:
                 status=DeployStatus.SUCCESS,
             )
 
-        errors = [
-            self._destroy_vm_sync(record, request.slice_id)
-            for record in vm_records
-        ]
+        if request.availability_zone_id == 2:
+            # Estrategia: OpenStack Nova API
+            logger.info(f"[CP] Strategy: OpenStack (slice_id={request.slice_id})")
+            try:
+                conn = await asyncio.to_thread(get_connection)
+                os_executor = OpenStackComputeExecutor()
+                tasks = [os_executor.destroy_vm(conn, record, request.slice_id) for record in vm_records]
+                errors = await asyncio.gather(*tasks)
+            except Exception as e:
+                logger.error(f"[CP] Error conectando a OpenStack durante destroy: {e}")
+                errors = [str(e)] * len(vm_records)
+        else:
+            # Estrategia: Linux Cluster (SSH/QEMU)
+            logger.info(f"[CP] Strategy: Linux Cluster (slice_id={request.slice_id})")
+            tasks = [asyncio.to_thread(self._destroy_vm_sync, record, request.slice_id) for record in vm_records]
+            errors = await asyncio.gather(*tasks)
+
         errors = [e for e in errors if e]
 
         if errors:

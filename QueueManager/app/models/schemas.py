@@ -101,10 +101,11 @@ class NetworkLink(BaseModel):
 
 
 class DeploySliceRequest(BaseModel):
-    slice_id:   str
-    request_id: str
-    vms:        List[VMSpec] = Field(..., min_length=1)
-    links:      List[NetworkLink] = Field(default_factory=list) # <--- AGREGAR ESTO
+    slice_id:             str
+    request_id:           str
+    availability_zone_id: int = Field(default=1, description="ID de la AZ destino (1=Linux Cluster, 2=OpenStack)")
+    vms:                  List[VMSpec] = Field(..., min_length=1)
+    links:                List[NetworkLink] = Field(default_factory=list)
 
 class DestroySliceRequest(BaseModel):
     """
@@ -147,8 +148,10 @@ class DestroySliceResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 class OperationStep(str, Enum):
-    COMPUTE = "compute"
-    NETWORK = "network"   # reservado para uso futuro
+    PLACEMENT = "placement"   # Nuevo: fase de asignación física
+    NETWORK   = "network"
+    COMPUTE   = "compute"
+    STATE     = "state"       # Nuevo: actualización de estado final
 
 
 class OperationState(BaseModel):

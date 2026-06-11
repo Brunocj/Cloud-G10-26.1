@@ -1,14 +1,17 @@
 """
-Placement Engine — CP-SAT (Google OR-Tools)
+Placement Engine — PUCP Cloud Orchestrator
+==========================================
 
-Modelo: knapsack determinístico multidimensional con capacidades efectivas
-ajustadas estadísticamente (chance-constraint approximation).
+Patrón Strategy: el motor de asignación es completamente agnóstico a la nube.
+La misma función objetivo CP-SAT (multidimensional weighted min-makespan)
+se aplica independientemente de si los datos de capacidad vienen de:
 
-Función objetivo:
+  · Linux Cluster  → WorkerState enviados por el SliceManager (Prometheus-based)
+  · OpenStack      → Nova Hypervisors API consultada por este módulo (BYOS)
+
+Función objetivo (sin cambios):
     min( max_j( Σ_r α_r · Σ_i recurso_r(i) · x[i][j] / C_efectivo_r[j] ) )
-
-    Coeficientes de importancia por dimensión:
-        α_cpu = 3  |  β_ram = 5  |  γ_disco = 1
+    α_cpu = 3  |  β_ram = 5  |  γ_disco = 1
 
 Restricciones:
     - x[i][j] ∈ {0, 1}
@@ -17,43 +20,149 @@ Restricciones:
     - Σ_i ram_gb(i)  · x[i][j] ≤ disponible_ram[j]    ∀ j
     - Σ_i disco_gb(i)· x[i][j] ≤ disponible_disco[j]  ∀ j
 
-Escala: los floats se multiplican por SCALE antes de pasar al solver (enteros).
-El timeout se pasa directamente a CP-SAT vía parameters.max_time_in_seconds.
+Manifiesto de salida (BYOS): cada PlacementEntry lleva `selected_host` con el
+nombre exacto del hipervisor/nodo físico ganador, para que Nova pueda ser
+forzado a instanciar ahí (bypass del Nova-scheduler).
 """
 
-from typing import List, Tuple
+import logging
+import os
+from typing import List, Optional, Tuple
 
 from ortools.sat.python import cp_model
 
 from app.models import VMSpec, WorkerState, PlacementEntry
 
-# Coeficientes de importancia relativa por dimensión
+logger = logging.getLogger("vm-placement.engine")
+
+# ── Coeficientes de importancia relativa por dimensión ───────────────────────
 ALPHA_CPU   = 3
 BETA_RAM    = 5
 GAMMA_DISCO = 1
 
-# Factor de escala para convertir floats a enteros
+# Factor de escala para convertir floats a enteros (CP-SAT requiere enteros)
 SCALE = 1000
 
+# ID de AZ por convención (configurable via env)
+AZ_ID_LINUX      = int(os.getenv("LINUX_AZ_ID",     "1"))
+AZ_ID_OPENSTACK  = int(os.getenv("OPENSTACK_AZ_ID", "2"))
 
-def run_placement(
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STRATEGY: Recolección de datos de capacidad
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _collect_linux_workers(workers_in: List[WorkerState]) -> Tuple[List[WorkerState], List[str]]:
+    """
+    Strategy LINUX CLUSTER:
+    Usa los WorkerState enviados por el SliceManager (ya calculados con Prometheus).
+    Retorna (workers_normalizados, hostnames).
+    """
+    host_names = [f"worker-{w.worker_id}" for w in workers_in]
+    return workers_in, host_names
+
+
+def _collect_openstack_workers() -> Tuple[List[WorkerState], List[str]]:
+    """
+    Strategy OPENSTACK (BYOS):
+    Consulta la API Nova Hypervisors vía openstacksdk para obtener métricas
+    de capacidad de los nodos físicos. Aplica los mismos factores de overcommit
+    que Linux para el cálculo de disponible_*.
+
+    Variables de entorno requeridas:
+      OS_AUTH_URL, OS_USERNAME, OS_PASSWORD, OS_PROJECT_NAME,
+      OS_USER_DOMAIN_NAME, OS_PROJECT_DOMAIN_NAME
+
+    Retorna (workers, host_names) para el solver CP-SAT.
+    """
+    import openstack  # openstacksdk — nunca SSH
+
+    OC_CPU   = float(os.getenv("OS_OC_CPU",   "2.0"))   # overcommit CPU OpenStack
+    OC_RAM   = float(os.getenv("OS_OC_RAM",   "1.54"))  # overcommit RAM OpenStack
+    OC_DISCO = float(os.getenv("OS_OC_DISCO", "1.0"))   # overcommit Disco OpenStack
+
+    conn = openstack.connect(
+        auth_url=os.getenv("OS_AUTH_URL"),
+        username=os.getenv("OS_USERNAME", "admin"),
+        password=os.getenv("OS_PASSWORD", ""),
+        project_name=os.getenv("OS_PROJECT_NAME", "admin"),
+        user_domain_name=os.getenv("OS_USER_DOMAIN_NAME", "Default"),
+        project_domain_name=os.getenv("OS_PROJECT_DOMAIN_NAME", "Default"),
+    )
+
+    workers: List[WorkerState] = []
+    host_names: List[str] = []
+    worker_id_counter = 1
+
+    logger.info("[BYOS][OpenStack] Consultando Nova Hypervisors API …")
+
+    for hyp in conn.compute.hypervisors(details=True):
+        # Solo incluir hipervisores KVM activos
+        if hyp.state != "up" or hyp.status != "enabled":
+            logger.debug("[BYOS] Hipervisor '%s' excluido (state=%s status=%s)",
+                         hyp.hypervisor_hostname, hyp.state, hyp.status)
+            continue
+
+        # Capacidades nominales (Nova reporta vCPUs totales y RAM en MB)
+        vcpus_total   = float(hyp.vcpus or 0)
+        vcpus_used    = float(hyp.vcpus_used or 0)
+        ram_total_mb  = float(hyp.memory_mb or 0)
+        ram_used_mb   = float(hyp.memory_mb_used or 0)
+        # Nova no expone disco fácilmente; usamos local_gb si está disponible
+        disco_total   = float(getattr(hyp, "local_gb", 0) or 0)
+        disco_used    = float(getattr(hyp, "local_gb_used", 0) or 0)
+
+        # Capacidades efectivas con overcommit (misma fórmula que Linux Cluster)
+        c_ef_cpu   = vcpus_total   * OC_CPU
+        c_ef_ram   = (ram_total_mb / 1024.0) * OC_RAM     # MB → GB
+        c_ef_disco = disco_total   * OC_DISCO
+
+        # Disponible = efectivo − usado
+        disp_cpu   = max(0.0, c_ef_cpu   - vcpus_used)
+        disp_ram   = max(0.0, c_ef_ram   - (ram_used_mb / 1024.0))
+        disp_disco = max(0.0, c_ef_disco - disco_used)
+
+        logger.info(
+            "[BYOS][OpenStack] Hipervisor '%s' — "
+            "cpu: total=%.1f used=%.1f oc=%.2f disp=%.1f | "
+            "ram(GB): total=%.1f used=%.1f oc=%.2f disp=%.1f | "
+            "disco(GB): total=%.1f used=%.1f oc=%.2f disp=%.1f",
+            hyp.hypervisor_hostname,
+            vcpus_total,   vcpus_used,   OC_CPU,   disp_cpu,
+            ram_total_mb / 1024.0, ram_used_mb / 1024.0, OC_RAM, disp_ram,
+            disco_total,  disco_used,   OC_DISCO, disp_disco,
+        )
+
+        workers.append(WorkerState(
+            worker_id=worker_id_counter,
+            disponible_cpu=disp_cpu,
+            disponible_ram=disp_ram,
+            disponible_disco=disp_disco,
+        ))
+        host_names.append(hyp.hypervisor_hostname)   # nombre exacto para el manifiesto BYOS
+        worker_id_counter += 1
+
+    logger.info("[BYOS][OpenStack] %d hipervisores activos encontrados.", len(workers))
+    return workers, host_names
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SOLVER CP-SAT — común para ambas estrategias
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _solve_cpsat(
     vms: List[VMSpec],
     workers: List[WorkerState],
+    host_names: List[str],
     timeout_seconds: float,
-) -> Tuple[bool, List[PlacementEntry], str, str]:
+) -> Tuple[bool, List[PlacementEntry], Optional[str], Optional[str]]:
     """
     Ejecuta CP-SAT y retorna (success, placement_map, reason, detail).
 
-    Pasos:
-      1. Validaciones previas.
-      2. Construir modelo CP-SAT con variables, restricciones y objetivo.
-      3. Resolver con time_limit = timeout_seconds.
-      4. Interpretar resultado y retornar mapa o FAILED atómico.
+    El placement_map incluye `selected_host` = nombre físico del nodo ganador.
     """
-
-    # ── 1. Validaciones ───────────────────────────────────────────────────────
     if not workers:
-        return False, [], "NO_WORKERS_AVAILABLE", "La lista de workers está vacía."
+        return False, [], "NO_WORKERS_AVAILABLE", "La lista de workers/hipervisores está vacía."
 
     if not vms:
         return True, [], None, None
@@ -62,15 +171,15 @@ def run_placement(
     m = len(workers)
 
     # Escalar recursos a enteros
-    vcpus   = [round(v.vcpus   * SCALE) for v in vms]
-    ram     = [round(v.ram_gb  * SCALE) for v in vms]
-    disco   = [round(v.disco_gb* SCALE) for v in vms]
+    vcpus   = [round(v.vcpus    * SCALE) for v in vms]
+    ram     = [round(v.ram_gb   * SCALE) for v in vms]
+    disco   = [round(v.disco_gb * SCALE) for v in vms]
 
     cap_cpu   = [round(w.disponible_cpu   * SCALE) for w in workers]
     cap_ram   = [round(w.disponible_ram   * SCALE) for w in workers]
     cap_disco = [round(w.disponible_disco * SCALE) for w in workers]
 
-    # Verificar factibilidad básica: ¿alguna VM supera la capacidad máxima en alguna dimensión?
+    # Factibilidad básica: ¿alguna VM supera la capacidad máxima?
     max_cpu   = max(cap_cpu)
     max_ram   = max(cap_ram)
     max_disco = max(cap_disco)
@@ -78,78 +187,50 @@ def run_placement(
     for vm, vc, ra, di in zip(vms, vcpus, ram, disco):
         if vc > max_cpu:
             return (
-                False, [],
-                "INSUFFICIENT_RESOURCES",
-                f"Ningún worker tiene CPU suficiente para VM '{vm.vm_id}' "
+                False, [], "INSUFFICIENT_RESOURCES",
+                f"Ningún host tiene CPU suficiente para VM '{vm.vm_id}' "
                 f"(vcpus={vm.vcpus}, máx disponible={max(w.disponible_cpu for w in workers):.4f}).",
             )
         if ra > max_ram:
             return (
-                False, [],
-                "INSUFFICIENT_RESOURCES",
-                f"Ningún worker tiene RAM suficiente para VM '{vm.vm_id}' "
+                False, [], "INSUFFICIENT_RESOURCES",
+                f"Ningún host tiene RAM suficiente para VM '{vm.vm_id}' "
                 f"(ram_gb={vm.ram_gb}, máx disponible={max(w.disponible_ram for w in workers):.4f}).",
             )
         if di > max_disco:
             return (
-                False, [],
-                "INSUFFICIENT_RESOURCES",
-                f"Ningún worker tiene disco suficiente para VM '{vm.vm_id}' "
+                False, [], "INSUFFICIENT_RESOURCES",
+                f"Ningún host tiene disco suficiente para VM '{vm.vm_id}' "
                 f"(disco_gb={vm.disco_gb}, máx disponible={max(w.disponible_disco for w in workers):.4f}).",
             )
 
-    # ── 2. Modelo CP-SAT ──────────────────────────────────────────────────────
+    # ── Modelo CP-SAT ──────────────────────────────────────────────────────────
     model = cp_model.CpModel()
 
-    # Variables de decisión: x[i][j] = 1 si VM i → worker j
+    # Variables de decisión: x[i][j] = 1 si VM i → host j
     x = [[model.NewBoolVar(f"x_{i}_{j}") for j in range(m)] for i in range(n)]
 
-    # Restricción: cada VM asignada a exactamente un worker
+    # Restricción: cada VM asignada a exactamente un host
     for i in range(n):
         model.AddExactlyOne(x[i][j] for j in range(m))
 
-    # Restricciones de capacidad por dimensión (tres independientes)
+    # Restricciones de capacidad por dimensión
     for j in range(m):
-        model.Add(sum(vcpus[i]   * x[i][j] for i in range(n)) <= cap_cpu[j])
-        model.Add(sum(ram[i]     * x[i][j] for i in range(n)) <= cap_ram[j])
-        model.Add(sum(disco[i]   * x[i][j] for i in range(n)) <= cap_disco[j])
+        model.Add(sum(vcpus[i] * x[i][j] for i in range(n)) <= cap_cpu[j])
+        model.Add(sum(ram[i]   * x[i][j] for i in range(n)) <= cap_ram[j])
+        model.Add(sum(disco[i] * x[i][j] for i in range(n)) <= cap_disco[j])
 
-    # Objetivo: minimizar makespan ponderado
-    # makespan = max_j( Σ_r α_r · carga_r[j] / cap_r[j] )
-    # CP-SAT requiere enteros: multiplicamos por SCALE² para preservar precisión
-    # en la división — usamos sum * alpha / cap como entero redondeado.
-    #
-    # Para evitar división (no soportada directamente), reformulamos:
-    # Minimizar Z tal que Z ≥ Σ_r α_r · (Σ_i recurso_r(i)·x[i][j]) * SCALE / cap_r[j]  ∀ j
-    # Equivalentemente: Z · cap_r[j] ≥ α_r · Σ_i recurso_r(i)·x[i][j] · SCALE  ∀ j, r
-    # Combinamos dimensiones en un único makespan ponderado por worker.
-
-    # Carga ponderada de cada worker (en unidades de SCALE²):
-    # load[j] = Σ_r α_r · Σ_i recurso_r(i) · x[i][j]  (ya escalado por SCALE)
-    # Para el makespan necesitamos load[j] / cap_total_ponderado[j],
-    # pero como las capacidades difieren por dimensión, usamos AddMaxEquality
-    # sobre una variable de utilización por worker.
-
-    # Definimos para cada worker j una variable entera que representa:
-    # util[j] = max_r( α_r · carga_r[j] · SCALE / cap_r[j] )
-    # Y luego makespan = max_j( util[j] )
-    #
-    # Para linearizar la división multiplicamos ambos lados:
-    # util[j] · cap_r[j] ≥ α_r · carga_r[j] · SCALE
-
-    # Rango máximo del objetivo (100% utilización en todas las dimensiones)
+    # Objetivo: minimizar makespan ponderado (balance de carga multidimensional)
+    # util[j] · cap_r[j] ≥ α_r · carga_r[j] · SCALE  ∀ j, r
     MAX_UTIL = (BETA_RAM + ALPHA_CPU + GAMMA_DISCO) * SCALE * SCALE
 
     util = [model.NewIntVar(0, MAX_UTIL, f"util_{j}") for j in range(m)]
 
     for j in range(m):
-        # Carga en cada dimensión para el worker j
         load_cpu   = sum(vcpus[i] * x[i][j] for i in range(n))
         load_ram   = sum(ram[i]   * x[i][j] for i in range(n))
         load_disco = sum(disco[i] * x[i][j] for i in range(n))
 
-        # util[j] · cap_r[j] ≥ α_r · load_r · SCALE  (para cada dimensión r)
-        # util[j] es el máximo de los tres — usamos AddMaxEquality con vars aux
         u_cpu   = model.NewIntVar(0, MAX_UTIL, f"u_cpu_{j}")
         u_ram   = model.NewIntVar(0, MAX_UTIL, f"u_ram_{j}")
         u_disco = model.NewIntVar(0, MAX_UTIL, f"u_disco_{j}")
@@ -167,38 +248,91 @@ def run_placement(
     model.AddMaxEquality(makespan, util)
     model.Minimize(makespan)
 
-    # ── 3. Resolver ───────────────────────────────────────────────────────────
+    # ── Resolver ────────────────────────────────────────────────────────────────
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = timeout_seconds
-    solver.parameters.num_search_workers = 1  # determinístico
+    solver.parameters.num_search_workers  = 1  # determinístico
 
     status = solver.Solve(model)
 
-    # ── 4. Interpretar resultado ──────────────────────────────────────────────
     if status == cp_model.INFEASIBLE:
         return (
-            False, [],
-            "INSUFFICIENT_RESOURCES",
+            False, [], "INSUFFICIENT_RESOURCES",
             "No existe asignación factible: la zona no dispone de capacidad "
             "suficiente para todas las VMs del slice.",
         )
 
     if status == cp_model.UNKNOWN:
         return (
-            False, [],
-            "TIMEOUT",
-            f"El solver no encontró solución factible en el tiempo máximo permitido "
-            f"({timeout_seconds}s).",
+            False, [], "TIMEOUT",
+            f"El solver no encontró solución factible en {timeout_seconds}s.",
         )
 
-    # OPTIMAL o FEASIBLE — construir mapa
+    # OPTIMAL o FEASIBLE — construir manifiesto BYOS
     placement_map: List[PlacementEntry] = []
     for i in range(n):
         for j in range(m):
             if solver.Value(x[i][j]) == 1:
                 placement_map.append(
-                    PlacementEntry(vm_id=vms[i].vm_id, worker_id=workers[j].worker_id)
+                    PlacementEntry(
+                        vm_id=vms[i].vm_id,
+                        worker_id=workers[j].worker_id,
+                        # ← Campo crítico BYOS: nombre exacto del nodo físico ganador
+                        selected_host=host_names[j],
+                    )
                 )
                 break
 
     return True, placement_map, None, None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FUNCIÓN PÚBLICA — punto de entrada del módulo
+# ══════════════════════════════════════════════════════════════════════════════
+
+def run_placement(
+    vms: List[VMSpec],
+    workers: List[WorkerState],
+    timeout_seconds: float,
+    availability_zone_id: int = AZ_ID_LINUX,
+) -> Tuple[bool, List[PlacementEntry], Optional[str], Optional[str]]:
+    """
+    Ejecuta el motor de placement con la estrategia adecuada según az_id.
+
+    Strategy Pattern:
+      az_id == AZ_ID_LINUX      → usa WorkerState enviados (consulta Prometheus externa)
+      az_id == AZ_ID_OPENSTACK  → consulta Nova Hypervisors API vía openstacksdk
+
+    En ambos casos pasa los datos crudos (normalizados) por el mismo
+    algoritmo CP-SAT (R4 de la rúbrica — sin cambios).
+
+    Retorna:
+      (success, placement_map, reason, detail)
+      donde placement_map[i].selected_host = nombre físico del host ganador.
+    """
+    if availability_zone_id == AZ_ID_OPENSTACK:
+        # ── Strategy: OpenStack (BYOS) ─────────────────────────────────────────
+        logger.info("[BYOS] az_id=%d → Strategy OpenStack Nova Hypervisors", availability_zone_id)
+        try:
+            os_workers, host_names = _collect_openstack_workers()
+        except Exception as exc:
+            logger.error("[BYOS][OpenStack] Error conectando a Nova: %s", exc)
+            return (
+                False, [], "OPENSTACK_UNREACHABLE",
+                f"No se pudo consultar la API de Nova Hypervisors: {exc}",
+            )
+        if not os_workers:
+            return (
+                False, [], "NO_WORKERS_AVAILABLE",
+                "OpenStack no reportó hipervisores activos en la zona.",
+            )
+        logger.info(
+            "[BYOS][OpenStack] %d hipervisores disponibles para el solver.", len(os_workers)
+        )
+        return _solve_cpsat(vms, os_workers, host_names, timeout_seconds)
+
+    else:
+        # ── Strategy: Linux Cluster (comportamiento original) ──────────────────
+        logger.info("[BYOS] az_id=%d → Strategy Linux Cluster (workers locales)", availability_zone_id)
+        norm_workers, host_names = _collect_linux_workers(workers)
+        return _solve_cpsat(vms, norm_workers, host_names, timeout_seconds)

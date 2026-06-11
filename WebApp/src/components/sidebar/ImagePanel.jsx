@@ -120,6 +120,22 @@ export const ImagePanel = ({ fullImages, onRefresh, flash, refreshImageList, api
                                         ? <Lock size={11} color={T.textMuted} />
                                         : <Package size={11} color={T.accent} />}
                                     {img.name}
+                                    {/* Badge de Zona de Disponibilidad */}
+                                    {img.az_name && (
+                                        <span style={{
+                                            fontSize: 9, fontWeight: 700,
+                                            padding: "1px 6px", borderRadius: 20,
+                                            letterSpacing: "0.04em", flexShrink: 0,
+                                            ...(img.az_name.toLowerCase().includes("openstack") || img.az_name.toLowerCase().includes("cloud")
+                                                ? { background: "#ff820022", color: "#ff8200", border: "1px solid #ff820044" }
+                                                : { background: "#0ea5e922", color: "#0ea5e9", border: "1px solid #0ea5e944" }
+                                            ),
+                                        }}>
+                                            {img.az_name.toLowerCase().includes("openstack") || img.az_name.toLowerCase().includes("cloud")
+                                                ? "☁ Cloud"
+                                                : "🖥 Linux"}
+                                        </span>
+                                    )}
                                 </div>
                                 <div style={{ fontSize: 10, color: T.textMuted, marginTop: 2, display: "flex", alignItems: "center", gap: 4 }}>
                                     {img.in_use

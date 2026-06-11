@@ -64,17 +64,22 @@ class VMNetworkSpec(BaseModel):
 
 class DeployNetworkRequest(BaseModel):
     """Payload recibido en network.deploy"""
-    slice_id:   str
-    request_id: str
-    links:      List[NetworkLink]
-    vms:        List[VMNetworkSpec] = Field(default_factory=list) # Recibimos las VMs
+    slice_id:             str
+    request_id:           str
+    availability_zone_id: int = Field(default=1, description="1=Linux Cluster, 2=OpenStack")
+    host_map:             dict = Field(default_factory=dict, description="vm_id → selected_host (del VMPlacement)")
+    links:                List[NetworkLink]
+    vms:                  List[VMNetworkSpec] = Field(default_factory=list)
 
 class DestroyNetworkRequest(BaseModel):
     """Payload recibido en network.destroy"""
-    slice_id:   str
-    request_id: str
-    links:      Optional[List[NetworkLink]] = None  
-    vms:        Optional[List[VMNetworkSpec]] = None 
+    slice_id:             str
+    request_id:           str
+    availability_zone_id: int = Field(default=1)
+    links:                Optional[List[NetworkLink]] = None
+    vms:                  Optional[List[VMNetworkSpec]] = None
+    # Para OpenStack destroy: UUIDs de puertos Neutron a borrar
+    port_map:             Optional[dict] = Field(default=None, description="vm_id → {provider_port_id, floating_ip_id}")
 # ---------------------------------------------------------------------------
 # Modelos de Salida (Respuesta al Queue Manager)
 # ---------------------------------------------------------------------------
@@ -88,6 +93,9 @@ class DeployNetworkResponse(BaseModel):
     status:       ProvisioningStatus
     links_ok:     List[LinkResult] = Field(default_factory=list)
     links_failed: List[LinkResult] = Field(default_factory=list)
+    # port_map: vm_id → {provider_port_id, floating_ip, floating_ip_id}
+    # Vacío para Linux Cluster; relleno para OpenStack (lo consume ComputeProvisioner)
+    port_map:     dict = Field(default_factory=dict)
 
 class DestroyNetworkResponse(BaseModel):
     slice_id:   str

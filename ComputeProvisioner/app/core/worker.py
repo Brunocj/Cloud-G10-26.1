@@ -28,9 +28,7 @@ async def handle_deploy(msg: Msg) -> None:
 
         request = DeployRequest(**payload)
 
-        response = await asyncio.get_running_loop().run_in_executor(
-            None, _provisioner.deploy, request
-        )
+        response = await _provisioner.deploy(request)
         logger.info(f"[deploy] Provisioner terminó: status={response.status}")
 
         if response.vms:
@@ -44,6 +42,8 @@ async def handle_deploy(msg: Msg) -> None:
                     "ssh_user":        specs_by_id[vm.vm_id].ssh_user,
                     "ssh_private_key": specs_by_id[vm.vm_id].ssh_private_key,
                     "tap_interfaces":  [t.model_dump() for t in specs_by_id[vm.vm_id].tap_interfaces],
+                    "provider_instance_id": getattr(vm, "provider_instance_id", None),
+                    "vnc_url":         getattr(vm, "vnc_url", None),
                 }
                 for vm in response.vms
             ]
@@ -92,9 +92,7 @@ async def handle_destroy(msg: Msg) -> None:
              logger.warning("No hay VMs especificadas en el request ni en KV para borrar.")
              # Continuamos para que el provisioner responda SUCCESS y no tranque el pipeline
 
-        response = await asyncio.get_running_loop().run_in_executor(
-            None, _provisioner.destroy, request, vms_to_destroy # Pasamos nuestra lista curada
-        )
+        response = await _provisioner.destroy(request, vms_to_destroy)
         logger.info(f"[destroy] Provisioner terminó: status={response.status}")
 
         await queue_client.delete_slice_vms(request.slice_id)

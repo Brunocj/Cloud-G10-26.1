@@ -42,6 +42,11 @@ class VMSpec(BaseModel):
     internal_ip:     Optional[str]       = Field(default=None, description="IP interna asignada por el Queue Manager para NAT/Gateway")
     # ----------------------------
 
+    # --- NUEVOS CAMPOS OPENSTACK ---
+    selected_host:   Optional[str]       = Field(default=None, description="Host físico asignado (Nova hypervisor)")
+    network_ports:   Optional[dict]      = Field(default_factory=dict, description="Puertos lógicos Neutron {provider_port_id, ...}")
+    # -------------------------------
+
     # Credenciales cloud-init
     vm_user:     Optional[str] = Field(default=None, description="Usuario a crear en la VM (default: nombre de imagen)")
     vm_password: Optional[str] = Field(default=None, description="Contraseña de la VM (default: pucp2026)")
@@ -58,6 +63,9 @@ class VMResult(BaseModel):
     pid:       Optional[int] = None
     vnc_port:  Optional[int] = None
     error:     Optional[str] = None
+    # Campos para OpenStack
+    provider_instance_id: Optional[str] = None
+    vnc_url:              Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -66,15 +74,17 @@ class VMResult(BaseModel):
 
 class DeployRequest(BaseModel):
     """Mensaje recibido en compute.deploy"""
-    slice_id:   str          = Field(...)
-    request_id: str          = Field(...)
-    vms:        List[VMSpec] = Field(..., min_length=1)
+    slice_id:             str          = Field(...)
+    request_id:           str          = Field(...)
+    availability_zone_id: int          = Field(default=1, description="1=Linux Cluster, 2=OpenStack")
+    vms:                  List[VMSpec] = Field(..., min_length=1)
 
 
 class DestroyRequest(BaseModel):
     """Mensaje recibido en compute.destroy"""
-    slice_id:   str = Field(...)
-    request_id: str = Field(...)
+    slice_id:             str = Field(...)
+    request_id:           str = Field(...)
+    availability_zone_id: int = Field(default=1, description="1=Linux Cluster, 2=OpenStack")
 
 
 # ---------------------------------------------------------------------------

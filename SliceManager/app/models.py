@@ -85,6 +85,10 @@ class Image(Base):
     date_uploaded = Column(String(100))
     is_general = Column(TINYINT)
     path = Column(String(150))
+    # Zona de disponibilidad a la que pertenece esta imagen (un registro por AZ)
+    availability_zone_id = Column(Integer, ForeignKey('availability_zones.id'), index=True, nullable=True)
+
+    availability_zone = relationship('AvailabilityZone')
 
 
 class Slice(Base):
@@ -141,13 +145,15 @@ class Vm(Base):
     ram = Column(Float(asdecimal=True))
     disk = Column(Float(asdecimal=True))
     state = Column(String(45))
-    external_ip = Column(String(45))
+    external_ip = Column(String(45))        # Reutilizado también como IP flotante de OpenStack
     internet_access = Column(TINYINT, default=0)
     slice_id = Column(ForeignKey('slices.id'), index=True)
     image_id = Column(ForeignKey('images.id'), index=True)
     vnc_port = Column(Integer)
     worker_id = Column(ForeignKey('workers.id'), index=True)
-
+    # Campos OpenStack Nova
+    provider_instance_id = Column(String(100), nullable=True)  # UUID de la instancia en Nova
+    vnc_url = Column(String(500), nullable=True)               # URL web NoVNC de OpenStack
 
     image = relationship('Image')
     slice = relationship('Slice')

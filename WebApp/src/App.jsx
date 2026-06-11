@@ -150,7 +150,7 @@ export default function App() {
         });
     };
 
-    const deployFromDesigner = async (name) => {
+    const deployFromDesigner = async (name, azId = 1) => {
         try {
             const defaultImg     = imageList[0] ?? { id: 1, name: "Cirros" };
             const processedNodes = nodes.map(n => ({
@@ -168,9 +168,13 @@ export default function App() {
 
             const resDeploy = await apiFetch(`/slices/${newSliceId}/deploy`, {
                 method: "POST",
-                body: JSON.stringify({ availability_zone_id: 1, ttl_hours: 4, motivo: "Despliegue directo desde Canvas" }),
+                body: JSON.stringify({ availability_zone_id: azId, ttl_hours: 4, motivo: "Despliegue directo desde Canvas" }),
             });
-            if (!resDeploy.ok) throw new Error();
+            if (!resDeploy.ok) {
+                const errData = await resDeploy.json().catch(() => ({}));
+                flash(errData.detail || "Error al desplegar", "error");
+                return;
+            }
 
             const sl = mkSlice(name, "PENDING_APPROVAL", [...nodes], [...edges]);
             sl.id = newSliceId;
@@ -477,10 +481,10 @@ export default function App() {
             </div>
 
             {/* ── MODALS ───────────────────────────────────────────────────── */}
-            {modal === "deploy"        && <DeployModal    nodes={nodes} edges={edges} onDeploy={deployFromDesigner} onClose={() => setModal(null)} />}
+            {modal === "deploy"        && <DeployModal    nodes={nodes} edges={edges} imageList={imageList} apiFetch={apiFetch} onDeploy={deployFromDesigner} onClose={() => setModal(null)} />}
             {modal === "draft"         && <SaveDraftModal nodes={nodes} edges={edges} onSave={saveDraft}            onClose={() => setModal(null)} />}
             {modal?.type === "confirm" && <ConfirmModal title={modal.title} msg={modal.msg} onOk={modal.onOk} onCancel={() => setModal(null)} />}
-            {consoleVm                 && <ConsoleModal workerIp={consoleVm.workerIp} workerPort={consoleVm.workerPort} vncPort={consoleVm.vncPort} onClose={() => setConsoleVm(null)} />}
+            {consoleVm                 && <ConsoleModal vm={consoleVm} workerIp={consoleVm.workerIp} workerPort={consoleVm.workerPort} vncPort={consoleVm.vncPort} onClose={() => setConsoleVm(null)} />}
 
             {toast && <Toast {...toast} />}
             <style key={themeRev}>{getGlobalCss()}</style>

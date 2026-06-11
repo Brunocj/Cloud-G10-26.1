@@ -17,18 +17,18 @@ const KEYSYMS = {
     at:         { sym: 0x0040, code: "Digit2" },
 };
 
-const VmConsole = ({ workerIp, workerPort, vncPort }) => {
+// ─── Consola NoVNC (Linux Cluster) ────────────────────────────────────────────
+const LinuxClusterConsole = ({ workerIp, workerPort, vncPort }) => {
     const vncRef = useRef(null);
 
     // display = vncPort - 5900  (ej: 5944 - 5900 = 44)
     // QEMU abre WebSocket en puerto 5700 + display  (ej: 5744)
     // El ApiGW tuneliza via SSH:  ws://localhost:8085/vnc/{gatewayIp}/{sshPort}/{wsPort}
     const display = vncPort - 5900;
-    const wsPort = 5700 + display;
+    const wsPort  = 5700 + display;
     const sshPort = workerPort || 22;   // puerto SSH en el gateway (5811-5814)
-    const wsUrl = `ws://${API_GW}/vnc/${workerIp}/${sshPort}/${wsPort}`;
+    const wsUrl   = `ws://${API_GW}/vnc/${workerIp}/${sshPort}/${wsPort}`;
 
-    // Send a single key press (down + up) using X11 keysym
     const sendKey = (sym, code) => {
         if (!vncRef.current) return;
         vncRef.current.sendKey(sym, code, true);   // keydown
@@ -105,6 +105,61 @@ const VmConsole = ({ workerIp, workerPort, vncPort }) => {
             />
         </div>
     );
+};
+
+// ─── Consola OpenStack NoVNC (iframe) ─────────────────────────────────────────
+const OpenStackConsole = ({ vncUrl }) => (
+    <div style={{ width: "800px", backgroundColor: "#000", borderRadius: "8px", overflow: "hidden" }}>
+        {/* Topbar */}
+        <div style={{
+            padding: "8px 10px 6px", backgroundColor: "#1a0a2e", color: "#e0e0e0",
+            display: "flex", justifyContent: "space-between", alignItems: "center",
+            borderBottom: "1px solid #333",
+        }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{
+                    fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 20,
+                    background: "#ff820022", color: "#ff8200", border: "1px solid #ff820044",
+                }}>
+                    ☁ OpenStack NoVNC
+                </span>
+                <span style={{ fontSize: 11, color: "#888", fontFamily: "monospace", maxWidth: 480, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {vncUrl}
+                </span>
+            </div>
+        </div>
+
+        {/* iframe full-screen */}
+        <iframe
+            src={vncUrl}
+            width="100%"
+            height="556px"
+            style={{ border: "none", display: "block" }}
+            title="OpenStack NoVNC Console"
+            allow="clipboard-read; clipboard-write"
+        />
+    </div>
+);
+
+// ─── Componente público VmConsole ─────────────────────────────────────────────
+/**
+ * VmConsole — renderizado condicional según el tipo de hipervisor:
+ *
+ *   · Si `vm.vnc_url` tiene valor → VM de OpenStack → renderiza <iframe> con NoVNC web.
+ *   · Si `vm.vnc_port` tiene valor (y no hay vnc_url) → VM de Linux Cluster → usa noVNC/WebSockify.
+ *
+ * Props heredadas para compatibilidad con ConsoleModal:
+ *   workerIp, workerPort, vncPort  → Linux Cluster
+ *   vm                            → objeto completo (para detectar vnc_url)
+ */
+const VmConsole = ({ workerIp, workerPort, vncPort, vm }) => {
+    // Prioridad: vnc_url de OpenStack > vncPort de Linux Cluster
+    if (vm?.vnc_url) {
+        return <OpenStackConsole vncUrl={vm.vnc_url} />;
+    }
+
+    // Fallback Linux Cluster
+    return <LinuxClusterConsole workerIp={workerIp} workerPort={workerPort} vncPort={vncPort} />;
 };
 
 export default VmConsole;

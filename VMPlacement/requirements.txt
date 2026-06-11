@@ -2,3 +2,7 @@ fastapi==0.111.0
 uvicorn[standard]==0.29.0
 pydantic==2.7.1
 ortools>=9.10
+# NATS: request/reply con WorkflowOrchestrator (slice.placement.process)
+nats-py==2.6.0
+# openstacksdk: consulta Nova Hypervisors API para BYOS (bypass Nova-scheduler)
+openstacksdk>=2.0.0

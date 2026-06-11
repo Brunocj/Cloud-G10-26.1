@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models import Slice, Vm, Vlan, IpPool
+from app.models import Image, Slice, Vm, Vlan, IpPool
 from app.schemas import DeployRequest
 from app.auth import CurrentUser, get_current_user
 from app.services.placement_worker import placement_queue
@@ -53,6 +53,32 @@ async def request_deploy(
         )
 
     logger.info("[DEPLOY] ✅ Slice '%s' encontrado en BD (estado actual: %s)", db_slice.name, db_slice.status)
+
+    # ── Validación Fail-Fast: compatibilidad de imágenes con la AZ ──────────
+    # Principio: verificar ANTES de emitir cualquier evento al bus de mensajes.
+    vms_del_slice = db.query(Vm).filter(Vm.slice_id == slice_id).all()
+    for vm in vms_del_slice:
+        if vm.image_id is None:
+            continue  # VM sin imagen asignada: se valida en el worker
+        img = db.query(Image).filter(Image.id == vm.image_id).first()
+        if img is None:
+            continue
+        # Si la imagen tiene AZ asignada y NO coincide con la zona solicitada → ABORT
+        if img.availability_zone_id is not None and img.availability_zone_id != request.availability_zone_id:
+            logger.warning(
+                "[DEPLOY] ❌ Imagen '%s' (id=%d, az_id=%s) no compatible con zona=%d. Slice abortado.",
+                img.name, img.id, img.availability_zone_id, request.availability_zone_id,
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Error: La imagen seleccionada para el nodo '{vm.name}' no es compatible "
+                    f"con la Zona de Disponibilidad elegida."
+                ),
+            )
+
+    logger.info("[DEPLOY] ✅ Validación Fail-Fast superada: todas las imágenes son compatibles con la zona %d",
+                request.availability_zone_id)
 
     db_slice.status = "PENDING_APPROVAL"
     db_slice.TTL = request.ttl_hours
