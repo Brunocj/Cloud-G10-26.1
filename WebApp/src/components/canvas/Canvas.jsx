@@ -20,7 +20,7 @@ const buildIfaceMap = (edges) => {
 };
 
 // ─── Canvas ──────────────────────────────────────────────────────────────────
-export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlice, onOpenConsole }) => {
+export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlice, onOpenConsole, targetAz, setTargetAz }) => {
     const svgRef   = useRef();
     const groupRef = useRef();           // root <g> — updated imperatively during pan/zoom
 
@@ -339,6 +339,12 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
     const totalRam     = nodes.reduce((s, n) => s + n.ram, 0);
     const ifaceMap     = buildIfaceMap(edges);
 
+    // ── Filter Images based on Target AZ ──────────────────────────────────────
+    const availableImages = imageList.filter(img => {
+        if (!targetAz) return true; // "Cualquiera"
+        return img.availability_zone_id == targetAz;
+    });
+
     // ── Render ────────────────────────────────────────────────────────────────
 
     return (
@@ -378,6 +384,20 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                 )}
 
                 <div style={{ flex: 1 }} />
+
+                {/* Target AZ Selector */}
+                <div style={{ display: "flex", alignItems: "center", gap: 6, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 8, padding: "2px 8px", marginRight: 4 }}>
+                    <span style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, textTransform: "uppercase" }}>Zona Objetivo:</span>
+                    <select
+                        value={targetAz || ""}
+                        onChange={(e) => setTargetAz(e.target.value)}
+                        style={{ ...btnBase({ boxShadow: "none" }), background: "transparent", border: "none", color: T.accent, fontSize: 11, fontWeight: 700, padding: "2px", cursor: "pointer", outline: "none" }}
+                    >
+                        <option value="">Cualquiera</option>
+                        <option value="1">Linux Cluster</option>
+                        <option value="2">OpenStack (Cloud)</option>
+                    </select>
+                </div>
 
                 {/* Controles de Zoom */}
                 <div style={{ display: "flex", alignItems: "center", gap: 4, marginRight: 4, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 8, padding: "2px" }}>
@@ -627,7 +647,7 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                 {editingNode && (
                     <NodeEditor
                         node={editingNode}
-                        availableImages={imageList}
+                        availableImages={availableImages}
                         sliceStatus={activeSlice ? activeSlice.status : "DRAFT"}
                         onSave={updated => setNodes(prev => prev.map(n => n.id === updated.id ? updated : n))}
                         onDelete={id => {

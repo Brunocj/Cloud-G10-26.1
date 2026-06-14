@@ -2,4 +2,5 @@ pydantic==2.5.3
 pydantic-settings==2.1.0
 nats-py==2.6.0
 paramiko==3.4.0
-openstacksdk>=2.0.0
+openstacksdk>=2.0.0
+PySocks>=1.7.1

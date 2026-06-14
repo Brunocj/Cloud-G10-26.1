@@ -18,7 +18,7 @@ logger = logging.getLogger("api-gateway")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Cliente HTTP compartido (connection pool) ──────────────────
-    app.state.http_client = httpx.AsyncClient(timeout=settings.FORWARD_TIMEOUT)
+    app.state.http_client = httpx.AsyncClient(timeout=settings.FORWARD_TIMEOUT, trust_env=False)
     logger.info("API Gateway iniciado. Slice Manager: %s", settings.SLICE_MANAGER_URL)
 
     # ── JWKS client: descarga claves públicas de Keycloak al arrancar ──

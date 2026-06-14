@@ -6,9 +6,19 @@ import { Upload, RefreshCcw, Trash2, CheckCircle, Circle, Lock, Package, Loader 
 export const ImagePanel = ({ fullImages, onRefresh, flash, refreshImageList, apiFetch, user }) => {
     const [uploading,   setUploading]   = useState(false);
     const [gcRunning,   setGcRunning]   = useState(false);
-    const [uploadForm,  setUploadForm]  = useState({ name: "", file: null, isGeneral: false });
+    const [uploadForm,  setUploadForm]  = useState({ name: "", file: null, isGeneral: false, azId: 1 });
     const [showUpload,  setShowUpload]  = useState(false);
+    const [azList,      setAzList]      = useState([{ id: 1, name: "Linux Cluster" }, { id: 2, name: "OpenStack" }]);
     const fileRef = useRef(null);
+
+    // Fetch AZ list when upload panel is opened
+    useState(() => {
+        if (!apiFetch) return;
+        apiFetch("/slices/utils/availability-zones")
+            .then(r => r.ok ? r.json() : null)
+            .then(data => { if (Array.isArray(data) && data.length > 0) setAzList(data); })
+            .catch(() => {});
+    }, [apiFetch]);
 
     const handleUpload = async () => {
         if (!uploadForm.file || !uploadForm.name.trim()) {
@@ -18,6 +28,7 @@ export const ImagePanel = ({ fullImages, onRefresh, flash, refreshImageList, api
         const fd = new FormData();
         fd.append("name",       uploadForm.name.trim());
         fd.append("is_general", uploadForm.isGeneral ? 1 : 0);
+        fd.append("availability_zone_id", uploadForm.azId);
         fd.append("file",       uploadForm.file);
         try {
             const res  = await apiFetch("/slices/utils/images/upload", { method: "POST", body: fd });
@@ -25,7 +36,7 @@ export const ImagePanel = ({ fullImages, onRefresh, flash, refreshImageList, api
             if (!res.ok) throw new Error(data.detail || "Error al subir");
             flash(`Imagen '${uploadForm.name}' subida correctamente.`);
             setShowUpload(false);
-            setUploadForm({ name: "", file: null, isGeneral: false });
+            setUploadForm({ name: "", file: null, isGeneral: false, azId: 1 });
             onRefresh();
             if (refreshImageList) refreshImageList();
         } catch (e) { flash(e.message, "error"); }
@@ -75,91 +86,101 @@ export const ImagePanel = ({ fullImages, onRefresh, flash, refreshImageList, api
                 )}
             </div>
 
-            {/* Upload form (collapsible) */}
-            {showUpload && (
-                <div style={{ padding: "10px 12px", borderBottom: `1px solid ${T.border}`, background: T.accentLight, flexShrink: 0 }}>
-                    <Label>Nombre de la imagen</Label>
-                    <input value={uploadForm.name}
-                        onChange={e => setUploadForm(p => ({ ...p, name: e.target.value }))}
-                        placeholder="ej: ubuntu-custom-v1" style={{ ...inp, marginBottom: 8 }} />
-                    <Label>Archivo (.qcow2 / .img / .iso)</Label>
-                    <input type="file" accept=".qcow2,.img,.iso" ref={fileRef}
-                        onChange={e => setUploadForm(p => ({ ...p, file: e.target.files[0] }))}
-                        style={{ fontSize: 11, color: T.text, marginBottom: 8, width: "100%" }} />
-                    
-                    {(user?.role === "admin" || user?.role === "superAdmin") && (
-                        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: T.text, marginBottom: 8, cursor: "pointer" }}>
-                            <input type="checkbox" checked={uploadForm.isGeneral}
-                                onChange={e => setUploadForm(p => ({ ...p, isGeneral: e.target.checked }))} />
-                            ¿Hacer imagen pública general del sistema?
-                        </label>
-                    )}
+            {/* Scrollable Container for both Form and List */}
+            <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column" }}>
+                {/* Upload form (collapsible) */}
+                {showUpload && (
+                    <div style={{ padding: "10px 12px", borderBottom: `1px solid ${T.border}`, background: T.accentLight, flexShrink: 0 }}>
+                        <Label>Nombre de la imagen</Label>
+                        <input value={uploadForm.name}
+                            onChange={e => setUploadForm(p => ({ ...p, name: e.target.value }))}
+                            placeholder="ej: ubuntu-custom-v1" style={{ ...inp, marginBottom: 8 }} />
+                        <Label>Archivo (.qcow2 / .img / .iso)</Label>
+                        <input type="file" accept=".qcow2,.img,.iso" ref={fileRef}
+                            onChange={e => setUploadForm(p => ({ ...p, file: e.target.files[0] }))}
+                            style={{ fontSize: 11, color: T.text, marginBottom: 8, width: "100%" }} />
+                        
+                        <Label>Zona de Disponibilidad</Label>
+                        <select value={uploadForm.azId}
+                            onChange={e => setUploadForm(p => ({ ...p, azId: Number(e.target.value) }))}
+                            style={{ ...inp, marginBottom: 8 }}>
+                            {azList.map(az => <option key={az.id} value={az.id}>{az.name}</option>)}
+                        </select>
+                        
+                        {(user?.role === "admin" || user?.role === "superAdmin") && (
+                            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: T.text, marginBottom: 8, cursor: "pointer" }}>
+                                <input type="checkbox" checked={uploadForm.isGeneral}
+                                    onChange={e => setUploadForm(p => ({ ...p, isGeneral: e.target.checked }))} />
+                                ¿Hacer imagen pública general del sistema?
+                            </label>
+                        )}
 
-                    <button onClick={handleUpload} disabled={uploading}
-                        style={btnBase({ width: "100%", background: T.accent, color: "#fff", border: "none", opacity: uploading ? 0.6 : 1,
-                            display: "flex", alignItems: "center", justifyContent: "center", gap: 6 })}>
-                        {uploading
-                            ? <><Loader size={13} style={{ animation: "spin 0.8s linear infinite" }} /> Subiendo...</>
-                            : <><CheckCircle size={13} /> Confirmar Subida</>}
-                    </button>
-                </div>
-            )}
-
-            {/* Image list */}
-            <div style={{ flex: 1, overflowY: "auto", padding: "8px 10px", display: "flex", flexDirection: "column", gap: 6 }}>
-                {fullImages.length === 0 && (
-                    <div style={{ color: T.textFaint, fontSize: 12, textAlign: "center", padding: 16 }}>Sin imágenes registradas</div>
-                )}
-                {fullImages.map(img => (
-                    <div key={img.id} style={{ background: T.surface, border: `1px solid ${img.in_use ? T.accent + "44" : T.border}`, borderRadius: 10, padding: "9px 10px", boxShadow: T.shadow }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-                            <div style={{ flex: 1, minWidth: 0 }}>
-                                <div style={{ fontSize: 12, fontWeight: 700, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
-                                        display: "flex", alignItems: "center", gap: 5 }}>
-                                    {img.is_general
-                                        ? <Lock size={11} color={T.textMuted} />
-                                        : <Package size={11} color={T.accent} />}
-                                    {img.name}
-                                    {/* Badge de Zona de Disponibilidad */}
-                                    {img.az_name && (
-                                        <span style={{
-                                            fontSize: 9, fontWeight: 700,
-                                            padding: "1px 6px", borderRadius: 20,
-                                            letterSpacing: "0.04em", flexShrink: 0,
-                                            ...(img.az_name.toLowerCase().includes("openstack") || img.az_name.toLowerCase().includes("cloud")
-                                                ? { background: "#ff820022", color: "#ff8200", border: "1px solid #ff820044" }
-                                                : { background: "#0ea5e922", color: "#0ea5e9", border: "1px solid #0ea5e944" }
-                                            ),
-                                        }}>
-                                            {img.az_name.toLowerCase().includes("openstack") || img.az_name.toLowerCase().includes("cloud")
-                                                ? "☁ Cloud"
-                                                : "🖥 Linux"}
-                                        </span>
-                                    )}
-                                </div>
-                                <div style={{ fontSize: 10, color: T.textMuted, marginTop: 2, display: "flex", alignItems: "center", gap: 4 }}>
-                                    {img.in_use
-                                        ? <><CheckCircle size={10} color={T.accent} /><span style={{ color: T.accent, fontWeight: 600 }}>En uso ({img.active_vm_count} VM{img.active_vm_count > 1 ? "s" : ""})</span></>
-                                        : <><Circle size={10} color={img.is_general ? T.textMuted : T.yellow} /><span style={{ color: img.is_general ? T.textMuted : T.yellow }}>Sin VMs activas</span></>}
-                                </div>
-                                <div style={{ fontSize: 9, color: T.textFaint, marginTop: 2, fontFamily: "monospace" }}>{img.path}</div>
-                            </div>
-                            {img.is_general !== 1 && (
-                                <button
-                                    onClick={() => handleDelete(img)}
-                                    disabled={img.in_use}
-                                    title={img.in_use ? "No se puede eliminar: tiene VMs activas" : "Eliminar imagen"}
-                                    style={btnBase({ padding: "4px 8px", fontSize: 13, marginLeft: 6, flexShrink: 0, cursor: img.in_use ? "not-allowed" : "pointer",
-                                        background: img.in_use ? T.surfaceElevated : T.redLight,
-                                        color: img.in_use ? T.textFaint : T.red,
-                                        border: `1px solid ${img.in_use ? T.border : T.red + "44"}`,
-                                        display: "flex", alignItems: "center" })}>
-                                    <Trash2 size={13} />
-                                </button>
-                            )}
-                        </div>
+                        <button onClick={handleUpload} disabled={uploading}
+                            style={btnBase({ width: "100%", background: T.accent, color: "#fff", border: "none", opacity: uploading ? 0.6 : 1,
+                                display: "flex", alignItems: "center", justifyContent: "center", gap: 6 })}>
+                            {uploading
+                                ? <><Loader size={13} style={{ animation: "spin 0.8s linear infinite" }} /> Subiendo...</>
+                                : <><CheckCircle size={13} /> Confirmar Subida</>}
+                        </button>
                     </div>
-                ))}
+                )}
+
+                {/* Image list */}
+                <div style={{ padding: "8px 10px", display: "flex", flexDirection: "column", gap: 6 }}>
+                    {fullImages.length === 0 && (
+                        <div style={{ color: T.textFaint, fontSize: 12, textAlign: "center", padding: 16 }}>Sin imágenes registradas</div>
+                    )}
+                    {fullImages.map(img => (
+                        <div key={img.id} style={{ background: T.surface, border: `1px solid ${img.in_use ? T.accent + "44" : T.border}`, borderRadius: 10, padding: "9px 10px", boxShadow: T.shadow }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                    <div style={{ fontSize: 12, fontWeight: 700, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                                            display: "flex", alignItems: "center", gap: 5 }}>
+                                        {img.is_general
+                                            ? <Lock size={11} color={T.textMuted} />
+                                            : <Package size={11} color={T.accent} />}
+                                        {img.name}
+                                        {/* Badge de Zona de Disponibilidad */}
+                                        {img.az_name && (
+                                            <span style={{
+                                                fontSize: 9, fontWeight: 700,
+                                                padding: "1px 6px", borderRadius: 20,
+                                                letterSpacing: "0.04em", flexShrink: 0,
+                                                ...(img.az_name.toLowerCase().includes("openstack") || img.az_name.toLowerCase().includes("cloud")
+                                                    ? { background: "#ff820022", color: "#ff8200", border: "1px solid #ff820044" }
+                                                    : { background: "#0ea5e922", color: "#0ea5e9", border: "1px solid #0ea5e944" }
+                                                ),
+                                            }}>
+                                                {img.az_name.toLowerCase().includes("openstack") || img.az_name.toLowerCase().includes("cloud")
+                                                    ? "☁ Cloud"
+                                                    : "🖥 Linux"}
+                                            </span>
+                                        )}
+                                    </div>
+                                    <div style={{ fontSize: 10, color: T.textMuted, marginTop: 2, display: "flex", alignItems: "center", gap: 4 }}>
+                                        {img.in_use
+                                            ? <><CheckCircle size={10} color={T.accent} /><span style={{ color: T.accent, fontWeight: 600 }}>En uso ({img.active_vm_count} VM{img.active_vm_count > 1 ? "s" : ""})</span></>
+                                            : <><Circle size={10} color={img.is_general ? T.textMuted : T.yellow} /><span style={{ color: img.is_general ? T.textMuted : T.yellow }}>Sin VMs activas</span></>}
+                                    </div>
+                                    <div style={{ fontSize: 9, color: T.textFaint, marginTop: 2, fontFamily: "monospace" }}>{img.path}</div>
+                                </div>
+                                {img.is_general !== 1 && (
+                                    <button
+                                        onClick={() => handleDelete(img)}
+                                        disabled={img.in_use}
+                                        title={img.in_use ? "No se puede eliminar: tiene VMs activas" : "Eliminar imagen"}
+                                        style={btnBase({ padding: "4px 8px", fontSize: 13, marginLeft: 6, flexShrink: 0, cursor: img.in_use ? "not-allowed" : "pointer",
+                                            background: img.in_use ? T.surfaceElevated : T.redLight,
+                                            color: img.in_use ? T.textFaint : T.red,
+                                            border: `1px solid ${img.in_use ? T.border : T.red + "44"}`,
+                                            display: "flex", alignItems: "center" })}>
+                                        <Trash2 size={13} />
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+                    ))}
+                </div>
             </div>
         </div>
     );

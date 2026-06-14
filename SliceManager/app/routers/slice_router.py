@@ -112,6 +112,10 @@ def create_draft(
             ext_ip     = vm_data.get("external_ip", None)
             int_access = 1 if ext_ip else int(vm_data.get("internet_access", 0))
 
+            img_id = vm_data.get("image_id")
+            if img_id is not None and int(img_id) < 0:
+                img_id = None
+
             nueva_vm = Vm(
                 name=vm_data.get("id"),
                 vcore=int(vm_data.get("vcores", 1)),
@@ -119,7 +123,7 @@ def create_draft(
                 disk=float(vm_data.get("disk", 5.0)),
                 state="DRAFT",
                 slice_id=slice_creado.id,
-                image_id=vm_data.get("image_id"),
+                image_id=img_id,
                 worker_id=asignado.id if asignado else None,
                 external_ip=ext_ip,
                 internet_access=int_access,
@@ -198,6 +202,10 @@ def update_draft(
         ext_ip     = vm_data.get("external_ip", None)
         int_access = 1 if ext_ip else int(vm_data.get("internet_access", 0))
 
+        img_id = vm_data.get("image_id")
+        if img_id is not None and int(img_id) < 0:
+            img_id = None
+
         nueva_vm = Vm(
             name=vm_data.get("id"),
             vcore=int(vm_data.get("vcores", 1)),
@@ -205,7 +213,7 @@ def update_draft(
             disk=float(vm_data.get("disk", 5.0)),
             state="DRAFT",
             slice_id=slice_id,
-            image_id=vm_data.get("image_id"),
+            image_id=img_id,
             worker_id=vm_data.get("worker_id"),
             external_ip=ext_ip,
             internet_access=int_access,
@@ -223,15 +231,6 @@ def update_draft(
 
 # ── Utils (sin restricción de rol — cualquier usuario autenticado) ─────────────
 
-@router.get("/utils/images", status_code=200)
-def get_available_images(
-    db:   Session     = Depends(get_db),
-    user: CurrentUser = Depends(get_current_user),   # noqa: autenticado
-):
-    imagenes = db.query(Image).all()
-    if not imagenes:
-        return [{"id": 0, "name": "Ubuntu 22.04 LTS (Fallback)"}]
-    return [{"id": img.id, "name": img.name} for img in imagenes]
 
 
 @router.get("/utils/workers", status_code=200)

@@ -14,30 +14,22 @@ import re
 import paramiko
 
 from app.database import SessionLocal
-from app.models import Image, Vm
+from app.models import Image, Vm, Worker
 
 logger = logging.getLogger("SliceManager.GC")
 
 GC_INTERVAL_HOURS: float = float(os.getenv("GC_INTERVAL_HOURS", "6"))
 
-GATEWAY_IP = "10.20.11.119"
-_KEY = "/app/keys/id_ed25519"  # ruta absoluta — montada vía docker volume
-_WORKER_INVENTORY = {
-    1: {"ip": GATEWAY_IP, "port": 5811, "user": "ubuntu", "key_path": _KEY},
-    2: {"ip": GATEWAY_IP, "port": 5812, "user": "ubuntu", "key_path": _KEY},
-    3: {"ip": GATEWAY_IP, "port": 5813, "user": "ubuntu", "key_path": _KEY},
-    4: {"ip": GATEWAY_IP, "port": 5814, "user": "ubuntu", "key_path": _KEY},
-}
-
 VMS_DIR = "/vms"
 _ALIVE_STATES = ("DRAFT", "PROVISIONING", "ACTIVE", "PENDING_APPROVAL")
 
 
-def _ssh_delete_image_file(file_path: str) -> None:
+def _ssh_delete_image_file(file_path: str, db) -> None:
     """Intenta borrar un archivo de imagen via SSH al server1 (donde está el NFS)."""
-    worker = _WORKER_INVENTORY.get(1)
-    if not worker:
+    worker_db = db.query(Worker).filter(Worker.id == 1).first()
+    if not worker_db or not worker_db.ssh_key_path:
         return
+    worker = {"ip": worker_db.ip_address, "port": worker_db.ssh_port, "user": worker_db.ssh_user, "key_path": worker_db.ssh_key_path}
     try:
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -55,6 +47,31 @@ def _ssh_delete_image_file(file_path: str) -> None:
     except Exception as exc:
         logger.warning("[GC] SSH delete falló para %s: %s", file_path, exc)
 
+
+def _delete_openstack_image(glance_id: str) -> None:
+    import openstack
+    auth_url = os.getenv("OS_AUTH_URL")
+    if not auth_url:
+        logger.error("[GC] OS_AUTH_URL no configurado. No se puede borrar en Glance: %s", glance_id)
+        return
+    try:
+        conn = openstack.connect(
+            auth_url=auth_url,
+            username=os.getenv("OS_USERNAME", "admin"),
+            password=os.getenv("OS_PASSWORD", ""),
+            project_name=os.getenv("OS_PROJECT_NAME", "admin"),
+            user_domain_name=os.getenv("OS_USER_DOMAIN_NAME", "Default"),
+            project_domain_name=os.getenv("OS_PROJECT_DOMAIN_NAME", "Default"),
+        )
+        # Limpiar el prefijo si existe
+        if glance_id.startswith("glance://"):
+            glance_id = glance_id.replace("glance://", "")
+        
+        logger.info("[GC] Borrando imagen de OpenStack Glance: %s", glance_id)
+        conn.image.delete_image(glance_id)
+        logger.info("[GC] Imagen borrada exitosamente en OpenStack: %s", glance_id)
+    except Exception as exc:
+        logger.warning("[GC] Falló el borrado de OpenStack para %s: %s", glance_id, exc)
 
 def _ssh_exec(worker: dict, command: str) -> tuple:
     client = paramiko.SSHClient()
@@ -125,7 +142,12 @@ def run_gc_cycle() -> dict:
         return summary
 
     # Paso 1 y 2: Limpiar ISOs y discos huérfanos en workers
-    for worker_id, worker in _WORKER_INVENTORY.items():
+    linux_workers = db.query(Worker).filter(Worker.availability_zones_id == 1).all()
+    for w in linux_workers:
+        if not w.ssh_key_path:
+            continue
+        worker_id = w.id
+        worker = {"ip": w.ip_address, "port": w.ssh_port, "user": w.ssh_user, "key_path": w.ssh_key_path}
         try:
             isos = _gc_seed_isos(worker_id, worker)
             orphans = _gc_orphan_disks(worker_id, worker, alive_vm_names)
@@ -149,18 +171,21 @@ def run_gc_cycle() -> dict:
         ).all()
 
         for img in unused_images:
-            # Borrar archivo físico
+            # Borrar archivo físico o de Glance
             if img.path:
                 try:
-                    if os.path.exists(img.path):
-                        os.remove(img.path)
-                        logger.info("[GC] Archivo de imagen borrado: %s", img.path)
+                    if img.path.startswith("glance://") or img.availability_zone_id == 2: # OPENSTACK_AZ_ID es 2
+                        _delete_openstack_image(img.path)
                     else:
-                        # Intentar via SSH por si el NFS está montado en otro nodo
-                        _ssh_delete_image_file(img.path)
+                        if os.path.exists(img.path):
+                            os.remove(img.path)
+                            logger.info("[GC] Archivo de imagen borrado: %s", img.path)
+                        else:
+                            # Intentar via SSH por si el NFS está montado en otro nodo
+                            _ssh_delete_image_file(img.path, db)
                 except OSError as exc:
                     logger.warning("[GC] No se pudo borrar archivo %s: %s", img.path, exc)
-                    _ssh_delete_image_file(img.path)
+                    _ssh_delete_image_file(img.path, db)
 
             # Soft-delete: marcamos is_general=NULL para no romper FK con vms
             img.is_general = None

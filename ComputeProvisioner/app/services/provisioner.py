@@ -108,10 +108,9 @@ class Provisioner:
                     disk_path = executor.create_disk(vm.vm_id, slice_id, vm.image_path, vm.worker_ip, vm.disk_gb)
                     logger.info("[CP]    💽       Disco creado: %s", disk_path)
 
-                    # 2. TAP interfaces
+                    # 2. TAP interfaces (Eliminado: ahora delegado 100% al NetworkOrchestrator)
                     if vm.tap_interfaces:
-                        logger.info("[CP]    🔗 [2/3] Creando %d TAP interface(s)...", len(vm.tap_interfaces))
-                        executor.create_tap_interfaces(vm.tap_interfaces)
+                        logger.info("[CP]    🔗 [2/3] Interfaces TAP provistas por NetworkOrchestrator: %d", len(vm.tap_interfaces))
                         for tap in vm.tap_interfaces:
                             logger.info("[CP]          TAP: %-28s MAC: %s",
                                         getattr(tap, 'tap_name', tap), getattr(tap, 'mac', ''))
@@ -218,11 +217,6 @@ class Provisioner:
                 executor = QEMUExecutor(ssh)
 
                 executor.kill_vm(vm_id, slice_id)
-
-                if tap_ifaces:
-                    from app.models.schemas import TapInterface
-                    taps = [TapInterface(**t) for t in tap_ifaces]
-                    executor.destroy_tap_interfaces(taps)
 
                 executor.delete_disk(vm_id, slice_id)
                 executor.delete_seed_iso(vm_id)  # Limpia el ISO de cloud-init

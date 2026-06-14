@@ -78,6 +78,7 @@ class NetworkProvisioner:
                     for ep in ok_endpoints:
                         successful_links.add(ep["link_id"])
                     for ep, err in fail_endpoints:
+                        logger.error(f"[worker={worker_ip}] Fallo en endpoint TAP={ep.get('tap', 'N/A')}: {err}")
                         failed_links_errors[ep["link_id"]] = err
                 except Exception as exc:
                     logger.error(f"[worker={worker_ip}] Error crítico: {exc}")

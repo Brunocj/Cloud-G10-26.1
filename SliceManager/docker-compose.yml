@@ -27,11 +27,31 @@ services:
       - OS_IDENTITY_API_VERSION=3
       - OS_IMAGE_API_VERSION=2
       - OPENSTACK_AZ_ID=2
+      # ── SOCKS5 Proxy para OpenStack ──
+      - HTTP_PROXY=socks5h://openstack-proxy:1080
+      - HTTPS_PROXY=socks5h://openstack-proxy:1080
+      - NO_PROXY=localhost,127.0.0.1,nats,vm-placement,db,10.20.11.212,host.docker.internal
     volumes:
       # Monta la carpeta local ./keys en la ruta /app/keys dentro del contenedor
       # El ":ro" significa Read-Only (Solo lectura por seguridad)
       - ./keys:/app/keys:ro
       - /mnt/cloud_images:/mnt/cloud_images
+    networks:
+      - pucp_cloud_net
+
+  openstack-proxy:
+    image: alpine
+    container_name: openstack-proxy
+    restart: unless-stopped
+    volumes:
+      - ./keys:/app/keys:ro
+    command: >
+      sh -c "apk add --no-cache openssh-client dos2unix &&
+             mkdir -p ~/.ssh &&
+             cp /app/keys/id_ed25519 ~/.ssh/id_ed25519 &&
+             dos2unix ~/.ssh/id_ed25519 &&
+             chmod 600 ~/.ssh/id_ed25519 &&
+             ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no -N -D 0.0.0.0:1080 ubuntu@10.20.11.119 -p 5821"
     networks:
       - pucp_cloud_net
 networks:

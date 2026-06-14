@@ -139,7 +139,11 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, onSave, onDelet
                                     setF(p => ({ ...p, image_id: id, image: name }));
                                 }} style={inp}>
                                 <option value="" disabled>Seleccione un S.O.…</option>
-                                {availableImages?.map(i => <option key={i.id} value={i.id}>{i.name}</option>)}
+                                {availableImages?.map(i => (
+                                    <option key={i.id} value={i.id}>
+                                        {i.name} {i.az_name ? `— [${i.az_name.toLowerCase().includes("openstack") || i.az_name.toLowerCase().includes("cloud") ? "☁ Cloud" : "🖥 Linux"}]` : ""}
+                                    </option>
+                                ))}
                             </select>
                         </div>
 

@@ -17,6 +17,10 @@ class NetworkExecutor:
     def configure_vlan_and_port(self, ssh: SSHClient, tap_interface: str, vlan_id: int) -> None:
         """Conecta el TAP al switch virtual y le asigna la VLAN (Aislamiento Capa 2)."""
         
+        # 🔥 0. Crear el TAP primero antes de que OVS tome control del nombre
+        ssh.exec(f"sudo ip tuntap add dev {tap_interface} mode tap || true")
+        ssh.exec(f"sudo ip link set {tap_interface} up || true")
+
         # 1. Asegurar que el switch de integración exista
         ssh.exec("sudo ovs-vsctl --may-exist add-br br-int")
         
@@ -50,12 +54,19 @@ class NetworkExecutor:
                 logger.debug(f"[{self.worker_ip}] FW Permitido: {rule.protocol}/{rule.allow_port} -> {tap_interface}")
 
     def destroy_port(self, ssh: SSHClient, tap_interface: str) -> None:
-        """Desconecta el TAP del switch virtual durante la destrucción del slice."""
+        """Desconecta el TAP del switch virtual y lo elimina del OS durante la destrucción del slice."""
         exit_code, _, err = ssh.exec(f"sudo ovs-vsctl --if-exists del-port br-int {tap_interface}")
         if exit_code == 0:
             logger.info(f"[{self.worker_ip}] Puerto {tap_interface} eliminado de OVS")
         else:
             logger.warning(f"[{self.worker_ip}] Error borrando puerto OVS {tap_interface}: {err}")
+            
+        # 🔥 ELIMINAR EL TAP DEL SO (Asumimos responsabilidad total)
+        exit_code_ip, _, err_ip = ssh.exec(f"sudo ip tuntap del dev {tap_interface} mode tap || true")
+        if exit_code_ip == 0:
+            logger.info(f"[{self.worker_ip}] TAP {tap_interface} eliminada físicamente del OS")
+        else:
+            logger.warning(f"[{self.worker_ip}] Error eliminando TAP {tap_interface} del OS: {err_ip}")
 
     def configure_gateway_and_nat(self, ssh: SSHClient, slice_id: str, vms: list, mgmt_vlan: int) -> None:
         """

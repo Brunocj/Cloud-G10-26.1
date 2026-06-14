@@ -17,6 +17,10 @@ services:
       OS_IMAGE_API_VERSION:     "2"
       OPENSTACK_AZ_ID:          "2"
       LINUX_AZ_ID:              "1"
+      # Proxy SOCKS5 para llegar a OpenStack
+      HTTP_PROXY:               socks5h://openstack-proxy:1080
+      HTTPS_PROXY:              socks5h://openstack-proxy:1080
+      NO_PROXY:                 localhost,127.0.0.1,nats,db,10.20.11.212,host.docker.internal
     networks:
       - pucp_cloud_net
  

@@ -96,24 +96,7 @@ class QEMUExecutor:
         logger.info("Disco creado: %s usando imagen %s con tamaño %s", disk_path, image_path, size_arg)
         return disk_path
 
-    def create_tap_interfaces(self, tap_interfaces: List[TapInterface]) -> None:
-        """
-        Crea interfaces TAP en el worker y las conecta al bridge OVS (br-int).
 
-        Para cada TapInterface:
-          1. ip tuntap add dev {tap_name} mode tap
-          2. ovs-vsctl add-port {OVS_BRIDGE} {tap_name}
-          3. ip link set {tap_name} up
-        """
-        bridge = settings.OVS_BRIDGE
-
-        for iface in tap_interfaces:
-            tap = iface.tap_name
-            logger.info("Creando TAP %s → %s", tap, bridge)
-            self._exec_checked(f"sudo ip tuntap add dev {tap} mode tap")
-            self._exec_checked(f"sudo ovs-vsctl add-port {bridge} {tap}")
-            self._exec_checked(f"sudo ip link set {tap} up")
-            logger.info("TAP %s conectada a OVS bridge %s", tap, bridge)
 
     def _prepare_cloud_init(self, vm_id: str, image_path: str, vm_user: str = "ubuntu", vm_password: str = "pucp2026", public_key_path: str = "keys/worker_key.pub") -> str:
         """Genera el ISO de cloud-init en el worker fisico para inyectar la llave SSH y credenciales."""
@@ -261,28 +244,7 @@ chpasswd:
         else:
             logger.debug("Seed ISO no encontrado: %s", iso_path)
 
-    def destroy_tap_interfaces(self, tap_interfaces: List[TapInterface]) -> None:
-        """
-        Elimina interfaces TAP del worker y del bridge OVS.
 
-        Para cada TapInterface:
-          1. ovs-vsctl del-port {OVS_BRIDGE} {tap_name}
-          2. ip tuntap del dev {tap_name} mode tap
-        """
-        bridge = settings.OVS_BRIDGE
-
-        for iface in tap_interfaces:
-            tap = iface.tap_name
-            logger.info("Eliminando TAP %s de %s", tap, bridge)
-
-            code, _, _ = self._ssh.exec(f"ip link show {tap}")
-            if code != 0:
-                logger.warning("TAP %s no encontrada, omitiendo", tap)
-                continue
-
-            self._ssh.exec(f"sudo ovs-vsctl del-port {bridge} {tap}")
-            self._ssh.exec(f"sudo ip tuntap del dev {tap} mode tap")
-            logger.info("TAP %s eliminada", tap)
 
 
 # ------------------------------------------------------------------

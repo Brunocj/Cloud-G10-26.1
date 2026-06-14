@@ -27,14 +27,15 @@ class VMSpec(BaseModel):
     """Especificación de una VM individual a desplegar."""
     vm_id:           str                 = Field(..., description="ID único de la VM")
     worker_ip:       str                 = Field(..., description="IP del gateway SSH para este worker")
-    worker_port:     int                 = Field(default=22, description="Puerto SSH en el gateway (ej: 5811-5814)")
-    ssh_user:        str                 = Field(..., description="Usuario SSH del worker")
-    ssh_private_key: str                 = Field(..., description="Llave privada PEM como string")
+    worker_port:     Optional[int]       = Field(default=22, description="Puerto SSH en el gateway (ej: 5811-5814)")
+    ssh_user:        Optional[str]       = Field(default=None, description="Usuario SSH del worker")
+    ssh_private_key: Optional[str]       = Field(default=None, description="Llave privada PEM como string")
     vcpus:           int                 = Field(..., ge=1)
-    ram_mb:          int                 = Field(..., ge=128)
-    disk_gb: float
-    image_path: str # 🔥 Ahora recibimos la ruta completa, no solo el nombre
-    vnc_port: int
+    ram_mb:          float               = Field(..., ge=128)
+    disk_gb:         float               = Field(...)
+    image_path:      str                 = Field(...)
+    vnc_port:        Optional[int]       = Field(default=None)
+    vnc_display:     Optional[int]       = Field(default=None)
 
     # --- NUEVOS CAMPOS DEL R5 ---
     internet_access: int                 = Field(default=0, description="1 si tiene salida a internet")

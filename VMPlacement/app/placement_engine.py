@@ -76,10 +76,23 @@ def _collect_openstack_workers() -> Tuple[List[WorkerState], List[str]]:
     Retorna (workers, host_names) para el solver CP-SAT.
     """
     import openstack  # openstacksdk — nunca SSH
+    try:
+        import socks  # PySocks
+    except ImportError:
+        logger.error("[BYOS][OpenStack] CRITICAL: PySocks no está instalado. ¡La imagen Docker no se ha reconstruido correctamente!")
+        raise RuntimeError("Falta la librería PySocks. Por favor reconstruye la imagen Docker.")
 
     OC_CPU   = float(os.getenv("OS_OC_CPU",   "2.0"))   # overcommit CPU OpenStack
     OC_RAM   = float(os.getenv("OS_OC_RAM",   "1.54"))  # overcommit RAM OpenStack
     OC_DISCO = float(os.getenv("OS_OC_DISCO", "1.0"))   # overcommit Disco OpenStack
+
+    # Forzar soporte estricto de proxy para requests/openstacksdk
+    if os.getenv("HTTP_PROXY"):
+        os.environ["http_proxy"] = os.getenv("HTTP_PROXY")
+    if os.getenv("HTTPS_PROXY"):
+        os.environ["https_proxy"] = os.getenv("HTTPS_PROXY")
+    if os.getenv("NO_PROXY"):
+        os.environ["no_proxy"] = os.getenv("NO_PROXY")
 
     conn = openstack.connect(
         auth_url=os.getenv("OS_AUTH_URL"),
@@ -104,13 +117,18 @@ def _collect_openstack_workers() -> Tuple[List[WorkerState], List[str]]:
             continue
 
         # Capacidades nominales (Nova reporta vCPUs totales y RAM en MB)
-        vcpus_total   = float(hyp.vcpus or 0)
-        vcpus_used    = float(hyp.vcpus_used or 0)
-        ram_total_mb  = float(hyp.memory_mb or 0)
-        ram_used_mb   = float(hyp.memory_mb_used or 0)
+        vcpus_total   = float(getattr(hyp, "vcpus", getattr(hyp, "vcpus_total", 8)) or 8)
+        vcpus_used    = float(getattr(hyp, "vcpus_used", 0) or 0)
+        ram_total_mb  = float(getattr(hyp, "memory_mb", getattr(hyp, "memory_size", 16384)) or 16384)
+        ram_used_mb   = float(getattr(hyp, "memory_mb_used", getattr(hyp, "memory_used", 0)) or 0)
         # Nova no expone disco fácilmente; usamos local_gb si está disponible
-        disco_total   = float(getattr(hyp, "local_gb", 0) or 0)
-        disco_used    = float(getattr(hyp, "local_gb_used", 0) or 0)
+        disco_total   = float(getattr(hyp, "local_gb", getattr(hyp, "disk_size", 100)) or 100)
+        disco_used    = float(getattr(hyp, "local_gb_used", getattr(hyp, "disk_used", 0)) or 0)
+        
+        # Log properties in case it's missing (for debugging)
+        if getattr(hyp, "memory_mb", None) is None:
+            logger.warning("[BYOS] Atributo memory_mb no encontrado en Hypervisor '%s'. Propiedades disponibles: %s", 
+                           hyp.hypervisor_hostname, hyp.to_dict() if hasattr(hyp, "to_dict") else dir(hyp))
 
         # Capacidades efectivas con overcommit (misma fórmula que Linux Cluster)
         c_ef_cpu   = vcpus_total   * OC_CPU

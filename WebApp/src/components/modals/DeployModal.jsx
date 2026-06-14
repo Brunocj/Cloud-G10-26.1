@@ -10,9 +10,9 @@ const DEFAULT_AZS = [
     { id: 2, name: "OpenStack" },
 ];
 
-export const DeployModal = ({ nodes, edges, onDeploy, onClose, imageList = [], apiFetch }) => {
-    const [name, setName] = useState(`slice-${Math.random().toString(36).slice(2, 6)}`);
-    const [selectedAzId, setSelectedAzId] = useState(1);
+export const DeployModal = ({ defaultName, nodes, edges, onDeploy, onClose, imageList = [], apiFetch, targetAz }) => {
+    const [name, setName] = useState(defaultName || `slice-${Math.random().toString(36).slice(2, 6)}`);
+    const [selectedAzId, setSelectedAzId] = useState(targetAz ? Number(targetAz) : 1);
     const [azList, setAzList] = useState(DEFAULT_AZS);
     const [azConflict, setAzConflict] = useState(null); // mensaje de incompatibilidad o null
 
@@ -42,16 +42,20 @@ export const DeployModal = ({ nodes, edges, onDeploy, onClose, imageList = [], a
             imgMap[img.id] = { az_id: img.availability_zone_id, az_name: img.az_name };
         });
 
+        // Imagen por defecto que se usará si el nodo no tiene una asignada
+        const azImageList = imageList.filter(img => img.availability_zone_id == selectedAzId || img.availability_zone_id == null);
+        const defaultImg = azImageList[0] ?? imageList[0] ?? { id: 1, name: "Cirros" };
+
         for (const node of nodes) {
-            const imgId = node.image_id;
+            const imgId = node.image_id || defaultImg.id; // Aplicamos el mismo fallback que App.jsx
             if (!imgId) continue;
             const imgInfo = imgMap[imgId];
             if (!imgInfo || imgInfo.az_id == null) continue; // sin restricción de AZ
             if (imgInfo.az_id !== selectedAzId) {
-                const nodeName = node.id || node.name || "nodo";
+                const nodeName = node.data?.label || node.id || node.name || "nodo";
                 const azName   = imgInfo.az_name || `AZ #${imgInfo.az_id}`;
                 setAzConflict(
-                    `La imagen del nodo "${nodeName}" pertenece a "${azName}" y no es compatible con la zona seleccionada.`
+                    `La imagen seleccionada para el nodo "${nodeName}" pertenece a "${azName}" y no es compatible con la Zona de Disponibilidad elegida.`
                 );
                 return;
             }
@@ -82,7 +86,8 @@ export const DeployModal = ({ nodes, edges, onDeploy, onClose, imageList = [], a
                     id="deploy-slice-name"
                     value={name}
                     onChange={e => setName(e.target.value)}
-                    style={{ ...inp, marginBottom: 14 }}
+                    disabled={!!defaultName}
+                    style={{ ...inp, marginBottom: 14, opacity: defaultName ? 0.7 : 1 }}
                 />
 
                 {/* Selector de Zona de Disponibilidad */}

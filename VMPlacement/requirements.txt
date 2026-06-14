@@ -6,3 +6,4 @@ ortools>=9.10
 nats-py==2.6.0
 # openstacksdk: consulta Nova Hypervisors API para BYOS (bypass Nova-scheduler)
 openstacksdk>=2.0.0
+PySocks>=1.7.1

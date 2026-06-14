@@ -74,6 +74,7 @@ export default function App() {
     // Designer canvas (new slice in progress)
     const [nodes, setNodes] = useState([]);
     const [edges, setEdges] = useState([]);
+    const [targetAz, setTargetAz] = useState("");
 
     // UI / overlay state
     const [modal,     setModal]     = useState(null);
@@ -152,7 +153,8 @@ export default function App() {
 
     const deployFromDesigner = async (name, azId = 1) => {
         try {
-            const defaultImg     = imageList[0] ?? { id: 1, name: "Cirros" };
+            const azImageList = imageList.filter(img => img.availability_zone_id == azId || img.availability_zone_id == null);
+            const defaultImg = azImageList[0] ?? imageList[0] ?? { id: 1, name: "Cirros" };
             const processedNodes = nodes.map(n => ({
                 ...n,
                 image_id: n.image_id || defaultImg.id,
@@ -208,14 +210,19 @@ export default function App() {
         } catch { flash("Error de conexión con el servidor", "error"); }
     };
 
-    const deployDraft = async (id) => {
+    const deployDraft = (id) => {
+        setModal({ type: "deployDraft", id });
+    };
+
+    const doDeployDraft = async (id, azId) => {
         try {
             const res = await apiFetch(`/slices/${id}/deploy`, {
                 method: "POST",
-                body: JSON.stringify({ availability_zone: "Linux Cluster", ttl_hours: 4, motivo: "Despliegue desde la UI" }),
+                body: JSON.stringify({ availability_zone_id: azId, ttl_hours: 4, motivo: "Despliegue desde la UI" }),
             });
             if (!res.ok) throw new Error();
             updateSlice(id, { status: "PENDING_APPROVAL" });
+            setModal(null);
             flash("Solicitud de despliegue encolada con éxito");
         } catch { flash("Error al solicitar despliegue", "error"); }
     };
@@ -474,14 +481,19 @@ export default function App() {
                 {/* Canvas */}
                 <div style={{ flex: 1, overflow: "hidden", display: "flex" }}>
                     {activeSlice
-                        ? <Canvas nodes={activeSlice.nodes} edges={activeSlice.edges} setNodes={setSliceNodes} setEdges={setSliceEdges} imageList={imageList} activeSlice={activeSlice} onOpenConsole={setConsoleVm} />
-                        : <Canvas nodes={nodes}             edges={edges}             setNodes={setNodes}      setEdges={setEdges}      imageList={imageList} activeSlice={null}        onOpenConsole={setConsoleVm} />
+                        ? <Canvas nodes={activeSlice.nodes} edges={activeSlice.edges} setNodes={setSliceNodes} setEdges={setSliceEdges} imageList={imageList} activeSlice={activeSlice} onOpenConsole={setConsoleVm} targetAz={targetAz} setTargetAz={setTargetAz} />
+                        : <Canvas nodes={nodes}             edges={edges}             setNodes={setNodes}      setEdges={setEdges}      imageList={imageList} activeSlice={null}        onOpenConsole={setConsoleVm} targetAz={targetAz} setTargetAz={setTargetAz} />
                     }
                 </div>
             </div>
 
             {/* ── MODALS ───────────────────────────────────────────────────── */}
-            {modal === "deploy"        && <DeployModal    nodes={nodes} edges={edges} imageList={imageList} apiFetch={apiFetch} onDeploy={deployFromDesigner} onClose={() => setModal(null)} />}
+            {modal === "deploy"        && <DeployModal    nodes={nodes} edges={edges} imageList={imageList} apiFetch={apiFetch} onDeploy={deployFromDesigner} onClose={() => setModal(null)} targetAz={targetAz} />}
+            {modal?.type === "deployDraft" && (() => {
+                const draft = slices.find(s => s.id === modal.id);
+                if (!draft) return null;
+                return <DeployModal defaultName={draft.name} nodes={draft.nodes} edges={draft.edges} imageList={imageList} apiFetch={apiFetch} onDeploy={(name, azId) => doDeployDraft(modal.id, azId)} onClose={() => setModal(null)} targetAz={targetAz} />;
+            })()}
             {modal === "draft"         && <SaveDraftModal nodes={nodes} edges={edges} onSave={saveDraft}            onClose={() => setModal(null)} />}
             {modal?.type === "confirm" && <ConfirmModal title={modal.title} msg={modal.msg} onOk={modal.onOk} onCancel={() => setModal(null)} />}
             {consoleVm                 && <ConsoleModal vm={consoleVm} workerIp={consoleVm.workerIp} workerPort={consoleVm.workerPort} vncPort={consoleVm.vncPort} onClose={() => setConsoleVm(null)} />}

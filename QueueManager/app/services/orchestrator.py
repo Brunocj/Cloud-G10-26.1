@@ -272,6 +272,7 @@ class WorkflowOrchestrator:
                 }
                 for vm in request.vms
             ],
+            "workers": request.workers,
         }
         logger.debug("[SAGA][%s] → %s payload=%s",
                      request.slice_id, settings.SUBJECT_PLACEMENT, payload)
@@ -327,7 +328,7 @@ class WorkflowOrchestrator:
         for vm in request.vms:
             vm_dict = vm.model_dump()
             vm_dict["selected_host"] = host_map.get(vm.vm_id, "")
-            vm_dict["network_ports"] = port_map.get(vm.vm_id, [])
+            vm_dict["network_ports"] = port_map.get(vm.vm_id, {})
             vms_payload.append(vm_dict)
 
         payload = {
