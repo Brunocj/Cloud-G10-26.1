@@ -21,8 +21,7 @@ services:
       - "8085:8080"
     volumes:
       # Claves SSH para el túnel VNC a través del gateway
-      # Ruta absoluta en la VM — las claves viven fuera del repo
-      - /home/ubuntu/SliceManager/keys:/app/keys:ro
+      - ./keys:/app/keys:ro
     networks:
       - pucp_cloud_net
 

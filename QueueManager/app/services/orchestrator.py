@@ -140,9 +140,15 @@ class WorkflowOrchestrator:
                 state, "Timeout: Compute Provisioner no respondió."
             )
 
+        logger.info("[SAGA][%s] Respuesta raw del CP: status=%s vms=%s",
+                    slice_id, compute_result.get("status"), compute_result.get("vms"))
         successful = [VMResult(**vm) for vm in compute_result.get("vms", [])]
         failed     = [VMResult(**vm) for vm in compute_result.get("failed_vms", [])]
         status_str = compute_result.get("status", "error")
+
+        for vm in successful:
+            logger.info("[SAGA][%s] VMResult parseado → vm_id=%s vnc_url=%s provider_instance_id=%s",
+                        slice_id, vm.vm_id, vm.vnc_url, vm.provider_instance_id)
 
         if status_str == "error":
             await self._rollback_network(request, az_id)
@@ -360,21 +366,26 @@ class WorkflowOrchestrator:
 
         Incluye vnc_url por cada VM para el caso OpenStack.
         """
+        vms_payload = [
+            {
+                "vm_id":                vm.vm_id,
+                "vnc_port":             vm.vnc_port,
+                "vnc_url":              getattr(vm, "vnc_url", None),
+                "worker_ip":            vm.worker_ip,
+                "provider_instance_id": getattr(vm, "provider_instance_id", None),
+                "error":                vm.error,
+            }
+            for vm in vm_results
+        ]
+        for entry in vms_payload:
+            logger.info("[SAGA][%s] state_update vm_id=%s vnc_url=%s",
+                        slice_id, entry["vm_id"], entry["vnc_url"])
         payload = {
             "slice_id":             slice_id,
             "request_id":           request_id,
             "availability_zone_id": az_id,
             "status":               final_status,
-            "vms": [
-                {
-                    "vm_id":    vm.vm_id,
-                    "vnc_port": vm.vnc_port,
-                    "vnc_url":  getattr(vm, "vnc_url", None),
-                    "worker_ip": vm.worker_ip,
-                    "error":    vm.error,
-                }
-                for vm in vm_results
-            ],
+            "vms":                  vms_payload,
             "failed_vms": [vm.vm_id for vm in failed_vms],
         }
         logger.info("[SAGA][%s] → %s  status=%s", slice_id, settings.SUBJECT_STATE_UPDATE, final_status)

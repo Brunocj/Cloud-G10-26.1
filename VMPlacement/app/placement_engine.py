@@ -107,28 +107,52 @@ def _collect_openstack_workers() -> Tuple[List[WorkerState], List[str]]:
     host_names: List[str] = []
     worker_id_counter = 1
 
+    # Construir mapa hypervisor_hostname → service host (nombre que usa el scheduler)
+    # `openstack compute service list` devuelve el campo `host` que es el que acepta
+    # scheduler_hints.force_hosts. Sin este mapa usaríamos hypervisor_hostname que
+    # puede diferir (ej: FQDN vs short name) y causaría "No valid host was found".
+    hyp_to_service_host: dict = {}
+    try:
+        for svc in conn.compute.services(binary="nova-compute"):
+            svc_host = getattr(svc, "host", None)
+            if svc_host:
+                hyp_to_service_host[svc_host] = svc_host   # identidad directa
+    except Exception as e:
+        logger.warning("[BYOS][OpenStack] No se pudo listar nova-compute services: %s. Se usará hypervisor_hostname.", e)
+
     logger.info("[BYOS][OpenStack] Consultando Nova Hypervisors API …")
 
-    for hyp in conn.compute.hypervisors(details=True):
+    for hyp in conn.compute.hypervisors():
+        # En Nova 22.x (Yoga) openstacksdk expone el campo como hypervisor_hostname
+        hyp_name = getattr(hyp, "hypervisor_hostname", None) or getattr(hyp, "name", None) or str(getattr(hyp, "id", "unknown"))
+        # Preferir el nombre del servicio compute (usado por scheduler_hints.force_hosts)
+        hyp_name = hyp_to_service_host.get(hyp_name, hyp_name)
+        
+        hyp_state = getattr(hyp, "state", "up")
+        hyp_status = getattr(hyp, "status", "enabled")
+
         # Solo incluir hipervisores KVM activos
-        if hyp.state != "up" or hyp.status != "enabled":
+        if hyp_state != "up" or hyp_status != "enabled":
             logger.debug("[BYOS] Hipervisor '%s' excluido (state=%s status=%s)",
-                         hyp.hypervisor_hostname, hyp.state, hyp.status)
+                         hyp_name, hyp_state, hyp_status)
             continue
 
         # Capacidades nominales (Nova reporta vCPUs totales y RAM en MB)
         vcpus_total   = float(getattr(hyp, "vcpus", getattr(hyp, "vcpus_total", 8)) or 8)
         vcpus_used    = float(getattr(hyp, "vcpus_used", 0) or 0)
-        ram_total_mb  = float(getattr(hyp, "memory_mb", getattr(hyp, "memory_size", 16384)) or 16384)
-        ram_used_mb   = float(getattr(hyp, "memory_mb_used", getattr(hyp, "memory_used", 0)) or 0)
-        # Nova no expone disco fácilmente; usamos local_gb si está disponible
-        disco_total   = float(getattr(hyp, "local_gb", getattr(hyp, "disk_size", 100)) or 100)
-        disco_used    = float(getattr(hyp, "local_gb_used", getattr(hyp, "disk_used", 0)) or 0)
+        
+        # RAM: memory_size (openstacksdk property), memory_mb (nova raw field)
+        ram_total_mb  = float(getattr(hyp, "memory_size", getattr(hyp, "memory_mb", 16384)) or 16384)
+        ram_used_mb   = float(getattr(hyp, "memory_used", getattr(hyp, "memory_mb_used", 0)) or 0)
+        
+        # Disco: local_disk_size (openstacksdk property), local_gb (nova raw field)
+        disco_total   = float(getattr(hyp, "local_disk_size", getattr(hyp, "local_gb", 100)) or 100)
+        disco_used    = float(getattr(hyp, "local_disk_used", getattr(hyp, "local_gb_used", 0)) or 0)
         
         # Log properties in case it's missing (for debugging)
-        if getattr(hyp, "memory_mb", None) is None:
-            logger.warning("[BYOS] Atributo memory_mb no encontrado en Hypervisor '%s'. Propiedades disponibles: %s", 
-                           hyp.hypervisor_hostname, hyp.to_dict() if hasattr(hyp, "to_dict") else dir(hyp))
+        if getattr(hyp, "memory_size", getattr(hyp, "memory_mb", None)) is None:
+            logger.warning("[BYOS] Atributo de RAM no encontrado en Hypervisor '%s'. Propiedades disponibles: %s", 
+                           hyp_name, hyp.to_dict() if hasattr(hyp, "to_dict") else dir(hyp))
 
         # Capacidades efectivas con overcommit (misma fórmula que Linux Cluster)
         c_ef_cpu   = vcpus_total   * OC_CPU
@@ -145,7 +169,7 @@ def _collect_openstack_workers() -> Tuple[List[WorkerState], List[str]]:
             "cpu: total=%.1f used=%.1f oc=%.2f disp=%.1f | "
             "ram(GB): total=%.1f used=%.1f oc=%.2f disp=%.1f | "
             "disco(GB): total=%.1f used=%.1f oc=%.2f disp=%.1f",
-            hyp.hypervisor_hostname,
+            hyp_name,
             vcpus_total,   vcpus_used,   OC_CPU,   disp_cpu,
             ram_total_mb / 1024.0, ram_used_mb / 1024.0, OC_RAM, disp_ram,
             disco_total,  disco_used,   OC_DISCO, disp_disco,
@@ -157,7 +181,7 @@ def _collect_openstack_workers() -> Tuple[List[WorkerState], List[str]]:
             disponible_ram=disp_ram,
             disponible_disco=disp_disco,
         ))
-        host_names.append(hyp.hypervisor_hostname)   # nombre exacto para el manifiesto BYOS
+        host_names.append(hyp_name)   # nombre exacto para el manifiesto BYOS
         worker_id_counter += 1
 
     logger.info("[BYOS][OpenStack] %d hipervisores activos encontrados.", len(workers))

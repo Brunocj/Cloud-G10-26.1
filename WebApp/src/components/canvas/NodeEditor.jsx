@@ -335,7 +335,7 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, onSave, onDelet
                 {isReadOnly ? (
                     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                         <button
-                            onClick={() => onOpenConsole({ workerIp: node.worker_ip, workerPort: node.worker_port, vncPort: node.vnc_port })}
+                            onClick={() => onOpenConsole({ workerIp: node.worker_ip, workerPort: node.worker_port, vncPort: node.vnc_port, vnc_url: node.vnc_url })}
                             disabled={sliceStatus !== "ACTIVE"}
                             style={btnBase({ width: "100%", background: T.text, color: "#fff", border: "none", padding: "8px 0", opacity: sliceStatus === "ACTIVE" ? 1 : 0.5,
                                 display: "flex", alignItems: "center", justifyContent: "center", gap: 6 })}>

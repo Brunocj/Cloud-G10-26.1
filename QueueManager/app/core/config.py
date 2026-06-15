@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     # ── Timeouts ─────────────────────────────────────────────────────────────
     PLACEMENT_TIMEOUT: int = 30    # segundos — tiempo máximo para que VMPlacement responda
     COMPUTE_TIMEOUT:   int = 300   # segundos — tiempo máximo para que compute responda
-    NETWORK_TIMEOUT:   int = 60
+    NETWORK_TIMEOUT:   int = 300   # aumentado: OVS en VMs anidadas tarda ~4s por comando
     # ── Healthcheck ──────────────────────────────────────────────────────────
     HEALTH_PORT: int = 8080
 

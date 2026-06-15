@@ -108,28 +108,29 @@ class NetworkProvisioner:
             port = endpoints[0].get("port", worker_port) if endpoints else getattr(vms_list[0], 'worker_port', worker_port)
 
             with SSHClient(worker_ip, user, key, port=port) as ssh:
-                # A. Configurar Enlaces L2 (VLANs)
-                for ep in endpoints:
-                    try:
-                        executor.configure_vlan_and_port(ssh, ep["tap"], ep["vlan"])
-                        executor.apply_security_groups(ssh, ep["tap"], ep["rules"])
-                        ok_eps.append(ep)
-                    except Exception as exc:
-                        logger.error(f"Fallo en tap {ep['tap']}: {exc}")
-                        fail_eps.append((ep, str(exc)))
+                mgmt_vlan = 1000 + int(slice_id)
 
-                # 🔥 NUEVO: Enchufar el eth0 (tap de gestión) de todas las VMs al Gateway
-                mgmt_vlan = 1000 + int(slice_id) 
+                # A. Batch: configurar TODOS los TAPs de este worker en 2 SSH calls
+                #    (TAPs de enlace L2 + TAPs de gestión de VMs en una sola pasada)
+                tap_vlan_pairs: list[tuple[str, int]] = []
+                for ep in endpoints:
+                    tap_vlan_pairs.append((ep["tap"], ep["vlan"]))
                 for vm in vms_list:
                     if vm.tap_interfaces:
-                        mgmt_tap = vm.tap_interfaces[0].tap_name
-                        try:
-                            # Conecta el eth0 a la VLAN de gestión
-                            executor.configure_vlan_and_port(ssh, mgmt_tap, mgmt_vlan)
-                        except Exception as exc:
-                            logger.error(f"Fallo al conectar TAP de gestión {mgmt_tap}: {exc}")
+                        tap_vlan_pairs.append((vm.tap_interfaces[0].tap_name, mgmt_vlan))
 
-                # 🔥 B. Configurar Ruteo, NAT y Gateway en TODOS LOS WORKERS (DVR)
+                try:
+                    executor.configure_taps_batch(ssh, tap_vlan_pairs)
+                    # Marcar todos los endpoints L2 como OK
+                    for ep in endpoints:
+                        executor.apply_security_groups(ssh, ep["tap"], ep["rules"])
+                        ok_eps.append(ep)
+                except Exception as exc:
+                    logger.error(f"Fallo batch TAPs en worker {worker_ip}: {exc}")
+                    for ep in endpoints:
+                        fail_eps.append((ep, str(exc)))
+
+                # B. Configurar Gateway, DHCP y NAT
                 if vms_list:
                     executor.configure_gateway_and_nat(ssh, slice_id, vms_list, mgmt_vlan)
 

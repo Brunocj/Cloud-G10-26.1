@@ -27,8 +27,11 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 logger = logging.getLogger("api-gateway.vnc")
 router = APIRouter(tags=["VNC Proxy"])
 
-VNC_SSH_KEY_PATH = os.getenv("VNC_SSH_KEY_PATH", "/app/keys/id_ed25519")
-VNC_SSH_USER = os.getenv("VNC_SSH_USER", "ubuntu")
+VNC_SSH_KEY_PATH      = os.getenv("VNC_SSH_KEY_PATH",      "/app/keys/id_ed25519")
+VNC_SSH_USER          = os.getenv("VNC_SSH_USER",          "ubuntu")
+VNC_OS_HEADNODE_PORT  = int(os.getenv("VNC_OS_HEADNODE_PORT",  "5821"))
+VNC_OS_CONTROLLER_IP  = os.getenv("VNC_OS_CONTROLLER_IP",  "192.168.202.1")
+VNC_OS_CONTROLLER_PORT = int(os.getenv("VNC_OS_CONTROLLER_PORT", "6080"))
 
 
 # ── Helpers SSH ────────────────────────────────────────────────────────────────
@@ -191,3 +194,125 @@ async def vnc_proxy(websocket: WebSocket,
         except Exception:
             pass
         logger.info("VNC proxy cerrado: %s:%d → ws:%d", gateway_ip, ssh_port, ws_port)
+
+
+# ── OpenStack noVNC proxy ──────────────────────────────────────────────────────
+
+@router.websocket("/vnc/openstack/{token}")
+async def vnc_proxy_openstack(websocket: WebSocket, token: str):
+    """
+    Proxy WebSocket para VMs de OpenStack.
+    Abre un túnel SSH al headnode y hace TCP forward al nova-novncproxy
+    en controller:6080, luego hace WebSocket upgrade con el token de Nova.
+
+    URL:  ws://apigw:8085/vnc/openstack/{nova_token}
+    """
+    await websocket.accept()
+    logger.info("VNC OpenStack proxy: token=%s", token[:8])
+
+    loop = asyncio.get_running_loop()
+
+    import os as _os
+    key_exists = _os.path.exists(VNC_SSH_KEY_PATH)
+    logger.info("VNC OpenStack: key_path=%s exists=%s", VNC_SSH_KEY_PATH, key_exists)
+    if key_exists:
+        try:
+            key_size = _os.path.getsize(VNC_SSH_KEY_PATH)
+            logger.info("VNC OpenStack: key_size=%d bytes", key_size)
+        except Exception:
+            pass
+    try:
+        pkey = _load_ssh_key(VNC_SSH_KEY_PATH)
+        logger.info("VNC OpenStack: SSH key cargada OK tipo=%s", type(pkey).__name__)
+    except Exception as exc:
+        logger.error("VNC OpenStack: SSH key unavailable (%s): %s", VNC_SSH_KEY_PATH, exc)
+        await websocket.close(code=1011, reason="SSH key unavailable")
+        return
+
+    ssh_client = paramiko.SSHClient()
+    ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    channel: paramiko.Channel | None = None
+    try:
+        await loop.run_in_executor(
+            None,
+            lambda: ssh_client.connect(
+                "10.20.11.119", port=VNC_OS_HEADNODE_PORT,
+                username=VNC_SSH_USER, pkey=pkey,
+                timeout=10, look_for_keys=False, allow_agent=False,
+            ),
+        )
+        channel = await loop.run_in_executor(
+            None,
+            lambda: ssh_client.get_transport().open_channel(
+                "direct-tcpip",
+                (VNC_OS_CONTROLLER_IP, VNC_OS_CONTROLLER_PORT),
+                ("127.0.0.1", 0),
+            ),
+        )
+    except Exception as exc:
+        logger.error("VNC OpenStack: SSH tunnel falló → %s:%d: %s",
+                     VNC_OS_CONTROLLER_IP, VNC_OS_CONTROLLER_PORT, exc)
+        await websocket.close(code=1011, reason="SSH tunnel failed")
+        ssh_client.close()
+        return
+
+    a_sock, b_sock = socket.socketpair()
+    stop_event = threading.Event()
+    threading.Thread(
+        target=_bridge_channel_to_socket,
+        args=(channel, b_sock, stop_event),
+        daemon=True,
+        name=f"vnc-os-bridge-{token[:8]}",
+    ).start()
+
+    # El Host header debe coincidir con lo que espera nova-novncproxy
+    target_url = f"ws://{VNC_OS_CONTROLLER_IP}:{VNC_OS_CONTROLLER_PORT}/websockify?token={token}"
+    try:
+        async with websockets.connect(
+            target_url,
+            sock=a_sock,
+            subprotocols=["binary", "base64"],
+            ping_interval=None,
+            open_timeout=10,
+        ) as upstream:
+
+            async def browser_to_nova() -> None:
+                try:
+                    while True:
+                        data = await websocket.receive_bytes()
+                        await upstream.send(data)
+                except (WebSocketDisconnect, Exception):
+                    pass
+
+            async def nova_to_browser() -> None:
+                try:
+                    async for message in upstream:
+                        if isinstance(message, bytes):
+                            await websocket.send_bytes(message)
+                        else:
+                            await websocket.send_text(message)
+                except (WebSocketDisconnect, Exception):
+                    pass
+
+            done, pending = await asyncio.wait(
+                [asyncio.create_task(browser_to_nova()),
+                 asyncio.create_task(nova_to_browser())],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+
+    except Exception as exc:
+        logger.warning("VNC OpenStack proxy error (token=%s): %s", token[:8], exc)
+    finally:
+        stop_event.set()
+        for obj in (a_sock, channel, ssh_client):
+            try:
+                obj.close()
+            except Exception:
+                pass
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+        logger.info("VNC OpenStack proxy cerrado: token=%s", token[:8])

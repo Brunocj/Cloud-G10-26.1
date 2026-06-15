@@ -107,39 +107,44 @@ const LinuxClusterConsole = ({ workerIp, workerPort, vncPort }) => {
     );
 };
 
-// ─── Consola OpenStack NoVNC (iframe) ─────────────────────────────────────────
-const OpenStackConsole = ({ vncUrl }) => (
-    <div style={{ width: "800px", backgroundColor: "#000", borderRadius: "8px", overflow: "hidden" }}>
-        {/* Topbar */}
-        <div style={{
-            padding: "8px 10px 6px", backgroundColor: "#1a0a2e", color: "#e0e0e0",
-            display: "flex", justifyContent: "space-between", alignItems: "center",
-            borderBottom: "1px solid #333",
-        }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span style={{
-                    fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 20,
-                    background: "#ff820022", color: "#ff8200", border: "1px solid #ff820044",
-                }}>
-                    ☁ OpenStack NoVNC
-                </span>
-                <span style={{ fontSize: 11, color: "#888", fontFamily: "monospace", maxWidth: 480, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {vncUrl}
-                </span>
-            </div>
-        </div>
+// ─── Consola OpenStack NoVNC (WebSocket via ApiGW → SSH → nova-novncproxy) ────
+const OpenStackConsole = ({ vncUrl }) => {
+    // vncUrl contiene el token UUID de Nova (extraído por el CP)
+    // El ApiGW proxea: ws://apigw/vnc/openstack/{token} → SSH headnode → controller:6080
+    const wsUrl = `ws://${API_GW}/vnc/openstack/${vncUrl}`;
+    const vncRef = useRef(null);
 
-        {/* iframe full-screen */}
-        <iframe
-            src={vncUrl}
-            width="100%"
-            height="556px"
-            style={{ border: "none", display: "block" }}
-            title="OpenStack NoVNC Console"
-            allow="clipboard-read; clipboard-write"
-        />
-    </div>
-);
+    return (
+        <div style={{ width: "800px", backgroundColor: "#000", borderRadius: "8px", overflow: "hidden" }}>
+            <div style={{
+                padding: "8px 10px 6px", backgroundColor: "#1a0a2e", color: "#e0e0e0",
+                display: "flex", justifyContent: "space-between", alignItems: "center",
+                borderBottom: "1px solid #333",
+            }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{
+                        fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 20,
+                        background: "#ff820022", color: "#ff8200", border: "1px solid #ff820044",
+                    }}>
+                        ☁ OpenStack NoVNC
+                    </span>
+                    <span style={{ fontSize: 11, color: "#555", fontFamily: "monospace" }}>
+                        token: {vncUrl?.slice(0, 8)}…
+                    </span>
+                </div>
+            </div>
+            <VncScreen
+                url={wsUrl}
+                scaleViewport={true}
+                background="#000000"
+                style={{ width: "100%", height: "556px" }}
+                ref={vncRef}
+                onConnect={() => console.log("[VNC-OS] Conectado:", wsUrl)}
+                onDisconnect={(e) => console.warn("[VNC-OS] Desconectado:", e)}
+            />
+        </div>
+    );
+};
 
 // ─── Componente público VmConsole ─────────────────────────────────────────────
 /**

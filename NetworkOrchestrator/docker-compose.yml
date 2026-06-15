@@ -17,7 +17,7 @@ services:
       OS_USER_DOMAIN_NAME:      Cloud
       OS_PROJECT_DOMAIN_NAME:   Cloud
       OS_IDENTITY_API_VERSION:  "3"
-      OS_EXTERNAL_NETWORK:      "ext-net"
+      OPENSTACK_EXTERNAL_NETWORK: "ext-net"
       OPENSTACK_AZ_ID:          "2"
       # ── SOCKS5 Proxy para OpenStack ──
       HTTP_PROXY:               "socks5h://openstack-proxy:1080"

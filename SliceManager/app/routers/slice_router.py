@@ -38,6 +38,7 @@ def _serialize_slice(t: Slice) -> dict:
                     node["worker_ip"]   = d_vm.get("worker_ip")
                     node["worker_port"] = d_vm.get("worker_port")   # puerto SSH al gateway
                     node["vnc_port"]    = d_vm.get("vnc_port")
+                    node["vnc_url"]     = d_vm.get("vnc_url")       # token VNC de OpenStack (None en Linux Cluster)
 
     return {
         "id":        t.id,

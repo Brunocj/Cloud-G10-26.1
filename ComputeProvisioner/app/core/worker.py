@@ -37,6 +37,7 @@ async def handle_deploy(msg: Msg) -> None:
                 {
                     "vm_id":           vm.vm_id,
                     "worker_ip":       vm.worker_ip,
+                    "worker_port":     specs_by_id[vm.vm_id].worker_port,
                     "pid":             vm.pid,
                     "vnc_port":        vm.vnc_port,
                     "ssh_user":        specs_by_id[vm.vm_id].ssh_user,

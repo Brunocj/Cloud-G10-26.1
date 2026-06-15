@@ -3,6 +3,7 @@ import logging
 import asyncio
 import openstack
 from typing import Optional, List
+from urllib.parse import urlparse, parse_qs, unquote
 from app.models.schemas import VMSpec, VMResult, DeployStatus
 
 logger = logging.getLogger("compute-provisioner.openstack")
@@ -91,19 +92,27 @@ class OpenStackComputeExecutor:
                 raise RuntimeError("No se especificó un puerto Neutron válido en network_ports.")
                 
             # 3. Crear Instancia en Nova aplicando BYOS (scheduler bypass)
-            server_name = f"vm-slice-{slice_id}-{vm.vm_id}"
-            
-            # scheduler hints para forzar host
-            availability_zone = f"nova:{vm.selected_host}" if vm.selected_host else None
-            
-            server = await asyncio.to_thread(
-                conn.compute.create_server,
+            safe_slice = (vm.slice_name or str(slice_id)).replace(" ", "-")[:24]
+            safe_vm    = (vm.vm_label   or vm.vm_id).replace(" ", "-")[:16]
+            server_name = f"{safe_slice}-{safe_vm}"
+
+            create_kwargs = dict(
                 name=server_name,
                 image_id=image_uuid,
                 flavor_id=flavor_uuid,
-                availability_zone=availability_zone,
-                networks=[{"port": port_id}]
+                networks=[{"port": port_id}],
             )
+
+            byos_enabled = os.getenv("OS_BYOS_FORCE_HOST", "true").lower() in ("1", "true", "yes")
+            if vm.selected_host and byos_enabled:
+                # availability_zone=nova:<host> le indica a Nova que bypass el scheduler
+                # y construya directamente en ese compute host.
+                create_kwargs["availability_zone"] = f"nova:{vm.selected_host}"
+                logger.info(f"[OpenStack] BYOS: forzando host '{vm.selected_host}' via availability_zone")
+            else:
+                logger.info(f"[OpenStack] BYOS deshabilitado — Nova scheduler elige host libremente")
+
+            server = await asyncio.to_thread(conn.compute.create_server, **create_kwargs)
             logger.info(f"[OpenStack] Instancia '{server_name}' creada en Nova (UUID: {server.id}). Esperando estado ACTIVE...")
             
             # 4. Polling Asíncrono Pasivo (BUILD -> ACTIVE)
@@ -119,26 +128,54 @@ class OpenStackComputeExecutor:
                 await asyncio.sleep(5)
                 
             # 5. Obtener Consola noVNC
+            # Nova 22.x (Yoga) usa el endpoint POST /servers/{id}/remote-consoles (mv 2.6+)
+            # openstacksdk lo expone como create_server_remote_console.
+            # Fallback al action legacy os-getVNCConsole por compatibilidad.
             vnc_url = None
             try:
-                console = await asyncio.to_thread(conn.compute.get_vnc_console, server.id, console_type="novnc")
-                vnc_url = console.url if hasattr(console, "url") else console.get("url")
+                # Nova API: POST /servers/{id}/remote-consoles body={"remote_console":{"protocol":"vnc","type":"novnc"}}
+                # openstacksdk mapea 'type' (no 'console_type') al campo JSON 'type'
+                console = await asyncio.to_thread(
+                    conn.compute.create_server_remote_console,
+                    server.id,
+                    **{"protocol": "vnc", "type": "novnc"},
+                )
+                vnc_url = getattr(console, "url", None) or (console.get("url") if isinstance(console, dict) else None)
             except Exception as e:
-                logger.warning(f"[OpenStack] No se pudo obtener la consola VNC estándar: {e}. Intentando fallback a create_console...")
+                logger.warning(f"[OpenStack] create_server_remote_console falló: {e}. Intentando acción legacy os-getVNCConsole...")
                 try:
-                    console = await asyncio.to_thread(conn.compute.create_console, server.id, console_type="novnc")
-                    vnc_url = console.url if hasattr(console, "url") else console.get("url")
+                    # Fallback: POST /servers/{id}/action {"os-getVNCConsole": {"type": "novnc"}}
+                    resp = await asyncio.to_thread(
+                        conn.compute._action,
+                        "os-getVNCConsole", server.id, {"type": "novnc"}
+                    )
+                    vnc_url = (resp or {}).get("console", {}).get("url")
                 except Exception as e2:
-                    logger.error(f"[OpenStack] Error al obtener consola VNC (fallback): {e2}")
+                    logger.error(f"[OpenStack] No se pudo obtener consola VNC: {e2}")
                     
-            logger.info(f"[OpenStack] VM {vm.vm_id} desplegada exitosamente (VNC: {vnc_url})")
-            return VMResult(
+            # Extraer solo el token UUID de la URL de nova-novncproxy
+            # URL: http://controller:6080/vnc_auto.html?path=%3Ftoken%3D<UUID>
+            vnc_token = None
+            if vnc_url:
+                try:
+                    parsed = urlparse(vnc_url)
+                    path_encoded = parse_qs(parsed.query).get("path", [""])[0]
+                    path_decoded = unquote(path_encoded).lstrip("?")
+                    vnc_token = parse_qs(path_decoded).get("token", [None])[0]
+                except Exception:
+                    pass
+            logger.info(f"[OpenStack] VM {vm.vm_id} desplegada exitosamente")
+            logger.info(f"[OpenStack] vnc_url raw: {vnc_url!r}")
+            logger.info(f"[OpenStack] vnc_token extraído: {vnc_token!r}")
+            result = VMResult(
                 vm_id=vm.vm_id,
                 worker_ip=vm.worker_ip,
                 vnc_port=vm.vnc_port,
                 provider_instance_id=server.id,
-                vnc_url=vnc_url
+                vnc_url=vnc_token,
             )
+            logger.info(f"[OpenStack] VMResult.vnc_url = {result.vnc_url!r}")
+            return result
             
         except Exception as exc:
             logger.error(f"[OpenStack] Error desplegando VM {vm.vm_id}: {exc}", exc_info=True)
@@ -159,8 +196,15 @@ class OpenStackComputeExecutor:
             if provider_instance_id:
                 server = await asyncio.to_thread(conn.compute.find_server, provider_instance_id)
             if not server:
-                server_name = f"vm-slice-{slice_id}-{vm_id}"
-                server = await asyncio.to_thread(conn.compute.find_server, server_name)
+                # Intentar con el nombre nuevo (slice_name-vm_label) y el legado
+                slice_name = vm_record.get("slice_name") or str(slice_id)
+                vm_label   = vm_record.get("vm_label")   or vm_id
+                safe_slice = slice_name.replace(" ", "-")[:24]
+                safe_vm    = vm_label.replace(" ", "-")[:16]
+                for candidate in [f"{safe_slice}-{safe_vm}", f"vm-slice-{slice_id}-{vm_id}"]:
+                    server = await asyncio.to_thread(conn.compute.find_server, candidate)
+                    if server:
+                        break
                 
             if server:
                 logger.info(f"[OpenStack] Eliminando servidor Nova: {server.name or server.id}")

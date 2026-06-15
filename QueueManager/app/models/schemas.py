@@ -62,6 +62,14 @@ class VMSpec(BaseModel):
     vm_user:     Optional[str] = None   # Si None → se usa el nombre de la imagen
     vm_password: Optional[str] = None   # Si None → se usa "pucp2026"
 
+    # OpenStack: host físico asignado y puertos Neutron
+    selected_host: Optional[str]  = None
+    network_ports: Optional[dict] = None
+
+    # Nombres legibles para recursos en el proveedor
+    vm_label:   Optional[str] = None
+    slice_name: Optional[str] = None
+
 
 class VMResult(BaseModel):
     """Resultado de una VM individual, tal como lo reporta el Compute Provisioner."""
@@ -70,6 +78,9 @@ class VMResult(BaseModel):
     pid:       Optional[int] = None
     vnc_port:  Optional[int] = None
     error:     Optional[str] = None
+    # OpenStack fields
+    provider_instance_id: Optional[str] = None
+    vnc_url:              Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -113,10 +124,9 @@ class DestroySliceRequest(BaseModel):
     Mensaje que publica el Slice Manager para destruir un slice.
     NATS subject: slice.destroy
     """
-    slice_id:   str = Field(...)
-    request_id: str = Field(...)
-    
-    # 🔥 NUEVO: Recibimos la "receta" exacta para reenviarla a los workers y garantizar una limpieza perfecta
+    slice_id:             str = Field(...)
+    request_id:           str = Field(...)
+    availability_zone_id: int = Field(default=1, description="1=Linux Cluster, 2=OpenStack")
     vms:        List[VMSpec]      = Field(default_factory=list)
     links:      List[NetworkLink] = Field(default_factory=list)
 

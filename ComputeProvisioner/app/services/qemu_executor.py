@@ -219,7 +219,7 @@ chpasswd:
         name = f"{vm_id}-{slice_id}"
         code, _, _ = self._ssh.exec(f"pgrep -f 'name {name}'")
         if code == 0:
-            self._ssh.exec(f"sudo pkill -f 'name {name}'")
+            self._ssh.exec(f"sudo pkill -9 -f 'name {name}'")
             logger.info("VM %s terminada", name)
         else:
             logger.warning("VM %s no encontrada (ya estaba muerta)", name)

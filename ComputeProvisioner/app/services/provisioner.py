@@ -209,11 +209,20 @@ class Provisioner:
         vm_id      = record["vm_id"]
         worker_ip  = record["worker_ip"]
         ssh_user   = record["ssh_user"]
-        ssh_key    = record["ssh_private_key"]
+        ssh_key    = record.get("ssh_private_key") or ""
+        worker_port = int(record.get("worker_port") or 22)
         tap_ifaces = record.get("tap_interfaces", [])
 
+        logger.debug(
+            "[CP][DESTROY] VM=%s  worker=%s:%d  user=%s  key_len=%d",
+            vm_id, worker_ip, worker_port, ssh_user, len(ssh_key)
+        )
+        if not ssh_key.strip():
+            logger.error("[CP][DESTROY] ¡ssh_private_key VACÍA para VM=%s! worker=%s:%d",
+                         vm_id, worker_ip, worker_port)
+
         try:
-            with SSHClient(worker_ip, ssh_user, ssh_key) as ssh:
+            with SSHClient(worker_ip, ssh_user, ssh_key, port=worker_port) as ssh:
                 executor = QEMUExecutor(ssh)
 
                 executor.kill_vm(vm_id, slice_id)

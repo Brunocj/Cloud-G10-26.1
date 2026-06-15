@@ -46,6 +46,9 @@ class VMSpec(BaseModel):
     # --- NUEVOS CAMPOS OPENSTACK ---
     selected_host:   Optional[str]       = Field(default=None, description="Host físico asignado (Nova hypervisor)")
     network_ports:   Optional[dict]      = Field(default_factory=dict, description="Puertos lógicos Neutron {provider_port_id, ...}")
+    # Nombres legibles para recursos en el proveedor
+    vm_label:        Optional[str]       = Field(default=None, description="Etiqueta legible de la VM (del canvas)")
+    slice_name:      Optional[str]       = Field(default=None, description="Nombre del slice")
     # -------------------------------
 
     # Credenciales cloud-init
