@@ -231,7 +231,7 @@ export default function App() {
             });
             if (!res.ok) throw new Error();
             const { slice_id } = await res.json();
-            const sl = mkSlice(name, "Draft", [...nodes], [...edges]);
+            const sl = mkSlice(name, "DRAFT", [...nodes], [...edges]);
             sl.id = slice_id;
             setSlices(p => [sl, ...p]);
             setNodes([]); setEdges([]);
