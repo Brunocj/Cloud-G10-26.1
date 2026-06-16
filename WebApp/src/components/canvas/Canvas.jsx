@@ -20,7 +20,7 @@ const buildIfaceMap = (edges) => {
 };
 
 // ─── Canvas ──────────────────────────────────────────────────────────────────
-export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlice, onOpenConsole, targetAz, setTargetAz }) => {
+export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlice, onOpenConsole, targetAz, setTargetAz, apiFetch, onCleared }) => {
     const svgRef   = useRef();
     const groupRef = useRef();           // root <g> — updated imperatively during pan/zoom
 
@@ -345,6 +345,9 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
         return img.availability_zone_id == targetAz;
     });
 
+    // Zona efectiva del slice: la del slice ya desplegado, o la elegida en el toolbar (borrador)
+    const effectiveZoneId = activeSlice ? activeSlice.availability_zone_id : targetAz;
+
     // ── Render ────────────────────────────────────────────────────────────────
 
     return (
@@ -385,13 +388,15 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
 
                 <div style={{ flex: 1 }} />
 
-                {/* Target AZ Selector */}
-                <div style={{ display: "flex", alignItems: "center", gap: 6, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 8, padding: "2px 8px", marginRight: 4 }}>
+                {/* Target AZ Selector — se bloquea una vez hay nodos, para evitar incompatibilidades de imagen */}
+                <div style={{ display: "flex", alignItems: "center", gap: 6, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 8, padding: "2px 8px", marginRight: 4 }}
+                    title={nodes.length > 0 ? "Limpia el lienzo para poder cambiar la Zona Objetivo" : ""}>
                     <span style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, textTransform: "uppercase" }}>Zona Objetivo:</span>
                     <select
                         value={targetAz || ""}
+                        disabled={nodes.length > 0}
                         onChange={(e) => setTargetAz(e.target.value)}
-                        style={{ ...btnBase({ boxShadow: "none" }), background: "transparent", border: "none", color: T.accent, fontSize: 11, fontWeight: 700, padding: "2px", cursor: "pointer", outline: "none" }}
+                        style={{ ...btnBase({ boxShadow: "none" }), background: "transparent", border: "none", color: T.accent, fontSize: 11, fontWeight: 700, padding: "2px", cursor: nodes.length > 0 ? "not-allowed" : "pointer", outline: "none", opacity: nodes.length > 0 ? 0.6 : 1 }}
                     >
                         <option value="">Cualquiera</option>
                         <option value="1">Linux Cluster</option>
@@ -469,6 +474,7 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                     onClick={() => {
                         if (window.confirm("¿Estás seguro de limpiar todo el lienzo? Perderás el trabajo no guardado.")) {
                             setNodes([]); setEdges([]); setLinkFrom(null); setEditId(null);
+                            if (onCleared) onCleared();
                         }
                     }}
                     style={btnBase({ boxShadow: "none", fontSize: 11, padding: "5px 12px",
@@ -649,6 +655,9 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                         node={editingNode}
                         availableImages={availableImages}
                         sliceStatus={activeSlice ? activeSlice.status : "DRAFT"}
+                        sliceId={activeSlice ? activeSlice.id : null}
+                        zoneId={effectiveZoneId}
+                        apiFetch={apiFetch}
                         onSave={updated => setNodes(prev => prev.map(n => n.id === updated.id ? updated : n))}
                         onDelete={id => {
                             setNodes(p => p.filter(n => n.id !== id));

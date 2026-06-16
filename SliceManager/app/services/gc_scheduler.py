@@ -29,7 +29,7 @@ def _ssh_delete_image_file(file_path: str, db) -> None:
     worker_db = db.query(Worker).filter(Worker.id == 1).first()
     if not worker_db or not worker_db.ssh_key_path:
         return
-    worker = {"ip": worker_db.ip_address, "port": worker_db.ssh_port, "user": worker_db.ssh_user, "key_path": worker_db.ssh_key_path}
+    worker = {"ip": worker_db.ip, "port": worker_db.ssh_port, "user": worker_db.ssh_user, "key_path": worker_db.ssh_key_path}
     try:
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -147,7 +147,7 @@ def run_gc_cycle() -> dict:
         if not w.ssh_key_path:
             continue
         worker_id = w.id
-        worker = {"ip": w.ip_address, "port": w.ssh_port, "user": w.ssh_user, "key_path": w.ssh_key_path}
+        worker = {"ip": w.ip, "port": w.ssh_port, "user": w.ssh_user, "key_path": w.ssh_key_path}
         try:
             isos = _gc_seed_isos(worker_id, worker)
             orphans = _gc_orphan_disks(worker_id, worker, alive_vm_names)

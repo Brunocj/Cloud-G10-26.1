@@ -14,7 +14,7 @@ import os
 import shutil
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
 import paramiko
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
@@ -247,6 +247,9 @@ def list_images(db: Session = Depends(get_db), current_user: CurrentUser = Depen
             date_uploaded=img.date_uploaded,
             in_use=active_count > 0,
             active_vm_count=active_count,
+            cloud_init_support=img.cloud_init_support or 0,
+            default_username=img.default_username,
+            default_password=img.default_password,
         ))
         db_image_names.add(img.name)
 
@@ -348,11 +351,21 @@ async def upload_image(
     name: str = Form(...),
     is_general: int = Form(0),
     availability_zone_id: int = Form(1),  # Por defecto: Linux Cluster (id=1)
+    cloud_init_support: int = Form(0),
+    default_username: Optional[str] = Form(None),
+    default_password: Optional[str] = Form(None),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Sube un archivo de imagen al NFS y lo registra en BD, asociado a una AZ."""
+    # Si la imagen no soporta cloud-init, las credenciales son fijas y deben registrarse
+    if not cloud_init_support and not (default_username and default_password):
+        raise HTTPException(
+            status_code=400,
+            detail="Esta imagen no soporta cloud-init: debe indicar el usuario y contraseña por defecto.",
+        )
+
     # Validación de rol: solo admins/superadmins pueden crear imágenes generales
     if is_general == 1 and not current_user.can_manage_all():
         raise HTTPException(
@@ -427,6 +440,9 @@ async def upload_image(
         existing.date_uploaded = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         existing.availability_zone_id = availability_zone_id
         existing.path = final_path
+        existing.cloud_init_support = cloud_init_support
+        existing.default_username = default_username
+        existing.default_password = default_password
         db.commit()
         db.refresh(existing)
         logger.info("Imagen '%s' reactivada → %s", name, final_path)
@@ -444,6 +460,9 @@ async def upload_image(
         is_general=is_general,
         path=final_path,
         availability_zone_id=availability_zone_id,
+        cloud_init_support=cloud_init_support,
+        default_username=default_username,
+        default_password=default_password,
     )
     db.add(nueva_imagen)
     db.commit()

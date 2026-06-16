@@ -116,14 +116,42 @@ async def handle_destroy(msg: Msg) -> None:
             })
 
 
+async def handle_console_refresh(msg: Msg) -> None:
+    payload = {}
+    try:
+        payload = json.loads(msg.data.decode())
+        provider_instance_id = payload.get("provider_instance_id")
+        logger.info(f"[console-refresh] Solicitado para provider_instance_id={provider_instance_id}")
+
+        vnc_token = None
+        error = None
+        if not provider_instance_id:
+            error = "provider_instance_id vacío"
+        else:
+            try:
+                vnc_token = await _provisioner.refresh_console(provider_instance_id)
+                if not vnc_token:
+                    error = "No se pudo obtener un token de consola nuevo"
+            except Exception as exc:
+                error = str(exc)
+
+        if msg.reply:
+            await queue_client.reply(msg.reply, {"vnc_url": vnc_token, "error": error})
+    except Exception as exc:
+        logger.error(f"[console-refresh] Error: {exc}", exc_info=True)
+        if msg.reply:
+            await queue_client.reply(msg.reply, {"vnc_url": None, "error": str(exc)})
+
+
 async def run_worker():
     await queue_client.connect()
     await queue_client.subscribe_deploy(handle_deploy)
     await queue_client.subscribe_destroy(handle_destroy)
+    await queue_client.subscribe_console_refresh(handle_console_refresh)
 
     logger.info(
         f"Compute Provisioner iniciado. "
-        f"Escuchando en '{settings.QUEUE_DEPLOY}' y '{settings.QUEUE_DESTROY}'"
+        f"Escuchando en '{settings.QUEUE_DEPLOY}', '{settings.QUEUE_DESTROY}' y '{settings.QUEUE_CONSOLE_REFRESH}'"
     )
 
     stop = asyncio.Event()

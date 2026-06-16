@@ -87,6 +87,12 @@ class Provisioner:
             failed_vms=failed,
         )
 
+    async def refresh_console(self, provider_instance_id: str) -> Optional[str]:
+        """Pide a Nova un token de consola noVNC nuevo para una instancia ya desplegada."""
+        conn = await asyncio.to_thread(get_connection)
+        os_executor = OpenStackComputeExecutor()
+        return await os_executor.get_console_token(conn, provider_instance_id)
+
     def _deploy_vm_sync(self, vm: VMSpec, slice_id: str) -> VMResult:
         vnc_port = vm.vnc_port
         vnc_display = vnc_port - 5900

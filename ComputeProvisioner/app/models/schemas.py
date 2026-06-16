@@ -70,6 +70,7 @@ class VMResult(BaseModel):
     # Campos para OpenStack
     provider_instance_id: Optional[str] = None
     vnc_url:              Optional[str] = None
+    external_ip:          Optional[str] = None
 
 
 # ---------------------------------------------------------------------------

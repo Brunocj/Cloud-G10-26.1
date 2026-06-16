@@ -14,6 +14,9 @@ class ImageResponse(BaseModel):
     date_uploaded: Optional[str] = None
     in_use: bool = False
     active_vm_count: int = 0
+    cloud_init_support: int = 0
+    default_username: Optional[str] = None
+    default_password: Optional[str] = None
 
     class Config:
         from_attributes = True

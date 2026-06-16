@@ -19,9 +19,6 @@ services:
       VNC_SSH_USER:      ubuntu
     ports:
       - "8085:8080"
-    volumes:
-      # Claves SSH para el túnel VNC a través del gateway
-      - ./keys:/app/keys:ro
     networks:
       - pucp_cloud_net
 

@@ -90,16 +90,19 @@ export const DeployModal = ({ defaultName, nodes, edges, onDeploy, onClose, imag
                     style={{ ...inp, marginBottom: 14, opacity: defaultName ? 0.7 : 1 }}
                 />
 
-                {/* Selector de Zona de Disponibilidad */}
+                {/* Selector de Zona de Disponibilidad — bloqueado si ya se fijó en el lienzo,
+                    para evitar incompatibilidades con las imágenes ya asignadas a los nodos. */}
                 <Label>Zona de Disponibilidad</Label>
                 <select
                     id="deploy-az-select"
                     value={selectedAzId}
+                    disabled={!!targetAz}
                     onChange={e => setSelectedAzId(Number(e.target.value))}
                     style={{
                         ...inp,
-                        marginBottom: 14,
-                        cursor: "pointer",
+                        marginBottom: 4,
+                        cursor: targetAz ? "not-allowed" : "pointer",
+                        opacity: targetAz ? 0.6 : 1,
                         appearance: "none",
                         backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E")`,
                         backgroundRepeat: "no-repeat",
@@ -113,6 +116,12 @@ export const DeployModal = ({ defaultName, nodes, edges, onDeploy, onClose, imag
                         </option>
                     ))}
                 </select>
+                {targetAz && (
+                    <div style={{ fontSize: 10, color: T.textFaint, marginBottom: 14 }}>
+                        Fijada desde el lienzo — limpia el lienzo para elegir otra zona.
+                    </div>
+                )}
+                {!targetAz && <div style={{ height: 14 }} />}
 
                 {/* Banner de incompatibilidad AZ ↔ Imágenes */}
                 {azConflict && (

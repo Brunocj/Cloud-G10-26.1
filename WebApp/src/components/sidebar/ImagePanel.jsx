@@ -6,7 +6,7 @@ import { Upload, RefreshCcw, Trash2, CheckCircle, Circle, Lock, Package, Loader 
 export const ImagePanel = ({ fullImages, onRefresh, flash, refreshImageList, apiFetch, user }) => {
     const [uploading,   setUploading]   = useState(false);
     const [gcRunning,   setGcRunning]   = useState(false);
-    const [uploadForm,  setUploadForm]  = useState({ name: "", file: null, isGeneral: false, azId: 1 });
+    const [uploadForm,  setUploadForm]  = useState({ name: "", file: null, isGeneral: false, azId: 1, cloudInit: true, defaultUsername: "", defaultPassword: "" });
     const [showUpload,  setShowUpload]  = useState(false);
     const [azList,      setAzList]      = useState([{ id: 1, name: "Linux Cluster" }, { id: 2, name: "OpenStack" }]);
     const fileRef = useRef(null);
@@ -24,11 +24,19 @@ export const ImagePanel = ({ fullImages, onRefresh, flash, refreshImageList, api
         if (!uploadForm.file || !uploadForm.name.trim()) {
             flash("Completa el nombre y selecciona un archivo", "error"); return;
         }
+        if (!uploadForm.cloudInit && !(uploadForm.defaultUsername.trim() && uploadForm.defaultPassword.trim())) {
+            flash("Esta imagen no soporta cloud-init: indica el usuario y contraseña por defecto", "error"); return;
+        }
         setUploading(true);
         const fd = new FormData();
         fd.append("name",       uploadForm.name.trim());
         fd.append("is_general", uploadForm.isGeneral ? 1 : 0);
         fd.append("availability_zone_id", uploadForm.azId);
+        fd.append("cloud_init_support", uploadForm.cloudInit ? 1 : 0);
+        if (!uploadForm.cloudInit) {
+            fd.append("default_username", uploadForm.defaultUsername.trim());
+            fd.append("default_password", uploadForm.defaultPassword.trim());
+        }
         fd.append("file",       uploadForm.file);
         try {
             const res  = await apiFetch("/slices/utils/images/upload", { method: "POST", body: fd });
@@ -36,7 +44,7 @@ export const ImagePanel = ({ fullImages, onRefresh, flash, refreshImageList, api
             if (!res.ok) throw new Error(data.detail || "Error al subir");
             flash(`Imagen '${uploadForm.name}' subida correctamente.`);
             setShowUpload(false);
-            setUploadForm({ name: "", file: null, isGeneral: false, azId: 1 });
+            setUploadForm({ name: "", file: null, isGeneral: false, azId: 1, cloudInit: true, defaultUsername: "", defaultPassword: "" });
             onRefresh();
             if (refreshImageList) refreshImageList();
         } catch (e) { flash(e.message, "error"); }
@@ -113,6 +121,28 @@ export const ImagePanel = ({ fullImages, onRefresh, flash, refreshImageList, api
                                     onChange={e => setUploadForm(p => ({ ...p, isGeneral: e.target.checked }))} />
                                 ¿Hacer imagen pública general del sistema?
                             </label>
+                        )}
+
+                        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: T.text, marginBottom: 8, cursor: "pointer" }}>
+                            <input type="checkbox" checked={uploadForm.cloudInit}
+                                onChange={e => setUploadForm(p => ({ ...p, cloudInit: e.target.checked }))} />
+                            ¿Esta imagen soporta cloud-init?
+                        </label>
+
+                        {!uploadForm.cloudInit && (
+                            <div style={{ background: T.surfaceElevated, borderRadius: 8, padding: "8px 10px", marginBottom: 8, border: `1px solid ${T.border}` }}>
+                                <div style={{ fontSize: 9.5, color: T.textFaint, marginBottom: 6 }}>
+                                    Sin cloud-init, las credenciales vienen fijas en la imagen — indícalas para mostrarlas en el panel de cada VM.
+                                </div>
+                                <Label>Usuario por defecto</Label>
+                                <input value={uploadForm.defaultUsername}
+                                    onChange={e => setUploadForm(p => ({ ...p, defaultUsername: e.target.value }))}
+                                    placeholder="ej: cirros" style={{ ...inp, marginBottom: 8 }} />
+                                <Label>Contraseña por defecto</Label>
+                                <input value={uploadForm.defaultPassword}
+                                    onChange={e => setUploadForm(p => ({ ...p, defaultPassword: e.target.value }))}
+                                    placeholder="ej: gocubsgo" style={{ ...inp, marginBottom: 8 }} />
+                            </div>
                         )}
 
                         <button onClick={handleUpload} disabled={uploading}

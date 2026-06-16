@@ -6,7 +6,6 @@ import {
     Network, Lock, CheckCircle, AlertTriangle, Info, Terminal, BarChart2, Plus,
 } from "../ui/Icon";
 
-const API_BASE = "http://localhost:8085/api/v1";
 const SZ = 13; // standard icon size inside the panel
 
 const mkRule = () => ({ id: `r${Date.now()}`, protocol: "TCP", port: "" });
@@ -24,7 +23,7 @@ const Tab = ({ label, icon: Icon, active, onClick }) => (
     </button>
 );
 
-export const NodeEditor = ({ node, availableImages, sliceStatus, onSave, onDelete, onClose, onOpenConsole }) => {
+export const NodeEditor = ({ node, availableImages, sliceStatus, sliceId, zoneId, onSave, onDelete, onClose, onOpenConsole, apiFetch }) => {
     const defaultImg = availableImages?.[0];
 
     const initForm = (n) => ({
@@ -41,19 +40,22 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, onSave, onDelet
     const [availableIps, setIps]    = useState([]);
     const u = (k, v) => setF(p => ({ ...p, [k]: v }));
     const isReadOnly = sliceStatus && sliceStatus !== "DRAFT";
+    const selectedImage = availableImages?.find(i => i.id === f.image_id);
+    const zoneIdNum = zoneId ? Number(zoneId) : null;
 
     useEffect(() => { setF(initForm(node)); setActiveTab("props"); }, [node.id]);
 
     useEffect(() => {
-        if (f.internet_access !== 1) return;
-        fetch(`${API_BASE}/slices/utils/available-ips`)
+        if (f.internet_access !== 1 || !apiFetch) return;
+        const qs = zoneId ? `?zone_id=${zoneId}` : "";
+        apiFetch(`/slices/utils/available-ips${qs}`)
             .then(r => r.json())
             .then(data => setIps(
                 f.external_ip && !data.includes(f.external_ip)
                     ? [f.external_ip, ...data] : data
             ))
             .catch(() => {});
-    }, [f.internet_access]);
+    }, [f.internet_access, apiFetch, zoneId]);
 
     const addRule    = () => setF(p => ({ ...p, firewall_rules: [...p.firewall_rules, mkRule()] }));
     const updateRule = (id, key, val) => setF(p => ({ ...p, firewall_rules: p.firewall_rules.map(r => r.id === id ? { ...r, [key]: val } : r) }));
@@ -147,7 +149,24 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, onSave, onDelet
                             </select>
                         </div>
 
-                        {!isReadOnly && (
+                        {selectedImage && !selectedImage.cloud_init_support && (
+                            <div style={{ background: T.surfaceElevated, borderRadius: 9, padding: "9px 12px", border: `1px solid ${T.border}` }}>
+                                <Label>Credenciales <span style={{ fontWeight: 400, color: T.textFaint }}>(fijas — sin cloud-init)</span></Label>
+                                <div style={{ fontSize: 11, color: T.text }}>
+                                    {(selectedImage.default_username || selectedImage.default_password)
+                                        ? <>
+                                            <span style={{ fontWeight: 700 }}>Usuario:</span> {selectedImage.default_username || "(desconocido)"} |{" "}
+                                            <span style={{ fontWeight: 700 }}>Pass:</span> {selectedImage.default_password || "(desconocido)"}
+                                          </>
+                                        : "Se desconocen las credenciales por defecto de esta imagen."}
+                                </div>
+                                <div style={{ fontSize: 9, color: T.textFaint, marginTop: 4 }}>
+                                    Esta imagen no soporta cloud-init: las credenciales vienen fijas y no se pueden personalizar.
+                                </div>
+                            </div>
+                        )}
+
+                        {!!selectedImage?.cloud_init_support && !isReadOnly && (
                             <div style={{ background: T.surfaceElevated, borderRadius: 9, padding: "10px 12px", border: `1px solid ${T.border}` }}>
                                 <Label>Credenciales VM <span style={{ fontWeight: 400, color: T.textFaint }}>(cloud-init)</span></Label>
                                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
@@ -165,7 +184,7 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, onSave, onDelet
                             </div>
                         )}
 
-                        {isReadOnly && (node.vm_user || node.vm_password) && (
+                        {!!selectedImage?.cloud_init_support && isReadOnly && (node.vm_user || node.vm_password) && (
                             <div style={{ background: T.surfaceElevated, borderRadius: 9, padding: "9px 12px", border: `1px solid ${T.border}` }}>
                                 <Label>Credenciales</Label>
                                 <div style={{ fontSize: 11, color: T.text }}>
@@ -299,13 +318,13 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, onSave, onDelet
                                         Al asignar una IP del pool, podrás conectarte a esta VM por SSH desde tu equipo local a través de la VPN de la universidad.
                                     </div>
                                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 5 }}>
-                                        <div style={{ fontSize: 10, fontWeight: 700, color: T.textMuted }}>IP del Pool (10.60.15.X)</div>
-                                        {!f.external_ip && <span style={{ fontSize: 8, color: T.textMuted, fontStyle: "italic" }}>Sin acceso inbound si no se asigna</span>}
+                                        <div style={{ fontSize: 10, fontWeight: 700, color: T.textMuted }}>IP del Pool {zoneIdNum === 2 ? "(10.60.16.X)" : "(10.60.15.X)"}</div>
+                                        {!f.external_ip && zoneIdNum !== 2 && <span style={{ fontSize: 8, color: T.textMuted, fontStyle: "italic" }}>Sin acceso inbound si no se asigna</span>}
                                     </div>
                                     <select value={f.external_ip||""} disabled={isReadOnly}
                                         onChange={e => u("external_ip", e.target.value)}
                                         style={{ ...inp, fontSize: 12, cursor: "pointer" }}>
-                                        <option value="">— Sin IP VPN (solo NAT saliente) —</option>
+                                        <option value="">{zoneIdNum === 2 ? "— IP aleatoria (asignada automáticamente) —" : "— Sin IP VPN (solo NAT saliente) —"}</option>
                                         {availableIps.map(ip => <option key={ip} value={ip}>{ip}</option>)}
                                     </select>
                                     {f.external_ip && (
@@ -313,6 +332,20 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, onSave, onDelet
                                             <CheckCircle size={11} style={{ display: "inline", marginRight: 4 }} />
                                             IP VPN: <strong>{f.external_ip}</strong><br />
                                             <code style={{ fontFamily: "monospace", fontSize: 10 }}>ssh usuario@{f.external_ip}</code>
+                                        </div>
+                                    )}
+
+                                    {zoneIdNum === 2 && !selectedImage?.cloud_init_support && (
+                                        <div style={{ fontSize: 10, color: T.yellow, marginTop: 8, background: T.yellowLight, border: `1px solid ${T.yellow}44`, borderRadius: 6, padding: "8px 9px", lineHeight: 1.5 }}>
+                                            <AlertTriangle size={11} style={{ display: "inline", marginRight: 4, verticalAlign: "text-top" }} />
+                                            Esta imagen no soporta cloud-init: la interfaz de red externa <strong>no se configura sola</strong>.
+                                            Después de desplegar, abre la consola web de la VM y ejecuta dentro de ella:
+                                            <div style={{ marginTop: 4 }}>
+                                                <code style={{ fontFamily: "monospace", fontSize: 10, display: "block", background: T.surface, borderRadius: 4, padding: "4px 6px" }}>
+                                                    sudo cirros-dhcpc up eth1
+                                                </code>
+                                            </div>
+                                            (si la imagen no es CirrOS, usa el comando equivalente para activar DHCP en la segunda interfaz de red).
                                         </div>
                                     )}
                                 </div>
@@ -335,7 +368,7 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, onSave, onDelet
                 {isReadOnly ? (
                     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                         <button
-                            onClick={() => onOpenConsole({ workerIp: node.worker_ip, workerPort: node.worker_port, vncPort: node.vnc_port, vnc_url: node.vnc_url })}
+                            onClick={() => onOpenConsole({ workerIp: node.worker_ip, workerPort: node.worker_port, vncPort: node.vnc_port, vnc_url: node.vnc_url, sliceId, vmId: node.id, apiFetch })}
                             disabled={sliceStatus !== "ACTIVE"}
                             style={btnBase({ width: "100%", background: T.text, color: "#fff", border: "none", padding: "8px 0", opacity: sliceStatus === "ACTIVE" ? 1 : 0.5,
                                 display: "flex", alignItems: "center", justifyContent: "center", gap: 6 })}>

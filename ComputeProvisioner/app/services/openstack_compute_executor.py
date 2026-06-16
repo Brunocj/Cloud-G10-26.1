@@ -22,6 +22,47 @@ def get_connection():
 class OpenStackComputeExecutor:
     """Implementa el aprovisionamiento de cómputo para la zona OpenStack (Strategy Pattern)."""
 
+    async def get_console_token(self, conn, provider_instance_id: str) -> Optional[str]:
+        """
+        Solicita a Nova un token de consola noVNC nuevo para una instancia existente.
+        Los tokens de nova-novncproxy son de corta duración (~10 min) y de un solo uso,
+        por lo que deben pedirse justo antes de abrir la consola, no reusarse del deploy.
+        """
+        # Nova 22.x (Yoga) usa el endpoint POST /servers/{id}/remote-consoles (mv 2.6+)
+        # openstacksdk lo expone como create_server_remote_console.
+        # Fallback al action legacy os-getVNCConsole por compatibilidad.
+        vnc_url = None
+        try:
+            console = await asyncio.to_thread(
+                conn.compute.create_server_remote_console,
+                provider_instance_id,
+                **{"protocol": "vnc", "type": "novnc"},
+            )
+            vnc_url = getattr(console, "url", None) or (console.get("url") if isinstance(console, dict) else None)
+        except Exception as e:
+            logger.warning(f"[OpenStack] create_server_remote_console falló: {e}. Intentando acción legacy os-getVNCConsole...")
+            try:
+                resp = await asyncio.to_thread(
+                    conn.compute._action,
+                    "os-getVNCConsole", provider_instance_id, {"type": "novnc"}
+                )
+                vnc_url = (resp or {}).get("console", {}).get("url")
+            except Exception as e2:
+                logger.error(f"[OpenStack] No se pudo obtener consola VNC: {e2}")
+                return None
+
+        # Extraer solo el token UUID de la URL de nova-novncproxy
+        # URL: http://controller:6080/vnc_auto.html?path=%3Ftoken%3D<UUID>
+        if not vnc_url:
+            return None
+        try:
+            parsed = urlparse(vnc_url)
+            path_encoded = parse_qs(parsed.query).get("path", [""])[0]
+            path_decoded = unquote(path_encoded).lstrip("?")
+            return parse_qs(path_decoded).get("token", [None])[0]
+        except Exception:
+            return None
+
     def _resolve_image_uuid(self, conn, image_path: str) -> str:
         """Resuelve el nombre o ruta del archivo de imagen a un UUID de Glance."""
         base_name = os.path.basename(image_path)
@@ -83,24 +124,33 @@ class OpenStackComputeExecutor:
             
             # 2. Extraer ID de Puerto Neutron
             port_id = None
+            external_port_id = None
+            external_ip = None
             if vm.network_ports and isinstance(vm.network_ports, dict):
                 port_id = vm.network_ports.get("provider_port_id")
+                external_port_id = vm.network_ports.get("external_port_id")
+                external_ip = vm.network_ports.get("external_ip")
             elif vm.network_ports and isinstance(vm.network_ports, list) and vm.network_ports:
                 port_id = vm.network_ports[0]
-                
+
             if not port_id:
                 raise RuntimeError("No se especificó un puerto Neutron válido en network_ports.")
-                
+
             # 3. Crear Instancia en Nova aplicando BYOS (scheduler bypass)
             safe_slice = (vm.slice_name or str(slice_id)).replace(" ", "-")[:24]
             safe_vm    = (vm.vm_label   or vm.vm_id).replace(" ", "-")[:16]
             server_name = f"{safe_slice}-{safe_vm}"
 
+            networks = [{"port": port_id}]
+            if external_port_id:
+                networks.append({"port": external_port_id})
+                logger.info(f"[OpenStack] VM {vm.vm_id}: adjuntando puerto externo {external_port_id} (ip={external_ip})")
+
             create_kwargs = dict(
                 name=server_name,
                 image_id=image_uuid,
                 flavor_id=flavor_uuid,
-                networks=[{"port": port_id}],
+                networks=networks,
             )
 
             byos_enabled = os.getenv("OS_BYOS_FORCE_HOST", "true").lower() in ("1", "true", "yes")
@@ -128,44 +178,8 @@ class OpenStackComputeExecutor:
                 await asyncio.sleep(5)
                 
             # 5. Obtener Consola noVNC
-            # Nova 22.x (Yoga) usa el endpoint POST /servers/{id}/remote-consoles (mv 2.6+)
-            # openstacksdk lo expone como create_server_remote_console.
-            # Fallback al action legacy os-getVNCConsole por compatibilidad.
-            vnc_url = None
-            try:
-                # Nova API: POST /servers/{id}/remote-consoles body={"remote_console":{"protocol":"vnc","type":"novnc"}}
-                # openstacksdk mapea 'type' (no 'console_type') al campo JSON 'type'
-                console = await asyncio.to_thread(
-                    conn.compute.create_server_remote_console,
-                    server.id,
-                    **{"protocol": "vnc", "type": "novnc"},
-                )
-                vnc_url = getattr(console, "url", None) or (console.get("url") if isinstance(console, dict) else None)
-            except Exception as e:
-                logger.warning(f"[OpenStack] create_server_remote_console falló: {e}. Intentando acción legacy os-getVNCConsole...")
-                try:
-                    # Fallback: POST /servers/{id}/action {"os-getVNCConsole": {"type": "novnc"}}
-                    resp = await asyncio.to_thread(
-                        conn.compute._action,
-                        "os-getVNCConsole", server.id, {"type": "novnc"}
-                    )
-                    vnc_url = (resp or {}).get("console", {}).get("url")
-                except Exception as e2:
-                    logger.error(f"[OpenStack] No se pudo obtener consola VNC: {e2}")
-                    
-            # Extraer solo el token UUID de la URL de nova-novncproxy
-            # URL: http://controller:6080/vnc_auto.html?path=%3Ftoken%3D<UUID>
-            vnc_token = None
-            if vnc_url:
-                try:
-                    parsed = urlparse(vnc_url)
-                    path_encoded = parse_qs(parsed.query).get("path", [""])[0]
-                    path_decoded = unquote(path_encoded).lstrip("?")
-                    vnc_token = parse_qs(path_decoded).get("token", [None])[0]
-                except Exception:
-                    pass
+            vnc_token = await self.get_console_token(conn, server.id)
             logger.info(f"[OpenStack] VM {vm.vm_id} desplegada exitosamente")
-            logger.info(f"[OpenStack] vnc_url raw: {vnc_url!r}")
             logger.info(f"[OpenStack] vnc_token extraído: {vnc_token!r}")
             result = VMResult(
                 vm_id=vm.vm_id,
@@ -173,6 +187,7 @@ class OpenStackComputeExecutor:
                 vnc_port=vm.vnc_port,
                 provider_instance_id=server.id,
                 vnc_url=vnc_token,
+                external_ip=external_ip,
             )
             logger.info(f"[OpenStack] VMResult.vnc_url = {result.vnc_url!r}")
             return result

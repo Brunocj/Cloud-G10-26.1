@@ -22,7 +22,13 @@ class Settings(BaseSettings):
 
     WAN_INTERFACE: str = "ens3"  # Interfaz de salida a Internet en los workers (ajustar según tu entorno)
     EXTERNAL_INTERFACE: str = "br-int"  # Interfaz de datos para acceso exterior (DNAT)
-    EXTERNAL_POOL_CIDR: str = "10.60.15.0/24"  # Pool de acceso exterior asignado
+    EXTERNAL_POOL_CIDR: str = "10.60.15.0/24"  # Pool de acceso exterior asignado (Linux Cluster)
+
+    # ── OpenStack: red provider compartida para salida a Internet ──────────
+    OS_EXTERNAL_NETWORK_NAME: str = "external"          # Red provider flat ya creada en OpenStack
+    OS_EXTERNAL_SUBNET_NAME:  str = "external_subnet"
+    OS_EXTERNAL_SUBNET_CIDR:  str = "10.60.16.0/24"      # Pool de acceso exterior asignado (OpenStack)
+    OS_EXTERNAL_GATEWAY_IP:   str = "10.60.16.1"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

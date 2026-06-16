@@ -1,4 +1,4 @@
-import React, { useRef } from "react";
+import React, { useRef, useEffect, useState } from "react";
 import { VncScreen } from "react-vnc";
 
 // Extraemos solo el host:puerto de la URL base del API Gateway (sin ws:// ni path)
@@ -17,6 +17,58 @@ const KEYSYMS = {
     at:         { sym: 0x0040, code: "Digit2" },
 };
 
+// ─── Helpers compartidos: teclas especiales para el toolbar de la consola ─────
+const SPECIAL_KEYS = [
+    { label: "/",  title: "Slash",      ...KEYSYMS.slash },
+    { label: "\\", title: "Backslash",  ...KEYSYMS.backslash },
+    { label: "|",  title: "Pipe",       ...KEYSYMS.pipe },
+    { label: "_",  title: "Underscore", ...KEYSYMS.underscore },
+    { label: "-",  title: "Dash",       ...KEYSYMS.dash },
+    { label: "~",  title: "Tilde",      ...KEYSYMS.tilde },
+    { label: "@",  title: "At",         ...KEYSYMS.at },
+];
+
+const SPECIAL_KEY_BTN_STYLE = {
+    backgroundColor: "#2a2a4a",
+    color: "#e0e0e0",
+    border: "1px solid #444",
+    borderRadius: "4px",
+    padding: "3px 9px",
+    cursor: "pointer",
+    fontSize: 13,
+    fontWeight: 700,
+    fontFamily: "monospace",
+    transition: "background 0.1s",
+    minWidth: 30,
+    lineHeight: 1.4,
+};
+
+const SpecialKeysToolbar = ({ vncRef }) => {
+    const sendKey = (sym, code) => {
+        if (!vncRef.current) return;
+        vncRef.current.sendKey(sym, code, true);   // keydown
+        vncRef.current.sendKey(sym, code, false);  // keyup
+    };
+    return (
+        <div style={{ padding: "5px 10px", backgroundColor: "#12122a", borderBottom: "1px solid #333", display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 10, color: "#666", marginRight: 4, fontFamily: "monospace" }}>TECLAS:</span>
+            {SPECIAL_KEYS.map(({ label, title, sym, code }) => (
+                <button
+                    key={title}
+                    title={`Enviar ${title}`}
+                    onClick={() => sendKey(sym, code)}
+                    style={SPECIAL_KEY_BTN_STYLE}
+                    onMouseEnter={e => e.target.style.backgroundColor = "#3a3a6a"}
+                    onMouseLeave={e => e.target.style.backgroundColor = "#2a2a4a"}
+                >
+                    {label}
+                </button>
+            ))}
+            <span style={{ fontSize: 10, color: "#555", marginLeft: 4 }}>— clic para insertar en la consola</span>
+        </div>
+    );
+};
+
 // ─── Consola NoVNC (Linux Cluster) ────────────────────────────────────────────
 const LinuxClusterConsole = ({ workerIp, workerPort, vncPort }) => {
     const vncRef = useRef(null);
@@ -28,37 +80,6 @@ const LinuxClusterConsole = ({ workerIp, workerPort, vncPort }) => {
     const wsPort  = 5700 + display;
     const sshPort = workerPort || 22;   // puerto SSH en el gateway (5811-5814)
     const wsUrl   = `ws://${API_GW}/vnc/${workerIp}/${sshPort}/${wsPort}`;
-
-    const sendKey = (sym, code) => {
-        if (!vncRef.current) return;
-        vncRef.current.sendKey(sym, code, true);   // keydown
-        vncRef.current.sendKey(sym, code, false);  // keyup
-    };
-
-    const specialKeys = [
-        { label: "/",  title: "Slash",      ...KEYSYMS.slash },
-        { label: "\\", title: "Backslash",  ...KEYSYMS.backslash },
-        { label: "|",  title: "Pipe",       ...KEYSYMS.pipe },
-        { label: "_",  title: "Underscore", ...KEYSYMS.underscore },
-        { label: "-",  title: "Dash",       ...KEYSYMS.dash },
-        { label: "~",  title: "Tilde",      ...KEYSYMS.tilde },
-        { label: "@",  title: "At",         ...KEYSYMS.at },
-    ];
-
-    const btnStyle = {
-        backgroundColor: "#2a2a4a",
-        color: "#e0e0e0",
-        border: "1px solid #444",
-        borderRadius: "4px",
-        padding: "3px 9px",
-        cursor: "pointer",
-        fontSize: 13,
-        fontWeight: 700,
-        fontFamily: "monospace",
-        transition: "background 0.1s",
-        minWidth: 30,
-        lineHeight: 1.4,
-    };
 
     return (
         <div style={{ width: "800px", backgroundColor: "#000", borderRadius: "8px", overflow: "hidden" }}>
@@ -76,23 +97,7 @@ const LinuxClusterConsole = ({ workerIp, workerPort, vncPort }) => {
                 </button>
             </div>
 
-            {/* Toolbar row 2: special character keys */}
-            <div style={{ padding: "5px 10px", backgroundColor: "#12122a", borderBottom: "1px solid #333", display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
-                <span style={{ fontSize: 10, color: "#666", marginRight: 4, fontFamily: "monospace" }}>TECLAS:</span>
-                {specialKeys.map(({ label, title, sym, code }) => (
-                    <button
-                        key={title}
-                        title={`Enviar ${title}`}
-                        onClick={() => sendKey(sym, code)}
-                        style={btnStyle}
-                        onMouseEnter={e => e.target.style.backgroundColor = "#3a3a6a"}
-                        onMouseLeave={e => e.target.style.backgroundColor = "#2a2a4a"}
-                    >
-                        {label}
-                    </button>
-                ))}
-                <span style={{ fontSize: 10, color: "#555", marginLeft: 4 }}>— clic para insertar en la consola</span>
-            </div>
+            <SpecialKeysToolbar vncRef={vncRef} />
 
             <VncScreen
                 url={wsUrl}
@@ -108,11 +113,38 @@ const LinuxClusterConsole = ({ workerIp, workerPort, vncPort }) => {
 };
 
 // ─── Consola OpenStack NoVNC (WebSocket via ApiGW → SSH → nova-novncproxy) ────
-const OpenStackConsole = ({ vncUrl }) => {
-    // vncUrl contiene el token UUID de Nova (extraído por el CP)
-    // El ApiGW proxea: ws://apigw/vnc/openstack/{token} → SSH headnode → controller:6080
-    const wsUrl = `ws://${API_GW}/vnc/openstack/${vncUrl}`;
+const OpenStackConsole = ({ vncUrl, sliceId, vmId, apiFetch }) => {
+    // Los tokens de nova-novncproxy expiran/se consumen rápido (~10 min, un solo uso).
+    // Si tenemos sliceId+vmId+apiFetch pedimos uno fresco; si no, usamos el guardado
+    // (compatibilidad hacia atrás).
+    const [freshToken, setFreshToken] = useState(null);
+    const [status, setStatus] = useState(sliceId && vmId && apiFetch ? "loading" : "ready");
     const vncRef = useRef(null);
+
+    useEffect(() => {
+        if (!(sliceId && vmId && apiFetch)) return;
+        setStatus("loading");
+        apiFetch(`/slices/${sliceId}/vms/${vmId}/console`)
+            .then(r => r.ok ? r.json() : Promise.reject(r))
+            .then(data => { setFreshToken(data.vnc_url); setStatus("ready"); })
+            .catch(() => { setFreshToken(null); setStatus("error"); });
+    }, [sliceId, vmId, apiFetch]);
+
+    const token = freshToken || vncUrl;
+    const wsUrl = `ws://${API_GW}/vnc/openstack/${token}`;
+
+    if (status === "loading") {
+        return <div style={{ width: "800px", height: "556px", backgroundColor: "#000", borderRadius: "8px",
+            display: "flex", alignItems: "center", justifyContent: "center", color: "#888" }}>
+            Solicitando consola…
+        </div>;
+    }
+    if (status === "error" || !token) {
+        return <div style={{ width: "800px", height: "556px", backgroundColor: "#000", borderRadius: "8px",
+            display: "flex", alignItems: "center", justifyContent: "center", color: "#e74c3c" }}>
+            No se pudo obtener la consola de esta VM.
+        </div>;
+    }
 
     return (
         <div style={{ width: "800px", backgroundColor: "#000", borderRadius: "8px", overflow: "hidden" }}>
@@ -129,10 +161,19 @@ const OpenStackConsole = ({ vncUrl }) => {
                         ☁ OpenStack NoVNC
                     </span>
                     <span style={{ fontSize: 11, color: "#555", fontFamily: "monospace" }}>
-                        token: {vncUrl?.slice(0, 8)}…
+                        token: {token?.slice(0, 8)}…
                     </span>
                 </div>
+                <button
+                    onClick={() => vncRef.current && vncRef.current.sendCtrlAltDel()}
+                    style={{ backgroundColor: "#c0392b", color: "#fff", border: "none", borderRadius: "4px", padding: "5px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}
+                >
+                    Ctrl+Alt+Del
+                </button>
             </div>
+
+            <SpecialKeysToolbar vncRef={vncRef} />
+
             <VncScreen
                 url={wsUrl}
                 scaleViewport={true}
@@ -160,7 +201,7 @@ const OpenStackConsole = ({ vncUrl }) => {
 const VmConsole = ({ workerIp, workerPort, vncPort, vm }) => {
     // Prioridad: vnc_url de OpenStack > vncPort de Linux Cluster
     if (vm?.vnc_url) {
-        return <OpenStackConsole vncUrl={vm.vnc_url} />;
+        return <OpenStackConsole vncUrl={vm.vnc_url} sliceId={vm.sliceId} vmId={vm.vmId} apiFetch={vm.apiFetch} />;
     }
 
     // Fallback Linux Cluster

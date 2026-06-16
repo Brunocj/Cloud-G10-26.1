@@ -373,6 +373,7 @@ class WorkflowOrchestrator:
                 "vnc_url":              getattr(vm, "vnc_url", None),
                 "worker_ip":            vm.worker_ip,
                 "provider_instance_id": getattr(vm, "provider_instance_id", None),
+                "external_ip":          getattr(vm, "external_ip", None),
                 "error":                vm.error,
             }
             for vm in vm_results

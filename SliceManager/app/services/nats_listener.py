@@ -42,12 +42,15 @@ async def nats_result_listener():
                     if result_vms:
                         vnc_url_map            = {}
                         provider_instance_map  = {}
+                        external_ip_map        = {}
                         for v in result_vms:
                             vid = v.get("vm_id")
                             if v.get("vnc_url"):
                                 vnc_url_map[vid] = v["vnc_url"]
                             if v.get("provider_instance_id"):
                                 provider_instance_map[vid] = v["provider_instance_id"]
+                            if v.get("external_ip"):
+                                external_ip_map[vid] = v["external_ip"]
 
                         # Actualizar columnas SQL de cada VM
                         db_vms = db.query(Vm).filter(Vm.slice_id == slice_id).all()
@@ -60,6 +63,10 @@ async def nats_result_listener():
                                 db_vm.provider_instance_id = provider_instance_map[db_vm.name]
                                 logger.info("[LISTENER] 🔑 provider_instance_id guardado para VM %s: %s",
                                             db_vm.name, provider_instance_map[db_vm.name])
+                            if db_vm.name in external_ip_map:
+                                db_vm.external_ip = external_ip_map[db_vm.name]
+                                logger.info("[LISTENER] 🌐 external_ip guardado para VM %s: %s",
+                                            db_vm.name, external_ip_map[db_vm.name])
 
                         # Actualizar también slice_json["deployed_vms"]
                         s_json = db_slice.slice_json or {}
@@ -72,6 +79,8 @@ async def nats_result_listener():
                                 vm_entry["vnc_url"] = vnc_url_map[vid]
                             if vid in provider_instance_map:
                                 vm_entry["provider_instance_id"] = provider_instance_map[vid]
+                            if vid in external_ip_map:
+                                vm_entry["external_ip"] = external_ip_map[vid]
                         s_json["deployed_vms"] = deployed_vms
                         db_slice.slice_json = dict(s_json)
 

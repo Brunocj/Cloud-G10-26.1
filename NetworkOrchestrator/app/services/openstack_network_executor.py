@@ -2,6 +2,7 @@ import os
 import logging
 import asyncio
 import openstack
+from app.core.config import settings
 from app.models.schemas import (
     DeployNetworkRequest, DeployNetworkResponse, DestroyNetworkRequest, DestroyNetworkResponse,
     LinkResult, ProvisioningStatus
@@ -136,26 +137,33 @@ class OpenStackNetworkExecutor:
                 port_range_min=22, port_range_max=22, ethertype="IPv4"
             )
 
-            # 4. Router virtual hacia red externa
-            ext_net_name = os.getenv("OPENSTACK_EXTERNAL_NETWORK", "ext-net")
-            ext_net = await asyncio.to_thread(conn.network.find_network, ext_net_name)
+            # 4. Red provider externa compartida: salida a Internet vía puerto directo
+            # (no se usa router + floating IP porque este entorno no tiene agente L3;
+            #  el acceso a Internet se da adjuntando un 2do puerto a la red provider
+            #  "external", con NAT/forwarding estático configurado en HeadNode/Gateway).
+            ext_net = await asyncio.to_thread(conn.network.find_network, settings.OS_EXTERNAL_NETWORK_NAME)
+            ext_subnet = None
             if ext_net:
-                _created_router = await asyncio.to_thread(
-                    conn.network.create_router,
-                    name=router_name,
-                    external_gateway_info={"network_id": ext_net.id}
-                )
-                logger.info(f"[OpenStack] Router virtual creado: {_created_router.name} (ID: {_created_router.id})")
-                await asyncio.to_thread(
-                    conn.network.add_interface_to_router,
-                    _created_router.id,
-                    subnet_id=_created_subnet.id
-                )
-                logger.info(f"[OpenStack] Subnet conectada al Router virtual")
+                ext_subnet = await asyncio.to_thread(conn.network.find_subnet, settings.OS_EXTERNAL_SUBNET_NAME)
+                if not ext_subnet:
+                    try:
+                        ext_subnet = await asyncio.to_thread(
+                            conn.network.create_subnet,
+                            name=settings.OS_EXTERNAL_SUBNET_NAME,
+                            network_id=ext_net.id,
+                            ip_version=4,
+                            cidr=settings.OS_EXTERNAL_SUBNET_CIDR,
+                            gateway_ip=settings.OS_EXTERNAL_GATEWAY_IP,
+                            enable_dhcp=True,
+                        )
+                        logger.info(f"[OpenStack] external_subnet creada: {settings.OS_EXTERNAL_SUBNET_CIDR}")
+                    except Exception as e:
+                        logger.error(f"[OpenStack] No se pudo crear external_subnet: {e}")
+                        ext_subnet = None
             else:
-                logger.warning(f"[OpenStack] Red externa '{ext_net_name}' no encontrada. Salida a Internet omitida.")
+                logger.warning(f"[OpenStack] Red externa '{settings.OS_EXTERNAL_NETWORK_NAME}' no encontrada. Salida a Internet omitida.")
 
-            # 5. Crear puerto Neutron para cada VM
+            # 5. Crear puerto Neutron para cada VM (red interna del slice + opcional puerto externo)
             port_map = {}
             for vm in request.vms:
                 port = await asyncio.to_thread(
@@ -168,25 +176,36 @@ class OpenStackNetworkExecutor:
                 _created_ports.append(port)
                 logger.info(f"[OpenStack] Puerto Neutron creado para VM {vm.vm_id} con IP fija: {vm.internal_ip}")
 
-                floating_ip = None
-                floating_ip_id = None
-                if (vm.internet_access == 1 or vm.external_ip) and ext_net and _created_router:
+                external_port_id = None
+                external_ip = None
+                if (vm.internet_access == 1 or vm.external_ip) and ext_net and ext_subnet:
+                    ext_port_kwargs = dict(
+                        name=f"port-ext-{slice_id}-{vm.vm_id}",
+                        network_id=ext_net.id,
+                        security_groups=[_created_sec_group.id],
+                    )
+                    # Si el usuario eligió una IP específica del pool, se la reservamos en el
+                    # puerto: Neutron actualiza el host file de su DHCP (dnsmasq) automáticamente
+                    # para que esa IP exacta se le entregue a la VM. Si no, Neutron asigna
+                    # cualquier IP libre de la subnet (comportamiento por defecto).
+                    if vm.external_ip:
+                        ext_port_kwargs["fixed_ips"] = [{"subnet_id": ext_subnet.id, "ip_address": vm.external_ip}]
                     try:
-                        fip = await asyncio.to_thread(
-                            conn.network.create_ip,
-                            floating_network_id=ext_net.id,
-                            port_id=port.id
-                        )
-                        floating_ip = fip.floating_ip_address
-                        floating_ip_id = fip.id
-                        logger.info(f"[OpenStack] IP flotante asociada a VM {vm.vm_id}: {floating_ip}")
+                        ext_port = await asyncio.to_thread(conn.network.create_port, **ext_port_kwargs)
+                        _created_ports.append(ext_port)
+                        external_port_id = ext_port.id
+                        fixed_ips = ext_port.fixed_ips or []
+                        if fixed_ips:
+                            external_ip = fixed_ips[0].get("ip_address")
+                        logger.info(f"[OpenStack] Puerto externo creado para VM {vm.vm_id}: ip={external_ip}"
+                                    f"{' (reservada)' if vm.external_ip else ' (automática)'}")
                     except Exception as e:
-                        logger.error(f"[OpenStack] Falló la asignación de IP flotante a VM {vm.vm_id}: {e}")
+                        logger.error(f"[OpenStack] Falló la creación del puerto externo para VM {vm.vm_id}: {e}")
 
                 port_map[vm.vm_id] = {
                     "provider_port_id": port.id,
-                    "floating_ip": floating_ip,
-                    "floating_ip_id": floating_ip_id
+                    "external_port_id": external_port_id,
+                    "external_ip": external_ip,
                 }
 
             links_ok = [LinkResult(connection_id=link.connection_id) for link in request.links]
@@ -243,6 +262,22 @@ class OpenStackNetworkExecutor:
                     logger.info(f"[OpenStack] Eliminando puerto Neutron: {port.id}")
                     await asyncio.to_thread(conn.network.delete_port, port.id)
             
+            # 1.5 Borrar puertos externos (red provider "external", compartida — no se borra la red)
+            try:
+                ext_net = await asyncio.to_thread(conn.network.find_network, settings.OS_EXTERNAL_NETWORK_NAME)
+                if ext_net:
+                    ext_ports = list(await asyncio.to_thread(conn.network.ports, network_id=ext_net.id))
+                    prefix = f"port-ext-{slice_id}-"
+                    for port in ext_ports:
+                        if (port.name or "").startswith(prefix):
+                            try:
+                                logger.info(f"[OpenStack] Eliminando puerto externo: {port.name} ({port.id})")
+                                await asyncio.to_thread(conn.network.delete_port, port.id)
+                            except Exception as e:
+                                logger.warning(f"[OpenStack] No se pudo borrar puerto externo {port.id} (puede que Nova aún lo tenga adjunto): {e}")
+            except Exception as e:
+                logger.warning(f"[OpenStack] Error limpiando puertos externos: {e}")
+
             # 2. Desconectar subnet y borrar router
             if router:
                 if subnet:

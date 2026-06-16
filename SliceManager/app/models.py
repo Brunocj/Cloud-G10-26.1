@@ -90,6 +90,11 @@ class Image(Base):
     path = Column(String(150))
     # Zona de disponibilidad a la que pertenece esta imagen (un registro por AZ)
     availability_zone_id = Column(Integer, ForeignKey('availability_zones.id'), index=True, nullable=True)
+    # Indica si la imagen soporta cloud-init (permite inyectar credenciales/red dinámicamente).
+    # Si es False (ej. CirrOS), las credenciales son fijas y deben registrarse aquí.
+    cloud_init_support = Column(TINYINT, default=0)
+    default_username = Column(String(50), nullable=True)
+    default_password = Column(String(100), nullable=True)
 
     availability_zone = relationship('AvailabilityZone')
 
@@ -169,5 +174,9 @@ class IpPool(Base):
     ip_address = Column(String(45), unique=True)
     is_used = Column(TINYINT, default=0)
     vm_id = Column(ForeignKey('vms.id', ondelete='SET NULL'), index=True)
+    # Zona de disponibilidad a la que pertenece esta IP (1=Linux Cluster, 2=OpenStack)
+    availability_zone_id = Column(Integer, ForeignKey('availability_zones.id'), index=True, nullable=True)
+
+    availability_zone = relationship('AvailabilityZone')
 
     vm = relationship('Vm')

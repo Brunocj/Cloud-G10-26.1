@@ -34,6 +34,7 @@ import { DeployModal }    from "./components/modals/DeployModal";
 import { SaveDraftModal } from "./components/modals/SaveDraftModal";
 import { ConfirmModal }   from "./components/modals/ConfirmModal";
 import { ConsoleModal }   from "./components/modals/ConsoleModal";
+import { SelectZoneModal } from "./components/modals/SelectZoneModal";
 
 // Utilities
 import { mkSlice, refreshMeta } from "./utils/topology";
@@ -77,9 +78,10 @@ export default function App() {
     const [targetAz, setTargetAz] = useState("");
 
     // UI / overlay state
-    const [modal,     setModal]     = useState(null);
-    const [toast,     setToast]     = useState(null);
-    const [consoleVm, setConsoleVm] = useState(null);
+    const [modal,      setModal]      = useState(null);
+    const [toast,      setToast]      = useState(null);
+    const [consoleVm,  setConsoleVm]  = useState(null);
+    const [azModalOpen, setAzModalOpen] = useState(false);
 
     // ── Helpers ───────────────────────────────────────────────────────────────
     const flash = (msg, type = "success") => {
@@ -105,7 +107,7 @@ export default function App() {
 
     const fetchFullImages = async () => {
         try {
-            const res = await apiFetch("/slices/utils/images/");
+            const res = await apiFetch("/slices/utils/images");
             if (res.ok) setFullImages(await res.json());
         } catch (e) { console.error("fetchFullImages:", e); }
     };
@@ -387,7 +389,7 @@ export default function App() {
                     <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
                         <div style={{ padding: "12px 16px 8px", display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
                             <Label style={{ marginBottom: 0 }}>Mis Slices <span style={{ color: T.accent, marginLeft: 5 }}>{slices.length}</span></Label>
-                            <button onClick={() => setActiveId(null)}
+                            <button onClick={() => { setActiveId(null); setNodes([]); setEdges([]); setTargetAz(""); setAzModalOpen(true); }}
                                 style={btnBase({ padding: "4px 10px", fontSize: 10, background: T.accentLight, color: T.accent, border: `1px solid ${T.accent}44`, boxShadow: "none",
                                     display: "flex", alignItems: "center", gap: 4 })}>
                                 <Plus size={11} /> Nuevo
@@ -481,11 +483,15 @@ export default function App() {
                 {/* Canvas */}
                 <div style={{ flex: 1, overflow: "hidden", display: "flex" }}>
                     {activeSlice
-                        ? <Canvas nodes={activeSlice.nodes} edges={activeSlice.edges} setNodes={setSliceNodes} setEdges={setSliceEdges} imageList={imageList} activeSlice={activeSlice} onOpenConsole={setConsoleVm} targetAz={targetAz} setTargetAz={setTargetAz} />
-                        : <Canvas nodes={nodes}             edges={edges}             setNodes={setNodes}      setEdges={setEdges}      imageList={imageList} activeSlice={null}        onOpenConsole={setConsoleVm} targetAz={targetAz} setTargetAz={setTargetAz} />
+                        ? <Canvas nodes={activeSlice.nodes} edges={activeSlice.edges} setNodes={setSliceNodes} setEdges={setSliceEdges} imageList={imageList} activeSlice={activeSlice} onOpenConsole={setConsoleVm} targetAz={targetAz} setTargetAz={setTargetAz} apiFetch={apiFetch} />
+                        : <Canvas nodes={nodes}             edges={edges}             setNodes={setNodes}      setEdges={setEdges}      imageList={imageList} activeSlice={null}        onOpenConsole={setConsoleVm} targetAz={targetAz} setTargetAz={setTargetAz} apiFetch={apiFetch} onCleared={() => { setTargetAz(""); setAzModalOpen(true); }} />
                     }
                 </div>
             </div>
+
+            {azModalOpen && (
+                <SelectZoneModal onSelect={(azId) => { setTargetAz(azId); setAzModalOpen(false); }} />
+            )}
 
             {/* ── MODALS ───────────────────────────────────────────────────── */}
             {modal === "deploy"        && <DeployModal    nodes={nodes} edges={edges} imageList={imageList} apiFetch={apiFetch} onDeploy={deployFromDesigner} onClose={() => setModal(null)} targetAz={targetAz} />}
