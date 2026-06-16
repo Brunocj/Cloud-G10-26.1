@@ -34,22 +34,24 @@ docker compose up -d
 
 ### Roles Globales
 
-| Rol       | Descripción                                                |
-|-----------|------------------------------------------------------------|
-| `admin`   | Administrador de plataforma — acceso total                 |
-| `profesor`| Docente — gestiona slices de su curso, ve métricas        |
-| `alumno`  | Estudiante — gestiona sus propios slices                   |
-| `monitor` | Observador — solo lectura                                  |
+Los roles deben coincidir exactamente con los que espera el API Gateway en `realm_access.roles`.
+El Gateway extrae el rol de mayor prioridad y lo inyecta como `X-User-Role` hacia el Slice Manager.
+
+| Rol | Prioridad | Descripción |
+|-----|-----------|-------------|
+| `superAdmin` | 4 | Superadministrador — acceso total |
+| `admin` | 3 | Administrador de plataforma — acceso total |
+| `jefeProyecto` | 2 | Docente / jefe de proyecto — gestiona slices de su grupo |
+| `usuario` | 1 | Estudiante — gestiona sus propios slices e imágenes |
 
 ### Usuarios de Prueba
 
-| Username         | Password      | Rol       | Email                  |
-|------------------|---------------|-----------|------------------------|
-| `admin.pucp`     | `Admin123!`   | admin     | admin@pucp.edu.pe      |
-| `prof.garcia`    | `Prof123!`    | profesor  | garcia@pucp.edu.pe     |
-| `alumno.lopez`   | `Alumno123!`  | alumno    | lopez@pucp.edu.pe      |
-| `alumno.torres`  | `Alumno123!`  | alumno    | torres@pucp.edu.pe     |
-| `monitor.silva`  | `Monitor123!` | monitor   | silva@pucp.edu.pe      |
+| Username         | Password      | Rol           | Email                  |
+|------------------|---------------|---------------|------------------------|
+| `admin.pucp`     | `Admin123!`   | admin         | admin@pucp.edu.pe      |
+| `prof.garcia`    | `Prof123!`    | jefeProyecto  | garcia@pucp.edu.pe     |
+| `alumno.lopez`   | `Alumno123!`  | usuario       | lopez@pucp.edu.pe      |
+| `alumno.torres`  | `Alumno123!`  | usuario       | torres@pucp.edu.pe     |
 
 ### Clientes OIDC
 

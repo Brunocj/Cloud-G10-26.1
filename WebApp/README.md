@@ -1,16 +1,78 @@
-# React + Vite
+# Web App — PUCP Cloud Orchestrator
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Interfaz de usuario del sistema de orquestación de slices. Desarrollada con **React + Vite**.
+Permite a los usuarios crear topologías de red de forma visual (canvas drag-and-drop),
+desplegar slices, monitorizar el estado de las VMs y acceder a las consolas VNC.
 
-Currently, two official plugins are available:
+---
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Funcionalidades principales
 
-## React Compiler
+- **Canvas interactivo**: creación de topologías de red arrastrando nodos (VMs) y
+  conectándolos con enlaces. Configuración de recursos (vCPU, RAM, disco) por VM.
+- **Autenticación**: login con Keycloak (PKCE flow). El token JWT se almacena en memoria
+  y se envía en cada request al API Gateway.
+- **Gestión de slices**: crear borradores, desplegar, destruir y listar slices con su estado.
+- **Consola VNC**: acceso a la consola de cada VM directamente desde el browser,
+  usando WebSocket proxiado por el API Gateway (túnel SSH para Linux Cluster, token Nova para OpenStack).
+- **Gestión de imágenes**: subir, listar y eliminar imágenes de disco (`.qcow2`, `.img`, `.iso`).
+  Soporta imágenes en el NFS local y en OpenStack Glance.
+- **Perfil de usuario**: visualización del rol y datos del usuario autenticado.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+---
 
-## Expanding the ESLint configuration
+## Estructura del código
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+```
+src/
+├── App.jsx                  # Rutas principales y layout
+├── main.jsx                 # Punto de entrada React
+├── auth/                    # Login, logout, contexto de autenticación (Keycloak)
+├── canvas/                  # Editor de topología drag-and-drop
+├── components/
+│   ├── sidebar/             # Barra lateral de navegación
+│   ├── modals/              # Modales (deploy, configuración de VM, imágenes)
+│   ├── ui/                  # Componentes reutilizables (botones, inputs, tablas)
+│   └── profile/             # Vista de perfil de usuario
+├── VmConsole.jsx            # Componente de consola VNC (WebSocket)
+├── hooks/                   # Custom hooks (fetching, estado)
+├── utils/                   # Utilidades (formateo, llamadas a la API)
+└── theme/                   # Variables de estilo
+```
+
+---
+
+## Levantar en desarrollo
+
+```bash
+cd WebApp/
+npm install
+npm run dev
+```
+
+La app estará disponible en `http://localhost:5173`.
+
+Requiere que el API Gateway esté corriendo en `http://localhost:8085` (o configurar `VITE_API_URL`).
+
+---
+
+## Variables de entorno
+
+Crear un archivo `.env.local` en `WebApp/`:
+
+```env
+VITE_API_URL=http://localhost:8085
+VITE_KEYCLOAK_URL=http://localhost:8086
+VITE_KEYCLOAK_REALM=pucp-cloud
+VITE_KEYCLOAK_CLIENT_ID=pucp-cloud-webapp
+```
+
+---
+
+## Build de producción
+
+```bash
+npm run build
+```
+
+Los archivos estáticos quedan en `WebApp/dist/` listos para servir.

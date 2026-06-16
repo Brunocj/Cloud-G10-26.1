@@ -26,22 +26,39 @@ via SSH+QEMU/KVM, y responde el resultado de vuelta al Queue Manager.
 
 ```
 main.py
- ├── api/health.py              → GET /health (healthcheck HTTP, puerto interno 8080 / externo 8081)
+ ├── api/health.py                      → GET /health (healthcheck HTTP, puerto interno 8080 / externo 8081)
  ├── core/
- │    ├── config.py             → Variables de entorno (Settings)
- │    ├── worker.py             → Loop async: suscribe handlers NATS
- │    └── logging_config.py    → Configuración de logging estructurado
+ │    ├── config.py                     → Variables de entorno (Settings)
+ │    ├── worker.py                     → Loop async: suscribe handlers NATS
+ │    └── logging_config.py            → Configuración de logging estructurado
  ├── models/
- │    └── schemas.py            → Contratos de entrada/salida (Pydantic)
+ │    └── schemas.py                    → Contratos de entrada/salida (Pydantic)
  ├── services/
- │    ├── provisioner.py        → Orquestación deploy/destroy (lógica central)
- │    ├── qemu_executor.py      → Comandos QEMU/KVM + TAP/OVS sobre el worker
- │    ├── ssh_client.py         → Wrapper SSH con llave PEM en memoria (Paramiko)
- │    ├── vnc_port_manager.py   → Utilidad para consultar puertos VNC en uso vía SSH (no conectado al flujo actual — el puerto VNC viene pre-calculado desde el Slice Manager)
- │    └── queue_client.py       → Cliente NATS (subscribe, reply, KV)
+ │    ├── provisioner.py                → Orquestación deploy/destroy Linux Cluster (QEMU/KVM)
+ │    ├── qemu_executor.py              → Comandos QEMU/KVM + TAP/OVS sobre el worker
+ │    ├── openstack_compute_executor.py → Gestión de instancias via openstacksdk (OpenStack)
+ │    ├── ssh_client.py                 → Wrapper SSH con llave PEM en memoria (Paramiko)
+ │    ├── vnc_port_manager.py           → Consulta puertos VNC en uso via SSH (utilidad)
+ │    └── queue_client.py               → Cliente NATS (subscribe, reply, KV)
  └── utils/
-      └── image_resolver.py    → Cálculo de rutas de disco VM
+      └── image_resolver.py            → Cálculo de rutas de disco VM
 ```
+
+### Strategy Pattern por Availability Zone
+
+Los handlers NATS bifurcan la ejecución según `availability_zone_id` del mensaje:
+
+```
+availability_zone_id == 2  →  OpenStackComputeExecutor  (openstacksdk: Nova + Glance)
+availability_zone_id != 2  →  provisioner.py            (SSH + QEMU/KVM)
+```
+
+Para OpenStack (`OpenStackComputeExecutor`):
+- Resuelve el UUID de imagen en Glance a partir del `image_path` del mensaje.
+- Crea la instancia Nova con el flavor apropiado (o el más cercano disponible).
+- Para el destroy: termina la instancia Nova y libera la floating IP si la tenía.
+- `get_console_token()`: pide a Nova un token noVNC fresco (corta duración, un solo uso)
+  que el Slice Manager almacena en `deployed_vms.vnc_url` para que la Web App abra la consola.
 
 ---
 
@@ -263,6 +280,12 @@ El estado en KV se elimina automáticamente tras cada destroy, o expira a las
 | `MAX_CONCURRENT_WORKERS` | `10` | Workers procesados en paralelo |
 | `LOG_LEVEL` | `INFO` | Nivel de logging |
 | `HEALTH_PORT` | `8080` | Puerto interno del healthcheck HTTP (mapeado al 8081 en Docker) |
+| `OS_AUTH_URL` | — | Endpoint Keystone de OpenStack |
+| `OS_USERNAME` | `admin` | Usuario OpenStack |
+| `OS_PASSWORD` | — | Contraseña OpenStack |
+| `OS_PROJECT_NAME` | `admin` | Proyecto OpenStack |
+| `OS_USER_DOMAIN_NAME` | `Default` | Dominio de usuario OpenStack |
+| `OS_PROJECT_DOMAIN_NAME` | `Default` | Dominio de proyecto OpenStack |
 
 ---
 

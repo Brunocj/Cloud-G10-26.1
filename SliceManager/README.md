@@ -9,21 +9,21 @@ resultados y ejecuta rollback automático ante fallos.
 
 ## Responsabilidades
 
-- Exponer la API REST que consume el frontend (borradores, deploy, destroy).
-- Persistir slices y VMs en MySQL (modelo relacional).
-- **Calcular y persistir el peso de cada VM al guardar el borrador** (`peso` y `peso_actualizado`).
-- **Construir el Servers' State desde BD** al momento del deploy: obtiene workers de la zona, aplica factor de overprovisioning y descuenta pesos de VMs activas.
+- Exponer la API REST que consume el frontend (borradores, deploy, destroy, imágenes).
+- Persistir slices, VMs e imágenes en MySQL (modelo relacional).
+- Aplicar control de acceso basado en roles (`X-User-Id` / `X-User-Role` inyectados por el API Gateway).
+- Construir el Servers' State multidimensional (cpu/ram/disco) desde BD al momento del deploy.
 - Invocar al VM Placement para obtener el mapa `vm → worker`.
 - Enriquecer el contrato con: IPs SSH, llaves PEM, MACs, TAP names (incluido TAP de gestión), VLANs, VNC ports, rutas de imagen, IPs internas de la subred de gestión.
 - Publicar `slice.deploy` y `slice.destroy` en NATS JetStream hacia el Queue Manager.
 - Escuchar `slice.result` y actualizar el estado en MySQL.
 - Ejecutar rollback automático (publish destroy) si el resultado es error.
-- Gestionar el pool de IPs externas (tabla `ip_pool`): reservar al crear borrador, liberar al destruir o actualizar.
+- Gestionar el pool de IPs externas (tabla `ip_pool`): reservar al crear borrador, liberar al destruir.
+- Gestionar imágenes: subir al NFS o a OpenStack Glance, listar catálogo híbrido, eliminar.
 
-**No** ejecuta comandos en workers — eso es del Compute Provisioner.  
-**No** configura red — eso es del Network Orchestrator.  
-**No** decide el algoritmo de placement — eso es del VM Placement.  
-**No** consulta Prometheus para el placement — el Servers' State se construye desde BD.
+**No** ejecuta comandos en workers — eso es del Compute Provisioner.
+**No** configura red — eso es del Network Orchestrator.
+**No** decide el algoritmo de placement — eso es del VM Placement.
 
 ---
 
@@ -32,82 +32,76 @@ resultados y ejecuta rollback automático ante fallos.
 ```
 main.py                          → FastAPI app, lifespan, routers
 app/
+ ├── auth.py                     → Dependencias de identidad (X-User-Id / X-User-Role)
  ├── database.py                 → Engine MySQL + SessionLocal + get_db()
  ├── models.py                   → ORM SQLAlchemy (tablas MySQL)
- ├── schemas.py                  → Pydantic: DeployRequest, DraftSaveRequest
+ ├── schemas.py                  → Pydantic: DeployRequest, DraftSaveRequest, ImageResponse
  ├── nats_producer.py            → Cliente NATS JetStream (publish deploy/destroy)
  ├── routers/
- │    ├── slice_router.py        → CRUD de borradores + endpoints utilitarios
- │    └── deploy_router.py       → POST deploy, DELETE destroy
+ │    ├── slice_router.py        → CRUD de borradores + endpoints utilitarios de workers/AZs
+ │    ├── deploy_router.py       → POST deploy, DELETE destroy
+ │    └── image_router.py        → Gestión de imágenes (NFS + OpenStack Glance)
  ├── repositories/
  │    └── slice_repo.py          → SliceRepository.save_draft()
  └── services/
       ├── placement_worker.py    → Worker async: Servers' State → placement → enriquecimiento → NATS
       ├── nats_listener.py       → Listener async: slice.result → actualiza MySQL
-      ├── gc_scheduler.py        → Garbage collector de ISOs, discos y imágenes huérfanas
-      └── telemetry.py           → Módulo de telemetría (reservado para Observabilidad)
+      └── gc_scheduler.py        → Garbage collector de ISOs, discos y imágenes huérfanas
 ```
 
 ---
 
-## Modelo de pesos
+## Autenticación y roles
 
-Al guardar un borrador, cada VM persiste su peso calculado con la fórmula:
+El API Gateway valida el JWT de Keycloak y añade dos headers internos antes de reenviar:
+- `X-User-Id`: `sub` del token (UUID del usuario en Keycloak)
+- `X-User-Role`: rol de mayor prioridad extraído de `realm_access.roles`
 
-```
-w = α·vcpus + β·ram_gb + γ·disk_gb
-```
+El Slice Manager lee esos headers a través de la dependencia `get_current_user()` (en `auth.py`).
+Los routers que los requieren reciben un objeto `CurrentUser(user_id, role)`.
 
-Los coeficientes α, β y γ no se asignan arbitrariamente, sino que se derivan del recurso
-que representa el verdadero cuello de botella del clúster: aquel que se agota primero
-conforme se despliegan VMs. Para determinarlo, se estima cuántas VMs típicas caben en
-un worker por cada recurso usando el consumo real observado en el clúster. El recurso con
-menor capacidad relativa recibe el coeficiente más alto, de forma que el peso refleje
-fielmente la presión que cada VM ejerce sobre el recurso más escaso. En el clúster de
-referencia, la RAM resulta ser el cuello de botella, seguida de vCPU y finalmente disco,
-lo que produce la proporción:
+### Roles reconocidos (de menor a mayor privilegio)
 
-```
-β (RAM) : α (vCPU) : γ (disco) = 5 : 3 : 1
-```
+| Rol | Descripción |
+|-----|-------------|
+| `usuario` | Estudiante — gestiona sus propios slices e imágenes |
+| `jefeProyecto` | Docente / jefe — puede ver slices de su proyecto |
+| `admin` | Administrador — acceso total, puede ver todos los slices e imágenes |
+| `superAdmin` | Superadministrador — igual que admin, nivel máximo |
 
-Este peso se calcula en el momento en que el Slice Manager persiste la VM en BD, de
-forma que el Placement Engine recibe directamente el par `{vm_id, peso}` sin necesidad
-de recomputarlo. Los coeficientes deben recalibrarse si el perfil de uso del clúster cambia
-significativamente.
-
-Se persisten dos campos en la tabla `vms`:
-- `peso`: peso nominal calculado sobre recursos solicitados al crear el borrador. **No cambia.**
-- `peso_actualizado`: arranca igual que `peso`. El módulo de Observabilidad lo irá
-  corrigiendo con consumo real. **Es el que usa el Servers' State.**
-
-El peso inicial es referencial: refleja lo que el usuario solicitó, no necesariamente lo que
-la VM consumirá en operación. Para capturar esta diferencia, el sistema aplica un factor
-de overprovisioning que ajusta la capacidad efectiva de cada worker. A diferencia de un
-valor estático, este factor se recalcula dinámicamente a partir de la relación entre el peso
-real consumido por las VMs desplegadas en un worker y el peso que estas deberían tener
-según la fórmula: si las VMs de un worker consumen en conjunto menos de lo que su peso
-nominal indica, el factor crece, expandiendo la capacidad efectiva del worker; si consumen
-más, el factor se contrae. Durante la etapa inicial, mientras no existe historial suficiente de
-métricas, el factor parte de un valor referencial fijo de `1 / 0.65 ≈ 1.54`, equivalente a
-asumir que las VMs consumen en promedio el 65% de lo que solicitan.
+`admin` y `superAdmin` pueden ver y gestionar recursos de cualquier usuario.
 
 ---
 
-## Servers' State y factor de overprovisioning
+## Zonas de disponibilidad (Availability Zones)
 
-Al recibir una orden de deploy, el `placement_worker` construye el Servers' State desde BD:
+El sistema soporta múltiples zonas de disponibilidad. Cada zona tiene su propio conjunto de workers:
+
+| `id` | Nombre | Backend |
+|------|--------|---------|
+| `1` | Linux Cluster | Workers QEMU/KVM con OVS |
+| `2` | OpenStack | Nova + Neutron via openstacksdk |
+
+El `availability_zone_id` viaja en el mensaje de deploy y determina qué executor usa el
+Compute Provisioner y el Network Orchestrator (Strategy Pattern).
+
+---
+
+## Servers' State multidimensional
+
+Al recibir una orden de deploy, el `placement_worker` construye el Servers' State desde BD
+con tres dimensiones independientes por worker:
 
 ```
-F_OP = 1 / 0.65 ≈ 1.54          (factor inicial; dinámico cuando Observabilidad esté activo)
+OC_r[j]      — factor de overcommit por recurso y worker (calculado por Observabilidad,
+                 o valor de arranque: OC_cpu=2.0, OC_ram=1.54, OC_disco=1.0)
 
-capacidad_nominal_i = 3·cpu_i + 5·(ram_gb_i) + 1·disk_gb_i
-C_i = capacidad_nominal_i × F_OP
-D_i = C_i − Σ peso_actualizado(VMs ACTIVE en worker_i)
+C_ef_r[j]  = C_nominal_r[j] × OC_r[j]
+disp_r[j]  = C_ef_r[j]  −  Σ recurso_r(VMs ACTIVE en worker_j)
 ```
 
-Solo se incluyen workers de la zona solicitada (`availability_zone_id`) y se excluye
-siempre el worker con `id=1` (headnode).
+El resultado es una lista de workers con `{ worker_id, disponible_cpu, disponible_ram, disponible_disco }`.
+Solo se incluyen workers de la zona solicitada, excluyendo siempre el headnode (`id=1`).
 
 ---
 
@@ -116,7 +110,7 @@ siempre el worker con `id=1` (headnode).
 ```
 Frontend
     │ POST /api/v1/slices/{id}/deploy
-    │ { availability_zone_id, ttl_hours, motivo }
+    │ { availability_zone_id, ttl_hours }
     ▼
 deploy_router.py
     ├─ Valida que el slice exista en MySQL
@@ -126,34 +120,15 @@ deploy_router.py
     ▼
 placement_worker.py (background)
     │
-    ├─ 1. Lee VMs del slice desde MySQL (tabla vms)
-    ├─ 2. Construye Servers' State desde BD:
-    │       - Consulta workers de la zona (excluyendo headnode id=1)
-    │       - Calcula C_i = capacidad_nominal × F_OP
-    │       - Resta SUM(peso_actualizado) de VMs ACTIVE por worker
-    │       - Arma lista { worker_id, disponible }
+    ├─ 1. Lee VMs del slice desde MySQL
+    ├─ 2. Construye Servers' State (cpu/ram/disco) con workers de la zona
     ├─ 3. POST http://vm-placement:8080/placement → mapa vm→worker
     │
     │  Si placement == SUCCESS:
-    ├─ 4. Para cada VM: genera TAP de gestión (eth0)
-    │       - tap_name: t-{slice[-3:]}-{vm[:4]}-m
-    │       - mac: 52:54:XX:YY:{counter:02x}
-    │
-    ├─ 5. Para cada edge del slice_json:
-    │       - Genera tap names de datos: t-{slice[-3:]}-{vm1[:4]}-{vm2[:4]}
-    │       - Genera MACs: 52:54:XX:YY:{counter:02x} (XX:YY = SHA256 del slice_id)
-    │       - Asigna VLAN libre aleatoria (100–4000, sin colisión con BD)
-    │       - Persiste Vlan en MySQL (tabla vlans)
-    │       - Lee llave PEM desde ./keys/workerN.pem
-    │
-    ├─ 6. Para cada VM:
-    │       - Asigna VNC port libre por worker (5901–5999, sin colisión con BD)
-    │       - Consulta image_path desde tabla images
-    │       - Calcula IP interna: 10.{slice//256}.{slice%256}.{10+idx}
-    │       - Inyecta internet_access, external_ip, internal_ip
-    │       - Construye VMSpec completo
-    │
-    ├─ 7. Guarda deployed_vms y deployed_links en slice_json (MySQL) — ANTES de publicar
+    ├─ 4. Genera TAP de gestión por VM (eth0): t-{slice[-3:]}-{vm[:4]}-m
+    ├─ 5. Para cada edge: genera TAPs de datos, MACs, asigna VLAN libre (100–4000)
+    ├─ 6. Por cada VM: asigna VNC port libre, resuelve image_path, asigna IPs
+    ├─ 7. Guarda deployed_vms y deployed_links en slice_json (MySQL)
     ├─ 8. Publica slice.deploy en NATS JetStream → Queue Manager
     └─ 9. Cambia status → PROVISIONING (o FAILED si el publish falló)
     ▼
@@ -175,13 +150,11 @@ Frontend
     │ DELETE /api/v1/slices/{id}
     ▼
 deploy_router.py
-    ├─ Si status == DRAFT:
-    │     Elimina VMs + Slice de MySQL → responde 200
-    │
+    ├─ Si status == DRAFT: elimina VMs + Slice de MySQL → responde 200
     └─ Si status != DRAFT:
         ├─ Lee deployed_vms y deployed_links de slice_json
-        ├─ Publica slice.destroy en NATS JetStream (con VMs + links completos)
-        ├─ Libera VLANs de MySQL (tabla vlans)
+        ├─ Publica slice.destroy en NATS JetStream
+        ├─ Libera VLANs de MySQL
         ├─ Cambia status → TERMINATED
         └─ Cambia state de todas las VMs → TERMINATED
 ```
@@ -190,17 +163,36 @@ deploy_router.py
 
 ## API REST
 
-| Método | Ruta | Descripción |
-|--------|------|-------------|
-| `GET` | `/api/v1/slices/` | Lista todos los slices del usuario actual |
-| `POST` | `/api/v1/slices/draft` | Crea un nuevo borrador con topología del canvas |
-| `PUT` | `/api/v1/slices/{id}/draft` | Actualiza un borrador existente |
-| `POST` | `/api/v1/slices/{id}/deploy` | Inicia el despliegue de un borrador |
-| `DELETE` | `/api/v1/slices/{id}` | Destruye un slice activo o elimina un borrador |
-| `GET` | `/api/v1/slices/utils/images` | Lista imágenes disponibles |
-| `GET` | `/api/v1/slices/utils/workers` | Lista workers registrados |
-| `GET` | `/api/v1/slices/utils/available-ips` | Lista IPs del pool que no están en uso |
-| `GET` | `/` | Healthcheck básico |
+| Método | Ruta | Auth | Descripción |
+|--------|------|------|-------------|
+| `GET` | `/api/v1/slices/` | usuario+ | Lista slices del usuario (admin ve todos) |
+| `POST` | `/api/v1/slices/draft` | usuario+ | Crea un borrador con topología del canvas |
+| `PUT` | `/api/v1/slices/{id}/draft` | usuario+ | Actualiza un borrador existente |
+| `POST` | `/api/v1/slices/{id}/deploy` | usuario+ | Inicia el despliegue de un borrador |
+| `DELETE` | `/api/v1/slices/{id}` | usuario+ | Destruye un slice activo o elimina un borrador |
+| `GET` | `/api/v1/slices/utils/images` | usuario+ | Lista imágenes disponibles (BD + OpenStack Glance) |
+| `POST` | `/api/v1/slices/utils/images/upload` | usuario+ | Sube imagen al NFS o a Glance |
+| `DELETE` | `/api/v1/slices/utils/images/{id}` | usuario+ | Elimina imagen de BD y disco/Glance |
+| `GET` | `/api/v1/slices/utils/images/unused` | usuario+ | Lista imágenes sin VMs activas (para GC) |
+| `POST` | `/api/v1/slices/utils/images/gc/run` | admin+ | Lanza ciclo de GC manualmente |
+| `GET` | `/api/v1/slices/utils/workers` | usuario+ | Lista workers registrados |
+| `GET` | `/api/v1/slices/utils/available-ips` | usuario+ | Lista IPs del pool sin asignar |
+| `GET` | `/` | No | Healthcheck básico |
+
+---
+
+## Gestión de imágenes (catálogo híbrido)
+
+`GET /api/v1/slices/utils/images` devuelve la unión de:
+1. Imágenes registradas en la BD local (con JOIN a `AvailabilityZone`).
+2. Imágenes de OpenStack Glance que no existen aún en BD — se sincronizan automáticamente
+   creando un registro en MySQL con `path = glance://<UUID>` y `availability_zone_id = OPENSTACK_AZ_ID`.
+
+`POST /utils/images/upload` con `availability_zone_id = OPENSTACK_AZ_ID`:
+- Guarda el archivo temporalmente en `/tmp`.
+- Lo sube a Glance via openstacksdk.
+- Persiste `path = glance://<UUID>` en BD.
+- Elimina el archivo temporal.
 
 ---
 
@@ -211,13 +203,12 @@ deploy_router.py
   "slice_id": "42",
   "availability_zone": "1",
   "vms": [
-    { "vm_id": "n214", "peso": 18.5 },
-    { "vm_id": "n215", "peso": 5.25 }
+    { "vm_id": "n214", "vcpus": 2.0, "ram_gb": 0.5, "disco_gb": 10.0 },
+    { "vm_id": "n215", "vcpus": 1.0, "ram_gb": 0.25, "disco_gb": 5.0 }
   ],
   "workers": [
-    { "worker_id": 2, "disponible": 36.92 },
-    { "worker_id": 3, "disponible": 36.92 },
-    { "worker_id": 4, "disponible": 36.92 }
+    { "worker_id": 2, "disponible_cpu": 12.5, "disponible_ram": 28.3, "disponible_disco": 180.0 },
+    { "worker_id": 3, "disponible_cpu": 10.0, "disponible_ram": 24.0, "disponible_disco": 200.0 }
   ]
 }
 ```
@@ -230,6 +221,7 @@ deploy_router.py
 {
   "slice_id": "42",
   "request_id": "req-a1b2c3d4",
+  "availability_zone_id": 1,
   "vms": [
     {
       "vm_id": "n214",
@@ -261,19 +253,19 @@ deploy_router.py
       "vm1_worker_ip": "10.0.10.2",
       "vm1_tap": "t-042-n214-n215",
       "vm1_ssh_user": "ubuntu",
-      "vm1_ssh_private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----",
+      "vm1_ssh_private_key": "...",
       "vm2_id": "n215",
       "vm2_worker_ip": "10.0.10.3",
       "vm2_tap": "t-042-n215-n214",
       "vm2_ssh_user": "ubuntu",
-      "vm2_ssh_private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----"
+      "vm2_ssh_private_key": "..."
     }
   ]
 }
 ```
 
 > El TAP `t-042-n214-m` (sufijo `-m`) es la interfaz de gestión (eth0).
-> Se genera siempre, independientemente de si la VM tiene enlaces.
+> Se genera siempre, independientemente de si la VM tiene enlaces de datos.
 
 ---
 
@@ -284,8 +276,7 @@ deploy_router.py
 
   52:54:00  → prefijo QEMU estándar
   XX:YY     → primeros 4 chars del SHA-256 del slice_id
-  ZZ        → contador secuencial global dentro del slice (0x00–0xFF)
-             (incluye el TAP de gestión, que siempre es el primero)
+  ZZ        → contador secuencial global dentro del slice (incluye TAP de gestión)
 ```
 
 ---
@@ -293,8 +284,8 @@ deploy_router.py
 ## Esquema de IPs internas (subred de gestión)
 
 ```
-subred = 10. (slice_id // 256) % 256 . slice_id % 256 .0/24
-VMs    = 10.X.Y.10, 10.X.Y.11, 10.X.Y.12, ...
+subred = 10.(slice_id // 256).(slice_id % 256).0/24
+VMs    = 10.X.Y.10, 10.X.Y.11, ...
 
 Ejemplos:
   slice_id=1  → 10.0.1.10, 10.0.1.11, ...
@@ -305,63 +296,32 @@ Ejemplos:
 
 ## Base de datos MySQL
 
-Tablas principales utilizadas por este módulo:
-
 | Tabla | Descripción |
 |-------|-------------|
-| `slices` | Estado y metadatos del slice, incluye `slice_json` (JSON) con la topología y `deployed_vms`/`deployed_links` post-deploy |
-| `vms` | VMs con recursos, `peso`, `peso_actualizado`, worker asignado, vnc_port, external_ip, internet_access |
+| `slices` | Estado y metadatos del slice, `slice_json` con topología y `deployed_vms`/`deployed_links` |
+| `vms` | VMs con recursos, worker asignado, `vnc_port`, `external_ip`, `internet_access` |
 | `vlans` | VLANs asignadas por slice (se limpian al destroy o rollback) |
-| `images` | Imágenes disponibles con `path` absoluto en el worker |
-| `workers` | Workers registrados con IP, zona de disponibilidad, `cpu`, `ram` y `disk_gb` |
+| `images` | Imágenes disponibles con `path` (ruta NFS o `glance://<UUID>`) y `availability_zone_id` |
+| `workers` | Workers con IP, zona, `cpu`, `ram` (MB), `disk_gb`, `oc_cpu`, `oc_ram`, `oc_disco` |
 | `ip_pool` | Pool de IPs externas flotantes: `is_used`, `vm_id` (FK) |
 | `availability_zones` | Zonas de disponibilidad — el deploy filtra workers por `id` |
-
-### Campos de peso en la tabla `vms`
-
-| Campo | Descripción |
-|-------|-------------|
-| `peso` | Peso nominal calculado al crear el borrador con `w = 3·vcpus + 5·ram_gb + 1·disk_gb`. No cambia. |
-| `peso_actualizado` | Igual a `peso` al inicio. Actualizado periódicamente por el módulo de Observabilidad en función del consumo real medido desde Prometheus. Es el campo que usa el Servers' State al momento del deploy. |
-
-### Campos de capacidad en la tabla `workers`
-
-| Campo | Descripción |
-|-------|-------------|
-| `cpu` | Número de vCPUs del worker |
-| `ram` | RAM total en MB |
-| `disk_gb` | Disco total en GB — necesario para calcular la capacidad nominal en unidades de peso |
 
 ---
 
 ## Inventario de workers y llaves SSH
 
-Las credenciales SSH se leen desde archivos `.pem` montados en el contenedor:
+Las credenciales SSH se leen desde archivos montados en el contenedor:
 
 ```
 slice-manager/
 └── keys/
-    ├── worker2.pem   → worker_id=2, IP 10.0.10.2
-    ├── worker3.pem   → worker_id=3, IP 10.0.10.3
-    └── worker4.pem   → worker_id=4, IP 10.0.10.4
+    ├── id_ed25519        → llave para gateway/headnode (VNC y SSH jumphost)
+    ├── worker2.pem       → worker_id=2
+    ├── worker3.pem       → worker_id=3
+    └── worker4.pem       → worker_id=4
 ```
 
-El worker con `id=1` es el headnode — corre los servicios de orquestación y **no recibe VMs**.
-El mapeo `worker_id → IP` está hardcodeado en `placement_worker.py` (variable `server_inventory`).
-
-### Generar y registrar llaves SSH
-
-```bash
-# En server1: generar un par por cada worker
-ssh-keygen -t rsa -b 2048 -f ~/proyecto/SliceManager/keys/worker2.pem -N ""
-ssh-keygen -t rsa -b 2048 -f ~/proyecto/SliceManager/keys/worker3.pem -N ""
-ssh-keygen -t rsa -b 2048 -f ~/proyecto/SliceManager/keys/worker4.pem -N ""
-
-# Registrar la llave pública en cada worker
-ssh-copy-id -i ~/proyecto/SliceManager/keys/worker2.pem.pub ubuntu@10.0.10.2
-ssh-copy-id -i ~/proyecto/SliceManager/keys/worker3.pem.pub ubuntu@10.0.10.3
-ssh-copy-id -i ~/proyecto/SliceManager/keys/worker4.pem.pub ubuntu@10.0.10.4
-```
+El worker con `id=1` es el headnode — corre los servicios y **no recibe VMs**.
 
 ---
 
@@ -376,7 +336,14 @@ ssh-copy-id -i ~/proyecto/SliceManager/keys/worker4.pem.pub ubuntu@10.0.10.4
 | `DB_PASSWORD` | `root` | Contraseña MySQL |
 | `DB_NAME` | `cloud` | Base de datos MySQL |
 | `GC_INTERVAL_HOURS` | `6` | Intervalo del Garbage Collector en horas |
-| `IMAGES_DIR` | `/mnt/cloud_images` | Directorio NFS de imágenes |
+| `IMAGES_DIR` | `/mnt/cloud_images` | Directorio NFS de imágenes del Linux Cluster |
+| `OPENSTACK_AZ_ID` | `2` | ID de la availability zone de OpenStack en BD |
+| `OS_AUTH_URL` | — | Endpoint Keystone de OpenStack |
+| `OS_USERNAME` | `admin` | Usuario OpenStack |
+| `OS_PASSWORD` | — | Contraseña OpenStack |
+| `OS_PROJECT_NAME` | `admin` | Proyecto OpenStack |
+| `OS_USER_DOMAIN_NAME` | `Default` | Dominio de usuario OpenStack |
+| `OS_PROJECT_DOMAIN_NAME` | `Default` | Dominio de proyecto OpenStack |
 
 ---
 
@@ -385,7 +352,7 @@ ssh-copy-id -i ~/proyecto/SliceManager/keys/worker4.pem.pub ubuntu@10.0.10.4
 ```bash
 # 1. Colocar las llaves PEM en ./keys/
 mkdir -p keys
-# Generar o copiar worker2.pem, worker3.pem, worker4.pem
+# Copiar worker2.pem, worker3.pem, worker4.pem, id_ed25519
 
 # 2. Levantar
 docker compose up -d --build
@@ -398,5 +365,4 @@ curl http://localhost:8000/
 docker compose logs -f slice-manager
 ```
 
-> **Nota:** El Slice Manager se conecta a MySQL en `host.docker.internal`.
-> Asegurarse de que MySQL esté corriendo antes de levantar.
+> **Nota:** El Slice Manager se conecta a MySQL. Asegurarse de que MySQL esté corriendo antes de levantar.

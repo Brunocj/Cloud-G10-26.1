@@ -26,19 +26,37 @@ workers via SSH, y responde el resultado de vuelta al Queue Manager.
 
 ```
 main.py
- ├── api/health.py              → GET /health (healthcheck HTTP, puerto 8084)
+ ├── api/health.py                      → GET /health (healthcheck HTTP, puerto 8084)
  ├── core/
- │    ├── config.py             → Variables de entorno (Settings)
- │    └── logging_config.py    → Configuración de logging estructurado
+ │    ├── config.py                     → Variables de entorno (Settings)
+ │    └── logging_config.py            → Configuración de logging estructurado
  ├── models/
- │    └── schemas.py            → Contratos de entrada/salida (Pydantic)
+ │    └── schemas.py                    → Contratos de entrada/salida (Pydantic)
  └── services/
-      ├── handlers.py           → Handlers NATS: validan JSON y disparan provisioner
-      ├── provisioner.py        → Orquestación: agrupa endpoints por worker, paraleliza
-      ├── network_executor.py   → Comandos OVS e iptables sobre el worker
-      ├── ssh_client.py         → Wrapper SSH con llave PEM en memoria (Paramiko)
-      └── queue_client.py       → Cliente NATS (subscribe, reply)
+      ├── handlers.py                   → Handlers NATS: enrutan por AZ (Strategy Pattern)
+      ├── provisioner.py                → Orquestación Linux Cluster: agrupa por worker, paraleliza
+      ├── network_executor.py           → Comandos OVS e iptables sobre el worker (Linux Cluster)
+      ├── openstack_network_executor.py → Gestión de redes via openstacksdk (OpenStack)
+      ├── ssh_client.py                 → Wrapper SSH con llave PEM en memoria (Paramiko)
+      └── queue_client.py               → Cliente NATS (subscribe, reply)
 ```
+
+### Strategy Pattern por Availability Zone
+
+El handler NATS bifurca la ejecución según `availability_zone_id` del mensaje:
+
+```
+availability_zone_id == 2  →  OpenStackNetworkExecutor  (openstacksdk: Neutron)
+availability_zone_id != 2  →  NetworkProvisioner        (SSH + OVS + iptables)
+```
+
+Para OpenStack (`OpenStackNetworkExecutor`), el deploy crea:
+- Red Neutron (`net-slice-{slice_id}`) + subred (`subnet-slice-{slice_id}`)
+- Security group (`secgroup-slice-{slice_id}`) con las reglas de cada VM
+- Router con gateway a la red externa
+- Ports con floating IPs para VMs con `internet_access=1`
+
+El destroy elimina todos esos recursos en orden inverso.
 
 ---
 
@@ -48,7 +66,7 @@ main.py
 Queue Manager
     │
     │  NATS request → network.deploy
-    │  { slice_id, request_id, links: [{connection_id, vlan_id,
+    │  { slice_id, request_id, availability_zone_id, links: [{connection_id, vlan_id,
     │    vm1_worker_ip, vm1_tap, vm1_ssh_user, vm1_ssh_private_key, vm1_security_rules,
     │    vm2_worker_ip, vm2_tap, vm2_ssh_user, vm2_ssh_private_key, vm2_security_rules}] }
     ▼
@@ -216,6 +234,12 @@ Los distintos workers se procesan en **paralelo** mediante `ThreadPoolExecutor`.
 | `MAX_CONCURRENT_WORKERS` | `10` | Workers configurados en paralelo |
 | `LOG_LEVEL` | `INFO` | Nivel de logging |
 | `HEALTH_PORT` | `8084` | Puerto del healthcheck HTTP |
+| `OS_AUTH_URL` | — | Endpoint Keystone de OpenStack |
+| `OS_USERNAME` | `admin` | Usuario OpenStack |
+| `OS_PASSWORD` | — | Contraseña OpenStack |
+| `OS_PROJECT_NAME` | `admin` | Proyecto OpenStack |
+| `OS_USER_DOMAIN_NAME` | `Default` | Dominio de usuario OpenStack |
+| `OS_PROJECT_DOMAIN_NAME` | `Default` | Dominio de proyecto OpenStack |
 
 ---
 
