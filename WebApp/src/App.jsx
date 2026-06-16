@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 
 // Theme
 import { T, btnBase, getGlobalCss } from "./theme/tokens";
@@ -50,10 +50,15 @@ export default function App() {
     // IMPORTANT: useAuth must be called first, but ALL other hooks below must
     // also be declared unconditionally (Rules of Hooks).
     // The early return for unauthenticated users happens AFTER all hooks.
-    const { isAuthenticated, user, token, login, logout, isDemoMode } = useAuth();
+    const { isAuthenticated, user, token, login, logout, refreshToken, isDemoMode } = useAuth();
 
-    // ── apiFetch — fetch autenticado (añade Bearer token automáticamente) ─────
-    const apiFetch = useMemo(() => createApiFetch(token), [token]);
+    // ── apiFetch — fetch autenticado con reintento automático en 401 ──────────
+    // Recibe refreshToken y logout para que el interceptor interno pueda
+    // renovar el access_token y reintentar la petición transparentemente.
+    const apiFetch = useMemo(
+        () => createApiFetch(token, refreshToken, logout),
+        [token, refreshToken, logout]
+    );
 
     // ── View — "canvas" | "profile" ───────────────────────────────────────────
     const [view, setView] = useState("canvas");
@@ -70,6 +75,10 @@ export default function App() {
     const [imageList,  setImageList]  = useState([]);
     const [fullImages, setFullImages] = useState([]);
     const [activeId,   setActiveId]   = useState(null);
+    // Ref para que el polling interval siempre lea el activeId actual
+    // (evita el problema de stale closure con setInterval)
+    const activeIdRef = useRef(null);
+    useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
     const [sidebarTab, setSidebarTab] = useState("slices");
 
     // Designer canvas (new slice in progress)
@@ -93,8 +102,19 @@ export default function App() {
     const fetchSlices = async () => {
         try {
             const res = await apiFetch("/slices");
-            if (res.ok) setSlices(await res.json());
-            else if (res.status === 401) logout();
+            // El interceptor de 401 en api.js ya maneja el refresco y el logout;
+            // aquí solo procesamos la respuesta final.
+            if (res.ok) {
+                const fresh = await res.json();
+                setSlices(prev => fresh.map(srv => {
+                    // Preservar edits locales si el usuario está editando este DRAFT.
+                    // Sin esto, el polling de 8s sobreescribiría los cambios del canvas.
+                    if (srv.id === activeIdRef.current && srv.status === "DRAFT") {
+                        return prev.find(s => s.id === srv.id) ?? srv;
+                    }
+                    return srv;
+                }));
+            }
         } catch (e) { console.error("fetchSlices:", e); }
     };
 
@@ -124,6 +144,14 @@ export default function App() {
 
     // ── Derived ───────────────────────────────────────────────────────────────
     const activeSlice = slices.find(s => s.id === activeId) ?? null;
+
+    // Abrir automáticamente el acordeón de herramientas al entrar en edición de DRAFT
+    // para que el usuario vea el drag de VM sin tener que expandirlo manualmente.
+    useEffect(() => {
+        if (activeSlice?.status === "DRAFT") {
+            setShowTools(true);
+        }
+    }, [activeId]); // dispara al cambiar de slice activo
 
     // ── Slice CRUD ────────────────────────────────────────────────────────────
     const updateSlice = (id, patch) =>
@@ -277,6 +305,26 @@ export default function App() {
         s.id === activeId ? refreshMeta({ ...s, edges: typeof fn === "function" ? fn(s.edges) : fn }) : s
     ));
 
+    // ── Guardar cambios de un borrador (PUT /{id}/draft) ──────────────────────
+    const updateDraft = async () => {
+        const sl = slices.find(s => s.id === activeId);
+        if (!sl || sl.status !== "DRAFT") return;
+        try {
+            const res = await apiFetch(`/slices/${sl.id}/draft`, {
+                method: "PUT",
+                body: JSON.stringify({
+                    name:       sl.name,
+                    slice_json: { nodes: sl.nodes, edges: sl.edges },
+                }),
+            });
+            if (res.ok) flash("Borrador actualizado correctamente");
+            else {
+                const err = await res.json().catch(() => ({}));
+                flash(err.detail || "Error al guardar el borrador", "error");
+            }
+        } catch { flash("Error de conexión al guardar", "error"); }
+    };
+
     // ── AUTH GATE — must come AFTER all hooks ─────────────────────────────────
     if (!isAuthenticated) {
         return <LoginPage onLogin={login} isDemoMode={isDemoMode} />;
@@ -322,8 +370,8 @@ export default function App() {
                     </div>
                 </div>
 
-                {/* ── Design Tools accordion (designer mode only) ────────────── */}
-                {!activeSlice && (
+                {/* ── Design Tools accordion (diseñador nuevo + edición de DRAFT) ─── */}
+                {(!activeSlice || activeSlice.status === "DRAFT") && (
                     <div style={{ flexShrink: 0, borderBottom: `1px solid ${T.border}` }}>
                         {/* Accordion toggle */}
                         <button
@@ -431,10 +479,16 @@ export default function App() {
                             <Badge status={activeSlice.status} />
                             <div style={{ flex: 1 }} />
                             {activeSlice.status === "DRAFT" && (
-                                <button onClick={() => deployDraft(activeSlice.id)}
-                                    style={btnBase({ fontSize: 12, padding: "6px 16px", background: T.accent, color: "#fff", border: "none", boxShadow: `0 3px 12px ${T.accent}44`, display: "flex", alignItems: "center", gap: 6 })}>
-                                    <Zap size={13} /> Desplegar
-                                </button>
+                                <>
+                                    <button onClick={updateDraft}
+                                        style={btnBase({ fontSize: 12, padding: "6px 14px", background: T.surfaceElevated, color: T.text, border: `1px solid ${T.border}`, boxShadow: "none", display: "flex", alignItems: "center", gap: 6 })}>
+                                        <Save size={13} /> Guardar cambios
+                                    </button>
+                                    <button onClick={() => deployDraft(activeSlice.id)}
+                                        style={btnBase({ fontSize: 12, padding: "6px 16px", background: T.accent, color: "#fff", border: "none", boxShadow: `0 3px 12px ${T.accent}44`, display: "flex", alignItems: "center", gap: 6 })}>
+                                        <Zap size={13} /> Desplegar
+                                    </button>
+                                </>
                             )}
                             {activeSlice.status !== "TERMINATED" && (
                                 <button onClick={() => destroySlice(activeSlice.id)}

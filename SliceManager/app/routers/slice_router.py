@@ -190,8 +190,6 @@ def update_draft(
     # ── Autorización de negocio ────────────────────────────────────
     _assert_owner_or_admin(db_slice, user)
 
-    db_slice.slice_json = {"edges": request.slice_json.get("edges", [])}
-
     # Liberar IPs antes de destruir VMs viejas
     vms_antiguas = db.query(Vm).filter(Vm.slice_id == slice_id).all()
     for v in vms_antiguas:
@@ -239,6 +237,12 @@ def update_draft(
             ip_record.is_used = 1
             ip_record.vm_id   = nueva_vm.id
 
+    # Guardar slice_json con nodes + edges DESPUÉS del loop,
+    # igual que create_draft — así _serialize_slice puede leer los nodos.
+    db_slice.slice_json = {
+        "nodes": [vm_data for vm_data in request.slice_json.get("nodes", [])],
+        "edges": request.slice_json.get("edges", []),
+    }
     db.commit()
     logger.info(
         "Borrador actualizado: slice_id=%s por user=%s…",
