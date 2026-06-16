@@ -6,7 +6,8 @@ const REALM           = import.meta.env.VITE_KEYCLOAK_REALM     ?? "pucp-cloud";
 const CLIENT_ID       = import.meta.env.VITE_KEYCLOAK_CLIENT_ID ?? "pucp-cloud-webapp";
 const DEMO_MODE       = import.meta.env.VITE_DEMO_MODE === "true";
 
-const TOKEN_URL = `${KEYCLOAK_URL}/realms/${REALM}/protocol/openid-connect/token`;
+const TOKEN_URL  = `${KEYCLOAK_URL}/realms/${REALM}/protocol/openid-connect/token`;
+const LOGOUT_URL = `${KEYCLOAK_URL}/realms/${REALM}/protocol/openid-connect/logout`;
 
 const TOKEN_KEY   = "pucp_cloud_token";
 const REFRESH_KEY = "pucp_cloud_refresh";
@@ -206,6 +207,28 @@ export const useAuth = () => {
     // ── logout ────────────────────────────────────────────────────────────────
     const logout = useCallback(() => {
         if (timerRef.current) clearTimeout(timerRef.current);
+
+        // Invalidar el refresh_token en Keycloak (backchannel logout).
+        // Fire-and-forget: no bloqueamos el logout local esperando respuesta.
+        // Si Keycloak no está disponible, el logout local ocurre igual.
+        if (!DEMO_MODE) {
+            const rt = localStorage.getItem(REFRESH_KEY);
+            if (rt) {
+                fetch(LOGOUT_URL, {
+                    method:  "POST",
+                    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                    body: new URLSearchParams({
+                        client_id:     CLIENT_ID,
+                        refresh_token: rt,
+                    }).toString(),
+                }).catch(() => {
+                    // Ignorar errores de red — el logout local ya es efectivo.
+                    // El refresh_token expirará solo por idle timeout de Keycloak.
+                });
+            }
+        }
+
+        // Limpiar estado local inmediatamente (sin esperar al servidor)
         clear();
         setToken(null);
         setUser(null);
