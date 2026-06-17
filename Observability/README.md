@@ -1,7 +1,7 @@
 # Observability — PUCP Cloud Orchestrator
 
 Microservicio independiente que implementa el feedback loop de VM Placement.
-Consulta Prometheus periódicamente, calcula estadísticas de uso por VM usando
+Consulta Prometheus periódicamente, calcula estadísticas de uso por worker usando
 una ventana deslizante de 15 días con el algoritmo de Welford incremental, y
 escribe los factores de overcommit (OC) en MySQL para que el Slice Manager los
 use en el siguiente placement.
@@ -10,10 +10,11 @@ use en el siguiente placement.
 
 ## Responsabilidades
 
-- Consultar métricas instantáneas de CPU y RAM por VM desde Prometheus (vía `libvirt_exporter`).
-- Mantener una ventana deslizante de 15 días de muestras por VM con Welford incremental — O(1) por ciclo.
-- Agregar estadísticas de VM a worker: `μ_r[j] = Σμ_r(vm)`, `σ_r[j] = √(Σσ²_r(vm))`.
-- Calcular factores OC por worker: `OC_r[j] = C_nominal_r[j] / (μ_r[j] + k_r · σ_r[j])`.
+- Consultar métricas instantáneas de CPU y RAM del host por worker desde Prometheus (vía `node_exporter`).
+- Mantener un baseline por worker: consumo del host cuando no hay VMs activas.
+- Calcular el ratio de eficiencia: `ratio = (consumo_real - baseline) / nominal_solicitado`.
+- Mantener una ventana deslizante de 15 días de ratios por worker con Welford incremental — O(1) por ciclo.
+- Calcular factores OC por worker: `OC_r[j] = 1 / (μ_ratio_r[j] + k_r · σ_ratio_r[j])`.
 - Escribir `oc_cpu`, `oc_ram`, `oc_disco` en la tabla `workers` de MySQL.
 - Exponer endpoints REST para monitoreo de métricas y estado de la ventana.
 - Exponer dashboard web opcional (controlado por `ENABLE_DASHBOARD`).
@@ -31,24 +32,25 @@ observability/
 ├── app/
 │   ├── main.py                      → FastAPI app + lifespan (arranca scheduler)
 │   ├── config.py                    → Variables de entorno
-│   ├── database.py                  → ORM SQLAlchemy (Worker, Vm)
-│   ├── targets.py                   → Carga y cachea targets.yml
+│   ├── database.py                  → ORM SQLAlchemy (Worker, Vm, Slice)
+│   ├── targets.py                   → Carga y cachea targets.yml (libvirt + node)
 │   └── services/
 │       ├── prometheus_client.py     → Queries PromQL instantáneas (httpx)
-│       ├── weight_updater.py        → Welford sliding window + cálculo OC + escritura BD
+│       ├── weight_updater.py        → Baseline + ratio + Welford + cálculo OC + escritura BD
 │       └── scheduler.py             → Background loop periódico
 ├── routers/
 │   ├── metrics_router.py            → GET /metrics/workers, /metrics/workers/{id},
-│   │                                   /metrics/vms/{id}, /metrics/status
+│   │                                   /metrics/workers/{id}/window, /metrics/status
 │   └── dashboard_router.py          → GET /dashboard (solo si ENABLE_DASHBOARD=true)
 ├── static/
-│   └── dashboard.html               → Dashboard de monitoreo (auto-refresh 15s)
+│   └── dashboard.html               → Dashboard de monitoreo (auto-refresh 1s)
 ├── config/
-│   ├── targets.yml                  → Mapeo worker_id → prometheus_target
+│   ├── targets.yml                  → Mapeo worker_id → prometheus_target + node_target
 │   ├── prometheus.yml               → Configuración de Prometheus (scrape targets)
 │   └── migration.sql                → ALTER TABLE workers ADD COLUMN oc_*
-├── install_libvirt_exporter.sh      → Instalar exporter en cada worker
-├── setup_tunnels.sh                 → Configurar tunnels autossh en server1
+├── install_node_exporter.sh         → Instalar node_exporter en cada worker
+├── install_libvirt_exporter.sh      → Instalar libvirt_exporter en cada worker
+├── setup_tunnels.sh                 → Configurar tunnels autossh (libvirt + node)
 ├── Dockerfile
 ├── docker-compose.yml               → Prometheus + Observability juntos
 └── requirements.txt
@@ -58,25 +60,71 @@ observability/
 
 ## Modelo de overcommit estadístico
 
-Para cada worker `j` y dimensión `r`:
+### Dos modos de operación por worker
+
+**Modo Baseline** (sin VMs activas):
+Acumula Welford del consumo absoluto del host sin carga de VMs.
+Esto captura el consumo del SO, hipervisor y procesos del sistema.
+
+**Modo Normal** (con VMs activas + baseline válido):
+Resta el baseline del consumo real para aislar el consumo atribuible a las VMs,
+luego calcula el ratio de eficiencia y acumula Welford sobre ese ratio.
+
+### Fórmula del ratio de eficiencia
+
+Para cada worker `j` y dimensión `r` en cada ciclo:
 
 ```
-OC_r[j] = C_nominal_r[j] / (μ_r[j] + k_r · σ_r[j])
+consumo_real_r[j]   ← Prometheus (node_exporter del host)
+baseline_r[j]       ← μ Welford del consumo sin VMs (modo baseline)
+nominal_r[j]        ← Σ recursos solicitados por VMs ACTIVE (MySQL)
+
+consumo_neto_r[j] = max(consumo_real_r[j] - baseline_r[j], 0)
+ratio_r[j]         = min(consumo_neto_r[j] / nominal_r[j], 1.0)
 ```
 
-Donde `μ_r[j]` y `σ_r[j]` se calculan agregando las estadísticas de todas las
-VMs activas en el worker:
+El ratio se acota a máximo 1.0: si el consumo neto supera lo solicitado,
+no hay sobreasignación posible en esa dimensión.
+
+### Fórmula del OC
 
 ```
-μ_r[j]  = Σ μ_r(vm_i)
-σ_r[j]  = √(Σ σ²_r(vm_i))
+OC_r[j] = 1 / (μ_ratio_r[j] + k_r · σ_ratio_r[j])
+```
+
+Donde `μ_ratio_r[j]` y `σ_ratio_r[j]` se calculan con Welford sobre el
+historial de ratios del worker.
+
+Si `OC_r[j]` supera el techo configurado (`OC_CPU_MAX`, `OC_RAM_MAX`), se limita.
+
+### Guard de baseline
+
+Para evitar contaminar el buffer Welford con ratios calculados sin baseline
+(que sesgarían μ_ratio hacia arriba), el scheduler **no acumula ninguna muestra
+de ratio** hasta que el baseline tenga al menos `BASELINE_MIN_SAMPLES` muestras.
+Mientras tanto, el worker mantiene los defaults en BD.
+
+### Ejemplo de cálculo
+
+Worker 2 con una VM de 256MB de RAM:
+
+```
+baseline_ram    = 0.631 GB    ← consumo del host sin VMs
+consumo_real    = 0.810 GB    ← Prometheus (node_exporter)
+nominal_ram     = 0.250 GB    ← 1 VM × 256MB (MySQL)
+
+consumo_neto    = 0.810 - 0.631 = 0.179 GB
+ratio_ram       = 0.179 / 0.250 = 0.716     → las VMs usan el 71.6% de lo pedido
+
+Con μ_ratio=0.716 y σ≈0 (poca varianza):
+OC_ram = 1 / (0.716 + 2.0×0) = 1.40×       → limitado a OC_RAM_MAX si aplica
 ```
 
 ### Algoritmo de Welford con ventana deslizante
 
-Las estadísticas por VM se mantienen con un buffer circular de tamaño fijo
-(`WINDOW_SIZE = WINDOW_DAYS × 24h × ciclos/h`). Cuando el buffer está lleno,
-cada nueva muestra desplaza la más antigua — el costo es O(1):
+Las estadísticas por worker se mantienen con un buffer circular de tamaño fijo
+(`WINDOW_SIZE = WINDOW_DAYS × 24h × 3600s / OC_UPDATE_INTERVAL`). Cuando el
+buffer está lleno, cada nueva muestra desplaza la más antigua — costo O(1):
 
 ```
 # Entrada x_new, salida x_old del buffer:
@@ -85,18 +133,13 @@ M2_new  = M2_old + (x_new - x_old) × (x_new - mu_new + x_old - mu_old)
 sigma   = sqrt(M2_new / N)
 ```
 
-Con `WINDOW_DAYS=15` y `OC_UPDATE_INTERVAL=900s`:
-```
-WINDOW_SIZE = 15 × 24 × 4 = 1440 muestras por VM
-```
-
 ### Factores de seguridad `k_r` por dimensión
 
 | Dimensión | k   | Confianza | Razonamiento |
 |-----------|-----|-----------|--------------|
 | CPU       | 1.0 | 84%       | Time-shared, throttling recuperable |
 | RAM       | 2.0 | 97.7%     | OOM-killer irreversible — conservador |
-| Disco     | 0.0 | —         | Asignación persistente — sin overcommit |
+| Disco     | 0.0 | —         | Asignación persistente — sin overcommit (OC=1.0 fijo) |
 
 ### Valores de arranque (mientras OC = NULL en BD)
 
@@ -110,64 +153,69 @@ WINDOW_SIZE = 15 × 24 × 4 = 1440 muestras por VM
 
 ## Pre-requisitos: setup antes del primer despliegue
 
-### Paso 1 — Instalar `libvirt_exporter` en cada worker
+### Paso 1 — Instalar `node_exporter` en cada worker
 
 Ejecutar **en cada worker** (Linux Cluster y OpenStack):
 
 ```bash
 # Copiar el script al worker
-scp install_libvirt_exporter.sh ubuntu@<ip_gw> -p <gw_port>:~/
+scp -P <gw_port> install_node_exporter.sh ubuntu@<ip_gw>:~/
 
-# Conectarse al worker
+# Conectarse al worker y ejecutar
 ssh ubuntu@<ip_gw> -p <gw_port>
-
-# Dar permisos y ejecutar
-chmod +x install_libvirt_exporter.sh
-sudo ./install_libvirt_exporter.sh --type linux       # workers Linux Cluster
-sudo ./install_libvirt_exporter.sh --type openstack   # workers OpenStack
+chmod +x install_node_exporter.sh
+sudo ./install_node_exporter.sh
 ```
 
-El script instala `prometheus-libvirt-exporter v2.4.0` desde GitHub releases,
-configura el servicio systemd y verifica que el endpoint responde en puerto `9177`.
+El script instala `node_exporter v1.11.1` desde GitHub releases, configura el
+servicio systemd y verifica que el endpoint responde en puerto `9100`.
 
 ```bash
 # Verificar en el worker
-systemctl status prometheus-libvirt-exporter
-curl http://localhost:9177/metrics | head -5
+systemctl status node-exporter
+curl http://localhost:9100/metrics | grep node_cpu_seconds_total | head -3
 ```
 
-### Paso 2 — Configurar tunnels autossh en server1
+> **Nota:** `libvirt_exporter` también se instala (puerto 9177) pero dado que las
+> VMs corren con QEMU directo (no libvirt), reporta `libvirt_domains 0`. Las
+> métricas reales del host provienen de `node_exporter`.
 
-Editar la sección `WORKER CONFIGURATION` y `GW_IP` en el script:
+### Paso 2 — Configurar tunnels autossh
+
+Editar `setup_tunnels.sh` con las IPs y puertos reales:
 
 ```bash
-nano setup_tunnels.sh   # ajustar GW_IP, IPs internas y puertos GW de cada worker
+nano setup_tunnels.sh   # ajustar GW_IP, WORKERS array
 chmod +x setup_tunnels.sh
 sudo ./setup_tunnels.sh
 ```
 
 El script crea servicios systemd persistentes (`autossh-worker{N}`) que exponen
-cada worker como `localhost:191XX` en server1. Al finalizar imprime el bloque
-`workers:` listo para copiar en `config/targets.yml`.
+**dos tunnels** por worker:
+- `libvirt_exporter` (9177) → `localhost:191XX`
+- `node_exporter` (9100) → `localhost:192XX`
 
-> **Topología:** todos los workers son accesibles directamente desde server1
-> vía el GW con port forwarding — no hay saltos intermedios.
-> ```
-> server1 → GW:<gw_port> → worker:9177
-> ```
+Ambos escuchan en `0.0.0.0` para que los containers Docker puedan acceder via
+`host.docker.internal`.
+
+```
+Formato WORKERS: "worker_id:worker_ip:gw_ssh_port:local_libvirt_port:local_node_port"
+```
+
+Topología de red:
+```
+container (host.docker.internal:192XX) → host (0.0.0.0:192XX) → GW:gw_port → worker:9100
+```
 
 ```bash
 # Verificar tunnels
 for i in {1..7}; do
-    echo -n "worker$i → localhost:$((19176+i)): "
-    curl -sf --max-time 3 http://localhost:$((19176+i))/metrics \
-        | grep -q "go_goroutines" && echo "OK" || echo "FAIL"
+    echo -n "worker$i libvirt(191$((76+i))): "
+    curl -sf --max-time 2 http://localhost:$((19176+i))/metrics | grep -q "go_goroutines" && echo "OK" || echo "FAIL"
+    echo -n "worker$i node   (192$((76+i))): "
+    curl -sf --max-time 2 http://localhost:$((19276+i))/metrics | grep -q "node_cpu_seconds_total" && echo "OK" || echo "FAIL"
 done
 ```
-
-> **Nota sobre autenticación SSH:** si el GW autentica con key, asegúrate de
-> que el service file incluye `-i /home/ubuntu/.ssh/id_ed25519`. El script lo
-> configura automáticamente si `GW_KEY` está definido.
 
 ### Paso 3 — Actualizar `config/targets.yml`
 
@@ -176,33 +224,49 @@ Copiar la salida del script anterior:
 ```yaml
 workers:
   - worker_id: 1
-    prometheus_target: "localhost:19177"
+    prometheus_target: "host.docker.internal:19177"
+    node_target:       "host.docker.internal:19277"
   - worker_id: 2
-    prometheus_target: "localhost:19178"
+    prometheus_target: "host.docker.internal:19178"
+    node_target:       "host.docker.internal:19278"
   # ...
 ```
 
 ### Paso 4 — Actualizar `config/prometheus.yml`
 
-Verificar que los targets en `prometheus.yml` coinciden con los puertos locales
-configurados en el paso anterior:
+Verificar que los targets coincidan. Hay dos jobs: `libvirt` (puertos 191XX) y
+`node` (puertos 192XX):
 
 ```yaml
 scrape_configs:
   - job_name: 'libvirt'
     static_configs:
       - targets:
-          - 'localhost:19177'
-          - 'localhost:19178'
+          - 'host.docker.internal:19177'
+          - 'host.docker.internal:19178'
+          # ...
+
+  - job_name: 'node'
+    static_configs:
+      - targets:
+          - 'host.docker.internal:19277'
+          - 'host.docker.internal:19278'
           # ...
 ```
 
+**Regla del rate:** la ventana del `rate()` en las queries PromQL (5m por defecto)
+debe ser ≥ 2× el `scrape_interval`. Si `scrape_interval=1m`, `rate([5m])` funciona
+correctamente con ~5 muestras por ventana.
+
 ### Paso 5 — Migración de BD
 
-Ejecutar una sola vez:
+Las columnas `oc_cpu`, `oc_ram`, `oc_disco` deben existir en la tabla `workers`.
+Si no existen:
 
-```bash
-mysql -u root -p cloud < config/migration.sql
+```sql
+ALTER TABLE workers ADD COLUMN oc_cpu FLOAT NULL;
+ALTER TABLE workers ADD COLUMN oc_ram FLOAT NULL;
+ALTER TABLE workers ADD COLUMN oc_disco FLOAT NULL;
 ```
 
 ---
@@ -211,16 +275,16 @@ mysql -u root -p cloud < config/migration.sql
 
 | Variable               | Default                   | Descripción |
 |------------------------|---------------------------|-------------|
-| `PROMETHEUS_URL`       | `http://localhost:9090`   | URL de Prometheus |
-| `OC_UPDATE_INTERVAL`   | `900`                     | Intervalo del scheduler en segundos (15 min) |
+| `PROMETHEUS_URL`       | `http://prometheus:9090`  | URL de Prometheus |
+| `OC_UPDATE_INTERVAL`   | `900`                     | Intervalo del scheduler en segundos |
 | `WINDOW_DAYS`          | `15`                      | Días de historia en la ventana deslizante |
 | `K_CPU`                | `1.0`                     | Factor de seguridad k para CPU |
 | `K_RAM`                | `2.0`                     | Factor de seguridad k para RAM |
-| `OC_CPU_DEFAULT`       | `2.0`                     | OC CPU de arranque (mientras buffer vacío) |
+| `OC_CPU_DEFAULT`       | `2.0`                     | OC CPU de arranque (mientras buffer vacío / NULL) |
 | `OC_RAM_DEFAULT`       | `1.54`                    | OC RAM de arranque |
 | `OC_RAM_MAX`           | `1.6`                     | Techo para OC RAM |
 | `OC_CPU_MAX`           | `4.0`                     | Techo para OC CPU |
-| `VM_ACTIVATION_HOURS`  | `36`                      | Horas antes de forzar activación por tiempo |
+| `BASELINE_MIN_SAMPLES` | `5`                       | Muestras mínimas de baseline antes de calcular OC |
 | `ENABLE_DASHBOARD`     | `false`                   | `true` para habilitar /dashboard |
 | `DB_HOST`              | `host.docker.internal`    | Host MySQL |
 | `DB_USER`              | `root`                    | Usuario MySQL |
@@ -228,18 +292,53 @@ mysql -u root -p cloud < config/migration.sql
 | `DB_NAME`              | `cloud`                   | Base de datos |
 | `TARGETS_FILE`         | `/app/config/targets.yml` | Ruta al archivo de targets |
 
+### Valores de producción recomendados
+
+```yaml
+- PROMETHEUS_URL=http://prometheus:9090
+- OC_UPDATE_INTERVAL=300       # 5 minutos
+- WINDOW_DAYS=15
+- K_CPU=1.0
+- K_RAM=2.0
+- OC_CPU_DEFAULT=2.0
+- OC_RAM_DEFAULT=1.54
+- OC_RAM_MAX=1.6
+- OC_CPU_MAX=4.0
+- BASELINE_MIN_SAMPLES=5
+- ENABLE_DASHBOARD=true
+```
+
+Con `scrape_interval=1m` en `prometheus.yml`.
+
 ---
 
 ## Endpoints REST
 
-| Método | Ruta                      | Descripción |
-|--------|---------------------------|-------------|
-| `GET`  | `/metrics/workers`        | OC factors + uso en vivo de todos los workers |
-| `GET`  | `/metrics/workers/{id}`   | Detalle de un worker con VMs y estado de ventana |
-| `GET`  | `/metrics/vms/{vm_id}`    | Estado de ventana Welford de una VM |
-| `GET`  | `/metrics/status`         | Estado del scheduler y conectividad de targets |
-| `GET`  | `/dashboard`              | Dashboard web (solo si `ENABLE_DASHBOARD=true`) |
-| `GET`  | `/health`                 | Liveness check |
+| Método | Ruta                           | Descripción |
+|--------|--------------------------------|-------------|
+| `GET`  | `/metrics/workers`             | OC factors + uso en vivo de todos los workers |
+| `GET`  | `/metrics/workers/{id}`        | Detalle de un worker con VMs activas y estado Welford |
+| `GET`  | `/metrics/workers/{id}/window` | Estado de ventana Welford de un worker específico |
+| `GET`  | `/metrics/status`              | Estado del scheduler, conectividad, estado Welford + baseline |
+| `GET`  | `/dashboard`                   | Dashboard web (solo si `ENABLE_DASHBOARD=true`) |
+| `GET`  | `/health`                      | Liveness check |
+
+---
+
+## Dashboard
+
+El dashboard muestra en tiempo real:
+
+**Sección SCHEDULER:** estado del scheduler, ciclos completados, último error.
+
+**Sección SUMMARY:** targets up/total, cycles run, OC source (live/default), last error.
+
+**Sección WORKERS:** tarjeta por worker con CPU%, RAM% en vivo, y factores OC
+(con badge `default`, `live` o `fixed`).
+
+**Sección WORKER WELFORD STATE:** tabla con μ_ratio y σ_ratio por worker,
+baseline CPU/RAM, número de muestras, barra de progreso de la ventana, y
+estado (Baseline / Warming up / Live).
 
 ---
 
@@ -251,30 +350,66 @@ Una vez completados los pasos de pre-requisitos:
 # Levantar Prometheus + Observability
 docker compose up -d --build
 
-# Con dashboard habilitado
-# Editar docker-compose.yml: ENABLE_DASHBOARD=true
-docker compose up -d --build
-
 # Verificar
-curl http://localhost:8000/health
-curl http://localhost:8000/metrics/workers
-curl http://localhost:8000/metrics/status
+curl http://localhost:8006/health
+curl http://localhost:8006/metrics/workers
+curl http://localhost:8006/metrics/status
 
-# Ver dashboard (si habilitado)
-# http://localhost:8000/dashboard
+# Ver dashboard
+# http://localhost:8006/dashboard
 
 # Ver logs
 docker compose logs -f observability
 docker compose logs -f prometheus
 ```
 
+---
+
+## Integración con el Slice Manager
+
+El Slice Manager lee `oc_cpu`, `oc_ram`, `oc_disco` desde la tabla `workers` al
+construir el Servers' State. El cambio en `placement_worker.py` es:
+
+```python
+# Antes (F_OP escalar hardcodeado):
+F_OP = 1 / 0.65
+C_i = (3*cpu + 5*ram_gb + 1*disk_gb) * F_OP
+
+# Después (factores por dimensión desde BD):
+oc_cpu   = worker.oc_cpu   or OC_CPU_DEFAULT    # 2.0
+oc_ram   = worker.oc_ram   or OC_RAM_DEFAULT    # 1.54
+oc_disco = worker.oc_disco or OC_DISCO_DEFAULT  # 1.0
+
+C_i = 3*(cpu * oc_cpu) + 5*(ram_gb * oc_ram) + 1*(disk_gb * oc_disco)
+```
+
+La estructura de pesos β:α:γ = 5:3:1 se mantiene idéntica. VM Placement no
+requiere cambios — sigue recibiendo `{worker_id, disponible}` escalar.
+
+---
+
 ## Notas operacionales
 
-- Los factores OC usan los valores default hasta que el buffer de cada VM
-  acumule suficientes muestras. El endpoint `/metrics/vms/{vm_id}` muestra
-  `window_pct` — porcentaje de llenado de la ventana.
-- Si el microservicio se reinicia, el estado Welford se pierde y el buffer
-  comienza a llenarse de nuevo desde cero. Los valores OC vuelven a default
-  hasta que haya suficientes muestras.
-- Prometheus conserva el histórico de métricas raw en el volumen
+- **Baseline primero:** al desplegar por primera vez o reiniciar el container,
+  es recomendable dejar el sistema sin VMs activas durante algunos ciclos para
+  que el baseline se acumule (mínimo `BASELINE_MIN_SAMPLES` muestras). Sin
+  baseline válido, los workers con VMs mantienen los defaults.
+
+- **Estado en memoria:** los buffers Welford (`_state` y `_baseline`) viven en
+  memoria del container. Al reiniciar se pierden y comienzan a acumularse desde
+  cero. Los valores OC en BD persisten y se usan como fallback.
+
+- **Prometheus conserva el histórico** de métricas raw en el volumen
   `prometheus_data` — persiste entre reinicios del container.
+
+- **Cambio de VMs:** cuando se despliegan o terminan VMs en un worker, el buffer
+  Welford puede contener ratios calculados con una configuración de VMs diferente.
+  Con suficientes ciclos, las muestras viejas salen de la ventana deslizante y μ
+  converge al valor correcto.
+
+- **OC por debajo de 1.0:** si `ratio > 1.0` en alguna muestra (consumo neto
+  supera lo nominal), se acota a 1.0. Esto previene OC < 1.0 en dimensiones
+  individuales.
+
+- **Healthcheck:** el container usa `wget -qO- http://localhost:8000/health`
+  (no `curl`, que no está instalado en la imagen slim).
