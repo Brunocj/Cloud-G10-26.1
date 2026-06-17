@@ -27,7 +27,7 @@ async def get_real_worker_metrics():
     logger.info("─"*60)
     logger.info("[TELEMETRY] 📡 Consultando Prometheus en %s ...", PROMETHEUS_URL)
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with httpx.AsyncClient(timeout=5.0, trust_env=False) as client:
             async def fetch_metric(promql):
                 resp = await client.get(f"{PROMETHEUS_URL}/api/v1/query", params={"query": promql})
                 resp.raise_for_status()

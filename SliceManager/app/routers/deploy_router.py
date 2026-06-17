@@ -1,17 +1,74 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models import Slice, Vm, Vlan, IpPool
+from app.models import Image, Slice, Vm, Vlan, IpPool, Worker
 from app.schemas import DeployRequest
 from app.auth import CurrentUser, get_current_user
 from app.services.placement_worker import placement_queue
 from app.nats_producer import nats_producer
+import os
 import uuid
 import json
 import logging
+from datetime import datetime
 
 router = APIRouter(prefix="/api/v1/slices", tags=["Deploy"])
 logger = logging.getLogger("SliceManager.Deploy")
+
+
+def _read_ssh_key(key_path: str) -> str:
+    """Lee la clave SSH desde el path de BD, con fallback al path del contenedor."""
+    if not key_path:
+        logger.warning("[SSH_KEY] key_path vacío")
+        return ""
+    candidates = [key_path, f"/app/keys/{os.path.basename(key_path)}"]
+    for path in candidates:
+        exists = os.path.exists(path)
+        logger.info("[SSH_KEY] probando '%s' → existe=%s", path, exists)
+        if exists:
+            try:
+                content = open(path).read()
+                logger.info("[SSH_KEY] leída OK len=%d", len(content))
+                return content
+            except Exception as exc:
+                logger.error("[SSH_KEY] error leyendo '%s': %s", path, exc)
+    logger.error("[SSH_KEY] clave no encontrada en ninguno de: %s", candidates)
+    return ""
+
+
+def _enrich_links_with_ssh_keys(links: list, workers_by_ip: dict) -> list:
+    """Re-inyecta la clave SSH en deployed_links desde BD."""
+    any_worker = next(iter(workers_by_ip.values()), None)
+    if not any_worker:
+        logger.error("[ENRICH] workers_by_ip vacío — no se puede enriquecer links")
+        return links
+    logger.info("[ENRICH] usando worker ip=%s ssh_key_path=%s", any_worker.ip, any_worker.ssh_key_path)
+    fresh_key = _read_ssh_key(any_worker.ssh_key_path)
+    if not fresh_key:
+        logger.error("[ENRICH] clave vacía — links quedan sin ssh_private_key")
+        return links
+    for link in links:
+        for side in ("vm1", "vm2"):
+            link[f"{side}_ssh_private_key"] = fresh_key
+    logger.info("[ENRICH] %d links enriquecidos con SSH key", len(links))
+    return links
+
+
+def _enrich_vms_with_ssh_keys(vms: list, workers_by_ip: dict) -> list:
+    """Re-inyecta la clave SSH en deployed_vms desde BD."""
+    any_worker = next(iter(workers_by_ip.values()), None)
+    if not any_worker:
+        logger.error("[ENRICH] workers_by_ip vacío — no se puede enriquecer vms")
+        return vms
+    logger.info("[ENRICH] usando worker ip=%s ssh_key_path=%s", any_worker.ip, any_worker.ssh_key_path)
+    fresh_key = _read_ssh_key(any_worker.ssh_key_path)
+    if not fresh_key:
+        logger.error("[ENRICH] clave vacía — vms quedan sin ssh_private_key")
+        return vms
+    for vm in vms:
+        vm["ssh_private_key"] = fresh_key
+    logger.info("[ENRICH] %d vms enriquecidas con SSH key", len(vms))
+    return vms
 
 
 def _release_external_ips(db: Session, slice_id: int) -> None:
@@ -53,6 +110,32 @@ async def request_deploy(
         )
 
     logger.info("[DEPLOY] ✅ Slice '%s' encontrado en BD (estado actual: %s)", db_slice.name, db_slice.status)
+
+    # ── Validación Fail-Fast: compatibilidad de imágenes con la AZ ──────────
+    # Principio: verificar ANTES de emitir cualquier evento al bus de mensajes.
+    vms_del_slice = db.query(Vm).filter(Vm.slice_id == slice_id).all()
+    for vm in vms_del_slice:
+        if vm.image_id is None:
+            continue  # VM sin imagen asignada: se valida en el worker
+        img = db.query(Image).filter(Image.id == vm.image_id).first()
+        if img is None:
+            continue
+        # Si la imagen tiene AZ asignada y NO coincide con la zona solicitada → ABORT
+        if img.availability_zone_id is not None and img.availability_zone_id != request.availability_zone_id:
+            logger.warning(
+                "[DEPLOY] ❌ Imagen '%s' (id=%d, az_id=%s) no compatible con zona=%d. Slice abortado.",
+                img.name, img.id, img.availability_zone_id, request.availability_zone_id,
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Error: La imagen seleccionada para el nodo '{vm.name}' no es compatible "
+                    f"con la Zona de Disponibilidad elegida."
+                ),
+            )
+
+    logger.info("[DEPLOY] ✅ Validación Fail-Fast superada: todas las imágenes son compatibles con la zona %d",
+                request.availability_zone_id)
 
     db_slice.status = "PENDING_APPROVAL"
     db_slice.TTL = request.ttl_hours
@@ -104,17 +187,27 @@ async def request_destroy(
     if not s_json:
         s_json = {}
 
+    # Re-inyectar claves SSH desde BD (pueden estar vacías en el JSON guardado
+    # si al momento del deploy el key_path era incorrecto)
+    all_workers = db.query(Worker).all()
+    workers_by_ip = {w.ip: w for w in all_workers}
+
+    deployed_vms   = _enrich_vms_with_ssh_keys(s_json.get("deployed_vms", []),   workers_by_ip)
+    deployed_links = _enrich_links_with_ssh_keys(s_json.get("deployed_links", []), workers_by_ip)
+
     payload = {
-        "slice_id":   str(slice_id),
-        "request_id": f"req-destroy-{uuid.uuid4().hex[:8]}",
-        "vms":        s_json.get("deployed_vms", []),
-        "links":      s_json.get("deployed_links", []),
+        "slice_id":             str(slice_id),
+        "request_id":           f"req-destroy-{uuid.uuid4().hex[:8]}",
+        "availability_zone_id": db_slice.availability_zone_id or 1,
+        "vms":                  deployed_vms,
+        "links":                deployed_links,
     }
 
     published = await nats_producer.publish_destroy(payload)
 
     if published:
         db_slice.status = "TERMINATED"
+        db_slice.date_destruction = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         db.query(Vm).filter(Vm.slice_id == slice_id).update({"state": "TERMINATED"})
         _release_external_ips(db, slice_id)
         db.commit()

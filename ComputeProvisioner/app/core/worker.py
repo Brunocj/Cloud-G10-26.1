@@ -28,9 +28,7 @@ async def handle_deploy(msg: Msg) -> None:
 
         request = DeployRequest(**payload)
 
-        response = await asyncio.get_running_loop().run_in_executor(
-            None, _provisioner.deploy, request
-        )
+        response = await _provisioner.deploy(request)
         logger.info(f"[deploy] Provisioner terminó: status={response.status}")
 
         if response.vms:
@@ -39,11 +37,14 @@ async def handle_deploy(msg: Msg) -> None:
                 {
                     "vm_id":           vm.vm_id,
                     "worker_ip":       vm.worker_ip,
+                    "worker_port":     specs_by_id[vm.vm_id].worker_port,
                     "pid":             vm.pid,
                     "vnc_port":        vm.vnc_port,
                     "ssh_user":        specs_by_id[vm.vm_id].ssh_user,
                     "ssh_private_key": specs_by_id[vm.vm_id].ssh_private_key,
                     "tap_interfaces":  [t.model_dump() for t in specs_by_id[vm.vm_id].tap_interfaces],
+                    "provider_instance_id": getattr(vm, "provider_instance_id", None),
+                    "vnc_url":         getattr(vm, "vnc_url", None),
                 }
                 for vm in response.vms
             ]
@@ -92,9 +93,7 @@ async def handle_destroy(msg: Msg) -> None:
              logger.warning("No hay VMs especificadas en el request ni en KV para borrar.")
              # Continuamos para que el provisioner responda SUCCESS y no tranque el pipeline
 
-        response = await asyncio.get_running_loop().run_in_executor(
-            None, _provisioner.destroy, request, vms_to_destroy # Pasamos nuestra lista curada
-        )
+        response = await _provisioner.destroy(request, vms_to_destroy)
         logger.info(f"[destroy] Provisioner terminó: status={response.status}")
 
         await queue_client.delete_slice_vms(request.slice_id)
@@ -117,14 +116,42 @@ async def handle_destroy(msg: Msg) -> None:
             })
 
 
+async def handle_console_refresh(msg: Msg) -> None:
+    payload = {}
+    try:
+        payload = json.loads(msg.data.decode())
+        provider_instance_id = payload.get("provider_instance_id")
+        logger.info(f"[console-refresh] Solicitado para provider_instance_id={provider_instance_id}")
+
+        vnc_token = None
+        error = None
+        if not provider_instance_id:
+            error = "provider_instance_id vacío"
+        else:
+            try:
+                vnc_token = await _provisioner.refresh_console(provider_instance_id)
+                if not vnc_token:
+                    error = "No se pudo obtener un token de consola nuevo"
+            except Exception as exc:
+                error = str(exc)
+
+        if msg.reply:
+            await queue_client.reply(msg.reply, {"vnc_url": vnc_token, "error": error})
+    except Exception as exc:
+        logger.error(f"[console-refresh] Error: {exc}", exc_info=True)
+        if msg.reply:
+            await queue_client.reply(msg.reply, {"vnc_url": None, "error": str(exc)})
+
+
 async def run_worker():
     await queue_client.connect()
     await queue_client.subscribe_deploy(handle_deploy)
     await queue_client.subscribe_destroy(handle_destroy)
+    await queue_client.subscribe_console_refresh(handle_console_refresh)
 
     logger.info(
         f"Compute Provisioner iniciado. "
-        f"Escuchando en '{settings.QUEUE_DEPLOY}' y '{settings.QUEUE_DESTROY}'"
+        f"Escuchando en '{settings.QUEUE_DEPLOY}', '{settings.QUEUE_DESTROY}' y '{settings.QUEUE_CONSOLE_REFRESH}'"
     )
 
     stop = asyncio.Event()

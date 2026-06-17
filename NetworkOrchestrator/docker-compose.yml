@@ -9,6 +9,20 @@ services:
       NATS_URL:        nats://nats:4222
       LOG_LEVEL:       DEBUG
       SSH_TIMEOUT: "60"
+      # ── OpenStack (Neutron — redes, puertos, security groups) ──
+      OS_AUTH_URL:              "http://192.168.202.1:5000/v3"
+      OS_USERNAME:              cloud_admin
+      OS_PASSWORD:              "66c5f106f03328bbb47bd5ec609c320e"
+      OS_PROJECT_NAME:          cloud_admin
+      OS_USER_DOMAIN_NAME:      Cloud
+      OS_PROJECT_DOMAIN_NAME:   Cloud
+      OS_IDENTITY_API_VERSION:  "3"
+      OPENSTACK_EXTERNAL_NETWORK: "ext-net"
+      OPENSTACK_AZ_ID:          "2"
+      # ── SOCKS5 Proxy para OpenStack ──
+      HTTP_PROXY:               "socks5h://openstack-proxy:1080"
+      HTTPS_PROXY:              "socks5h://openstack-proxy:1080"
+      NO_PROXY:                 "localhost,127.0.0.1,nats,vm-placement,db,10.20.11.212,host.docker.internal"
     ports:
       - "8084:8084"
     networks:
@@ -16,4 +30,4 @@ services:
 
 networks:
   pucp_cloud_net:
-    external: true
+    external: true

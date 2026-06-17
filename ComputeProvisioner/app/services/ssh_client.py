@@ -46,21 +46,32 @@ class SSHClient:
         if not key_content:
             raise ValueError(f"ssh_private_key vacío para {self.host}:{self.port}")
 
+        # Log diagnóstico: primeros y últimos 40 chars de la clave para confirmar que llega
+        logger.debug(
+            f"[SSH] Intentando conectar a {self.host}:{self.port} user={self.user} "
+            f"key_len={len(key_content)} "
+            f"key_head={key_content[:40]!r} key_tail={key_content[-40:]!r}"
+        )
+
         key_stream = io.StringIO(key_content)
         last_exc: Exception | None = None
+        loaded_type = None
         for key_class in (paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey):
             try:
                 key_stream.seek(0)
                 pkey = key_class.from_private_key(key_stream)
+                loaded_type = key_class.__name__
                 break
             except Exception as exc:
                 last_exc = exc
 
         if pkey is None:
+            logger.error(f"[SSH] No se pudo parsear la clave para {self.host}:{self.port}: {last_exc}")
             raise ValueError(
                 f"No se pudo cargar la clave SSH para {self.host}:{self.port}: {last_exc}"
             )
 
+        logger.debug(f"[SSH] Clave parseada OK como {loaded_type}. Conectando...")
         self._client = paramiko.SSHClient()
         self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         self._client.connect(
@@ -70,7 +81,7 @@ class SSHClient:
             pkey=pkey,
             timeout=self.timeout,
         )
-        logger.debug(f"SSH conectado a {self.host}:{self.port} como {self.user}")
+        logger.debug(f"[SSH] Conectado exitosamente a {self.host}:{self.port} como {self.user}")
 
     def disconnect(self) -> None:
         if self._client:

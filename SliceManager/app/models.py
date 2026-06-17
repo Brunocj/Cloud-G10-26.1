@@ -63,6 +63,9 @@ class Worker(Base):
     id = Column(Integer, primary_key=True)
     name = Column(String(45))
     ip = Column(String(45))
+    ssh_port = Column(Integer, nullable=True)
+    ssh_user = Column(String(50), nullable=True)
+    ssh_key_path = Column(String(200), nullable=True)
     ram = Column(Float(asdecimal=True))
     cpu = Column(Integer)
     disk_gb = Column(Float, nullable=True)
@@ -85,6 +88,15 @@ class Image(Base):
     date_uploaded = Column(String(100))
     is_general = Column(TINYINT)
     path = Column(String(150))
+    # Zona de disponibilidad a la que pertenece esta imagen (un registro por AZ)
+    availability_zone_id = Column(Integer, ForeignKey('availability_zones.id'), index=True, nullable=True)
+    # Indica si la imagen soporta cloud-init (permite inyectar credenciales/red dinámicamente).
+    # Si es False (ej. CirrOS), las credenciales son fijas y deben registrarse aquí.
+    cloud_init_support = Column(TINYINT, default=0)
+    default_username = Column(String(50), nullable=True)
+    default_password = Column(String(100), nullable=True)
+
+    availability_zone = relationship('AvailabilityZone')
 
 
 class Slice(Base):
@@ -141,13 +153,15 @@ class Vm(Base):
     ram = Column(Float(asdecimal=True))
     disk = Column(Float(asdecimal=True))
     state = Column(String(45))
-    external_ip = Column(String(45))
+    external_ip = Column(String(45))        # Reutilizado también como IP flotante de OpenStack
     internet_access = Column(TINYINT, default=0)
     slice_id = Column(ForeignKey('slices.id'), index=True)
     image_id = Column(ForeignKey('images.id'), index=True)
     vnc_port = Column(Integer)
     worker_id = Column(ForeignKey('workers.id'), index=True)
-
+    # Campos OpenStack Nova
+    provider_instance_id = Column(String(100), nullable=True)  # UUID de la instancia en Nova
+    vnc_url = Column(String(500), nullable=True)               # URL web NoVNC de OpenStack
 
     image = relationship('Image')
     slice = relationship('Slice')
@@ -160,5 +174,9 @@ class IpPool(Base):
     ip_address = Column(String(45), unique=True)
     is_used = Column(TINYINT, default=0)
     vm_id = Column(ForeignKey('vms.id', ondelete='SET NULL'), index=True)
+    # Zona de disponibilidad a la que pertenece esta IP (1=Linux Cluster, 2=OpenStack)
+    availability_zone_id = Column(Integer, ForeignKey('availability_zones.id'), index=True, nullable=True)
+
+    availability_zone = relationship('AvailabilityZone')
 
     vm = relationship('Vm')

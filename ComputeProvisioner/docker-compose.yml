@@ -8,6 +8,21 @@ services:
       IMAGES_BASE_DIR: /images
       VMS_BASE_DIR:    /vms
       LOG_LEVEL:       INFO
+      # ── OpenStack (Nova — cómputo, consola VNC) ──
+      OS_AUTH_URL:              "http://192.168.202.1:5000/v3"
+      OS_USERNAME:              cloud_admin
+      OS_PASSWORD:              "66c5f106f03328bbb47bd5ec609c320e"
+      OS_PROJECT_NAME:          cloud_admin
+      OS_USER_DOMAIN_NAME:      Cloud
+      OS_PROJECT_DOMAIN_NAME:   Cloud
+      OS_IDENTITY_API_VERSION:  "3"
+      OS_IMAGE_API_VERSION:     "2"
+      OPENSTACK_AZ_ID:          "2"
+      OS_BYOS_FORCE_HOST:       "false"   # cambiar a true cuando Nova scheduler esté configurado para ello
+      # ── SOCKS5 Proxy para OpenStack ──
+      HTTP_PROXY:               "socks5h://openstack-proxy:1080"
+      HTTPS_PROXY:              "socks5h://openstack-proxy:1080"
+      NO_PROXY:                 "localhost,127.0.0.1,nats,vm-placement,db,10.20.11.212,host.docker.internal"
     ports:
       - "8081:8080"
     networks:
@@ -15,4 +30,4 @@ services:
 
 networks:
   pucp_cloud_net:
-    external: true
+    external: true

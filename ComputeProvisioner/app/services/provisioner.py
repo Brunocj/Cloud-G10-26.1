@@ -17,6 +17,7 @@ Flujo de destroy por VM:
 
 import logging
 import time
+import asyncio
 from typing import List, Optional
 
 from app.core.config import settings
@@ -28,6 +29,7 @@ from app.models.schemas import (
 from app.services.qemu_executor import QEMUExecutor
 from app.services.ssh_client import SSHClient
 from app.services.vnc_port_manager import VNCPortManager
+from app.services.openstack_compute_executor import OpenStackComputeExecutor, get_connection
 
 logger = logging.getLogger(__name__)
 
@@ -42,16 +44,28 @@ class Provisioner:
     # Deploy
     # ------------------------------------------------------------------
 
-    def deploy(self, request: DeployRequest) -> DeployReply:
+    async def deploy(self, request: DeployRequest) -> DeployReply:
         logger.info(
-            "Deploy slice=%s, request=%s, vms=%d",
-            request.slice_id, request.request_id, len(request.vms),
+            "Deploy slice=%s, request=%s, vms=%d, AZ=%d",
+            request.slice_id, request.request_id, len(request.vms), request.availability_zone_id
         )
 
-        results: List[VMResult] = [
-            self._deploy_vm_sync(vm, request.slice_id)
-            for vm in request.vms
-        ]
+        if request.availability_zone_id == 2:
+            # Estrategia: OpenStack Nova API
+            logger.info(f"[CP] Strategy: OpenStack (slice_id={request.slice_id})")
+            try:
+                conn = await asyncio.to_thread(get_connection)
+                os_executor = OpenStackComputeExecutor()
+                tasks = [os_executor.deploy_vm(conn, vm, request.slice_id) for vm in request.vms]
+                results = await asyncio.gather(*tasks)
+            except Exception as e:
+                logger.error(f"[CP] Error conectando a OpenStack: {e}")
+                results = [VMResult(vm_id=vm.vm_id, worker_ip=vm.worker_ip, error=str(e)) for vm in request.vms]
+        else:
+            # Estrategia: Linux Cluster (QEMU/KVM local)
+            logger.info(f"[CP] Strategy: Linux Cluster (slice_id={request.slice_id})")
+            tasks = [asyncio.to_thread(self._deploy_vm_sync, vm, request.slice_id) for vm in request.vms]
+            results = await asyncio.gather(*tasks)
 
         ok     = [r for r in results if r.error is None]
         failed = [r for r in results if r.error is not None]
@@ -72,6 +86,12 @@ class Provisioner:
             vms=ok,
             failed_vms=failed,
         )
+
+    async def refresh_console(self, provider_instance_id: str) -> Optional[str]:
+        """Pide a Nova un token de consola noVNC nuevo para una instancia ya desplegada."""
+        conn = await asyncio.to_thread(get_connection)
+        os_executor = OpenStackComputeExecutor()
+        return await os_executor.get_console_token(conn, provider_instance_id)
 
     def _deploy_vm_sync(self, vm: VMSpec, slice_id: str) -> VMResult:
         vnc_port = vm.vnc_port
@@ -94,10 +114,9 @@ class Provisioner:
                     disk_path = executor.create_disk(vm.vm_id, slice_id, vm.image_path, vm.worker_ip, vm.disk_gb)
                     logger.info("[CP]    💽       Disco creado: %s", disk_path)
 
-                    # 2. TAP interfaces
+                    # 2. TAP interfaces (Eliminado: ahora delegado 100% al NetworkOrchestrator)
                     if vm.tap_interfaces:
-                        logger.info("[CP]    🔗 [2/3] Creando %d TAP interface(s)...", len(vm.tap_interfaces))
-                        executor.create_tap_interfaces(vm.tap_interfaces)
+                        logger.info("[CP]    🔗 [2/3] Interfaces TAP provistas por NetworkOrchestrator: %d", len(vm.tap_interfaces))
                         for tap in vm.tap_interfaces:
                             logger.info("[CP]          TAP: %-28s MAC: %s",
                                         getattr(tap, 'tap_name', tap), getattr(tap, 'mac', ''))
@@ -143,13 +162,13 @@ class Provisioner:
     # Destroy
     # ------------------------------------------------------------------
 
-    def destroy(self, request: DestroyRequest, vm_records: List[dict]) -> DestroyReply:
+    async def destroy(self, request: DestroyRequest, vm_records: List[dict]) -> DestroyReply:
         """
         Destruye las VMs de un slice.
         vm_records: lista de dicts con vm_id, worker_ip, ssh_user, ssh_private_key,
                     y tap_interfaces (si aplica). Viene del KV via worker.py.
         """
-        logger.info("Destroy slice=%s, vms=%d", request.slice_id, len(vm_records))
+        logger.info("Destroy slice=%s, vms=%d, AZ=%d", request.slice_id, len(vm_records), request.availability_zone_id)
 
         if not vm_records:
             logger.warning("No hay VMs registradas para slice=%s", request.slice_id)
@@ -159,10 +178,23 @@ class Provisioner:
                 status=DeployStatus.SUCCESS,
             )
 
-        errors = [
-            self._destroy_vm_sync(record, request.slice_id)
-            for record in vm_records
-        ]
+        if request.availability_zone_id == 2:
+            # Estrategia: OpenStack Nova API
+            logger.info(f"[CP] Strategy: OpenStack (slice_id={request.slice_id})")
+            try:
+                conn = await asyncio.to_thread(get_connection)
+                os_executor = OpenStackComputeExecutor()
+                tasks = [os_executor.destroy_vm(conn, record, request.slice_id) for record in vm_records]
+                errors = await asyncio.gather(*tasks)
+            except Exception as e:
+                logger.error(f"[CP] Error conectando a OpenStack durante destroy: {e}")
+                errors = [str(e)] * len(vm_records)
+        else:
+            # Estrategia: Linux Cluster (SSH/QEMU)
+            logger.info(f"[CP] Strategy: Linux Cluster (slice_id={request.slice_id})")
+            tasks = [asyncio.to_thread(self._destroy_vm_sync, record, request.slice_id) for record in vm_records]
+            errors = await asyncio.gather(*tasks)
+
         errors = [e for e in errors if e]
 
         if errors:
@@ -183,19 +215,23 @@ class Provisioner:
         vm_id      = record["vm_id"]
         worker_ip  = record["worker_ip"]
         ssh_user   = record["ssh_user"]
-        ssh_key    = record["ssh_private_key"]
+        ssh_key    = record.get("ssh_private_key") or ""
+        worker_port = int(record.get("worker_port") or 22)
         tap_ifaces = record.get("tap_interfaces", [])
 
+        logger.debug(
+            "[CP][DESTROY] VM=%s  worker=%s:%d  user=%s  key_len=%d",
+            vm_id, worker_ip, worker_port, ssh_user, len(ssh_key)
+        )
+        if not ssh_key.strip():
+            logger.error("[CP][DESTROY] ¡ssh_private_key VACÍA para VM=%s! worker=%s:%d",
+                         vm_id, worker_ip, worker_port)
+
         try:
-            with SSHClient(worker_ip, ssh_user, ssh_key) as ssh:
+            with SSHClient(worker_ip, ssh_user, ssh_key, port=worker_port) as ssh:
                 executor = QEMUExecutor(ssh)
 
                 executor.kill_vm(vm_id, slice_id)
-
-                if tap_ifaces:
-                    from app.models.schemas import TapInterface
-                    taps = [TapInterface(**t) for t in tap_ifaces]
-                    executor.destroy_tap_interfaces(taps)
 
                 executor.delete_disk(vm_id, slice_id)
                 executor.delete_seed_iso(vm_id)  # Limpia el ISO de cloud-init

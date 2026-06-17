@@ -1,8 +1,10 @@
 import json
 import logging
-import uuid # <-- Añadir para el request_id del destroy
+import os
+import uuid
+from datetime import datetime
 from app.database import SessionLocal
-from app.models import Slice, Vlan, Vm, IpPool
+from app.models import Slice, Vlan, Vm, IpPool, Worker
 from app.nats_producer import nats_producer
 
 logger = logging.getLogger("SliceManager.Listener")
@@ -18,6 +20,7 @@ async def nats_result_listener():
         logger.info("="*70)
         logger.info("[LISTENER] 📨 Resultado recibido desde QueueManager vía NATS")
         logger.info("[LISTENER]    slice_id=%s  status=%s", slice_id, status)
+        logger.info("[LISTENER]    vms en payload: %s", data.get("vms"))
 
         db = SessionLocal()
         try:
@@ -30,13 +33,63 @@ async def nats_result_listener():
                                 status, db_slice.status)
                 elif status.lower() == "success":
                     db_slice.status = "ACTIVE"
+                    db_slice.date_deployed = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
                     vms_updated = db.query(Vm).filter(Vm.slice_id == slice_id).update({"state": "ACTIVE"})
                     logger.info("[LISTENER] 🟢 Slice %s → ACTIVE  (%d VMs actualizadas)", slice_id, vms_updated)
+
+                    # Persistir vnc_url y provider_instance_id en columnas SQL y en slice_json
+                    result_vms = data.get("vms", [])
+                    if result_vms:
+                        vnc_url_map            = {}
+                        provider_instance_map  = {}
+                        external_ip_map        = {}
+                        for v in result_vms:
+                            vid = v.get("vm_id")
+                            if v.get("vnc_url"):
+                                vnc_url_map[vid] = v["vnc_url"]
+                            if v.get("provider_instance_id"):
+                                provider_instance_map[vid] = v["provider_instance_id"]
+                            if v.get("external_ip"):
+                                external_ip_map[vid] = v["external_ip"]
+
+                        # Actualizar columnas SQL de cada VM
+                        db_vms = db.query(Vm).filter(Vm.slice_id == slice_id).all()
+                        for db_vm in db_vms:
+                            if db_vm.name in vnc_url_map:
+                                db_vm.vnc_url = vnc_url_map[db_vm.name]
+                                logger.info("[LISTENER] 🖥️  vnc_url guardado para VM %s: %s…",
+                                            db_vm.name, vnc_url_map[db_vm.name][:8])
+                            if db_vm.name in provider_instance_map:
+                                db_vm.provider_instance_id = provider_instance_map[db_vm.name]
+                                logger.info("[LISTENER] 🔑 provider_instance_id guardado para VM %s: %s",
+                                            db_vm.name, provider_instance_map[db_vm.name])
+                            if db_vm.name in external_ip_map:
+                                db_vm.external_ip = external_ip_map[db_vm.name]
+                                logger.info("[LISTENER] 🌐 external_ip guardado para VM %s: %s",
+                                            db_vm.name, external_ip_map[db_vm.name])
+
+                        # Actualizar también slice_json["deployed_vms"]
+                        s_json = db_slice.slice_json or {}
+                        if isinstance(s_json, str):
+                            s_json = json.loads(s_json)
+                        deployed_vms = s_json.get("deployed_vms", [])
+                        for vm_entry in deployed_vms:
+                            vid = vm_entry.get("vm_id")
+                            if vid in vnc_url_map:
+                                vm_entry["vnc_url"] = vnc_url_map[vid]
+                            if vid in provider_instance_map:
+                                vm_entry["provider_instance_id"] = provider_instance_map[vid]
+                            if vid in external_ip_map:
+                                vm_entry["external_ip"] = external_ip_map[vid]
+                        s_json["deployed_vms"] = deployed_vms
+                        db_slice.slice_json = dict(s_json)
+
                     logger.info("[LISTENER] ✅ Despliegue completado exitosamente")
                 else:
                     logger.warning("[LISTENER] ⚠️  Estado '%s' recibido para slice %s. Iniciando Rollback...",
                                    status, slice_id)
                     db_slice.status = "FAILED"
+                    db.query(Vm).filter(Vm.slice_id == slice_id).update({"state": "FAILED"})
 
                     # 1. Liberamos las VLANs de la base de datos local
                     vlans_deleted = db.query(Vlan).filter(Vlan.slice_id == slice_id).delete()
@@ -57,9 +110,37 @@ async def nats_result_listener():
                             logger.info("[LISTENER]    Rollback: %d IPs externas liberadas", len(ip_records))
 
                     # 3. Disparamos la orden de destrucción a NATS para limpiar los workers
+                    # Incluimos vms/links con claves SSH para que CP/NO no fallen con puerto 22
+                    s_json = db_slice.slice_json or {}
+                    if isinstance(s_json, str):
+                        s_json = json.loads(s_json)
+                    all_workers = db.query(Worker).all()
+                    workers_by_ip = {w.ip: w for w in all_workers}
+                    any_worker = next(iter(workers_by_ip.values()), None)
+                    fresh_key = ""
+                    if any_worker and any_worker.ssh_key_path:
+                        key_path = any_worker.ssh_key_path
+                        for p in [key_path, f"/app/keys/{os.path.basename(key_path)}"]:
+                            if os.path.exists(p):
+                                try:
+                                    fresh_key = open(p).read()
+                                    break
+                                except Exception:
+                                    pass
+                    deployed_vms   = s_json.get("deployed_vms", [])
+                    deployed_links = s_json.get("deployed_links", [])
+                    if fresh_key:
+                        for vm in deployed_vms:
+                            vm["ssh_private_key"] = fresh_key
+                        for link in deployed_links:
+                            for side in ("vm1", "vm2"):
+                                link[f"{side}_ssh_private_key"] = fresh_key
                     rollback_payload = {
-                        "slice_id": str(slice_id),
-                        "request_id": f"req-rollback-{uuid.uuid4().hex[:8]}"
+                        "slice_id":             str(slice_id),
+                        "request_id":           f"req-rollback-{uuid.uuid4().hex[:8]}",
+                        "availability_zone_id": db_slice.availability_zone_id or 1,
+                        "vms":                  deployed_vms,
+                        "links":                deployed_links,
                     }
                     await nats_producer.publish_destroy(rollback_payload)
                     logger.info("[LISTENER] 🧹 Orden de limpieza (Rollback) enviada para slice %s → FAILED", slice_id)

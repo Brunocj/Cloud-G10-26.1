@@ -27,20 +27,29 @@ class VMSpec(BaseModel):
     """Especificación de una VM individual a desplegar."""
     vm_id:           str                 = Field(..., description="ID único de la VM")
     worker_ip:       str                 = Field(..., description="IP del gateway SSH para este worker")
-    worker_port:     int                 = Field(default=22, description="Puerto SSH en el gateway (ej: 5811-5814)")
-    ssh_user:        str                 = Field(..., description="Usuario SSH del worker")
-    ssh_private_key: str                 = Field(..., description="Llave privada PEM como string")
+    worker_port:     Optional[int]       = Field(default=22, description="Puerto SSH en el gateway (ej: 5811-5814)")
+    ssh_user:        Optional[str]       = Field(default=None, description="Usuario SSH del worker")
+    ssh_private_key: Optional[str]       = Field(default=None, description="Llave privada PEM como string")
     vcpus:           int                 = Field(..., ge=1)
-    ram_mb:          int                 = Field(..., ge=128)
-    disk_gb: float
-    image_path: str # 🔥 Ahora recibimos la ruta completa, no solo el nombre
-    vnc_port: int
+    ram_mb:          float               = Field(..., ge=128)
+    disk_gb:         float               = Field(...)
+    image_path:      str                 = Field(...)
+    vnc_port:        Optional[int]       = Field(default=None)
+    vnc_display:     Optional[int]       = Field(default=None)
 
     # --- NUEVOS CAMPOS DEL R5 ---
     internet_access: int                 = Field(default=0, description="1 si tiene salida a internet")
     external_ip:     Optional[str]       = Field(default=None, description="IP pública/VPN asignada")
     internal_ip:     Optional[str]       = Field(default=None, description="IP interna asignada por el Queue Manager para NAT/Gateway")
     # ----------------------------
+
+    # --- NUEVOS CAMPOS OPENSTACK ---
+    selected_host:   Optional[str]       = Field(default=None, description="Host físico asignado (Nova hypervisor)")
+    network_ports:   Optional[dict]      = Field(default_factory=dict, description="Puertos lógicos Neutron {provider_port_id, ...}")
+    # Nombres legibles para recursos en el proveedor
+    vm_label:        Optional[str]       = Field(default=None, description="Etiqueta legible de la VM (del canvas)")
+    slice_name:      Optional[str]       = Field(default=None, description="Nombre del slice")
+    # -------------------------------
 
     # Credenciales cloud-init
     vm_user:     Optional[str] = Field(default=None, description="Usuario a crear en la VM (default: nombre de imagen)")
@@ -58,6 +67,10 @@ class VMResult(BaseModel):
     pid:       Optional[int] = None
     vnc_port:  Optional[int] = None
     error:     Optional[str] = None
+    # Campos para OpenStack
+    provider_instance_id: Optional[str] = None
+    vnc_url:              Optional[str] = None
+    external_ip:          Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -66,15 +79,17 @@ class VMResult(BaseModel):
 
 class DeployRequest(BaseModel):
     """Mensaje recibido en compute.deploy"""
-    slice_id:   str          = Field(...)
-    request_id: str          = Field(...)
-    vms:        List[VMSpec] = Field(..., min_length=1)
+    slice_id:             str          = Field(...)
+    request_id:           str          = Field(...)
+    availability_zone_id: int          = Field(default=1, description="1=Linux Cluster, 2=OpenStack")
+    vms:                  List[VMSpec] = Field(..., min_length=1)
 
 
 class DestroyRequest(BaseModel):
     """Mensaje recibido en compute.destroy"""
-    slice_id:   str = Field(...)
-    request_id: str = Field(...)
+    slice_id:             str = Field(...)
+    request_id:           str = Field(...)
+    availability_zone_id: int = Field(default=1, description="1=Linux Cluster, 2=OpenStack")
 
 
 # ---------------------------------------------------------------------------

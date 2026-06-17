@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 
 from app.models import PlacementRequest, PlacementResponse
 from app.placement_engine import run_placement
+from app.nats_responder import nats_responder
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -29,7 +30,13 @@ logger = logging.getLogger("vm-placement")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("VM Placement service starting up.")
+    # Conectar al bus NATS para escuchar slice.placement.process (BYOS)
+    try:
+        await nats_responder.connect()
+    except Exception as exc:
+        logger.warning("[NATS] No se pudo conectar al bus NATS: %s (solo HTTP disponible)", exc)
     yield
+    await nats_responder.disconnect()
     logger.info("VM Placement service shutting down.")
 
 
@@ -67,7 +74,7 @@ async def placement(request: PlacementRequest):
     timeout_seconds = max(float(n), 1.0)  # mínimo 1 segundo
 
     logger.info(
-        f"[{request.slice_id}] Placement request — zone='{request.availability_zone}' "
+        f"[{request.slice_id}] Placement request — az_id={request.availability_zone_id} "
         f"vms={n} workers={len(request.workers)} timeout={timeout_seconds}s"
     )
 
@@ -78,6 +85,7 @@ async def placement(request: PlacementRequest):
             request.vms,
             request.workers,
             timeout_seconds,
+            request.availability_zone_id,   # ← Strategy selector (BYOS)
         )
     except Exception as exc:
         logger.error(f"[{request.slice_id}] Unexpected error in placement engine: {exc}", exc_info=True)

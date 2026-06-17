@@ -51,6 +51,24 @@ class NATSProducer:
             logger.error(f"❌ Error publicando en NATS: {str(e)}")
             return False
         
+    async def request_console_refresh(self, provider_instance_id: str, timeout: float = 10.0) -> dict:
+        """
+        Pide al Compute Provisioner un token de consola noVNC nuevo para una
+        instancia OpenStack ya desplegada (request/reply directo, sin JetStream).
+        """
+        if not self.nc or not self.nc.is_connected:
+            return {"vnc_url": None, "error": "NATS no conectado"}
+        try:
+            payload = json.dumps({"provider_instance_id": provider_instance_id}).encode()
+            msg = await self.nc.request("compute.console.refresh", payload, timeout=timeout)
+            return json.loads(msg.data.decode())
+        except TimeoutError:
+            logger.error("⏱️ Timeout esperando refresh de consola del Compute Provisioner")
+            return {"vnc_url": None, "error": "Timeout esperando al Compute Provisioner"}
+        except Exception as e:
+            logger.error(f"❌ Error pidiendo refresh de consola: {e}")
+            return {"vnc_url": None, "error": str(e)}
+
     async def publish_destroy(self, payload: dict):
         """
         Publica el mensaje en el canal 'slice.destroy' para desmantelar la infraestructura.

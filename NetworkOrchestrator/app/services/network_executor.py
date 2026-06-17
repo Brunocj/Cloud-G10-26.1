@@ -14,23 +14,48 @@ class NetworkExecutor:
     def __init__(self, worker_ip: str):
         self.worker_ip = worker_ip
 
+    def configure_taps_batch(self, ssh: SSHClient, tap_vlan_pairs: list[tuple[str, int]]) -> None:
+        """Configura N TAPs en exactamente 2 llamadas SSH independientemente de N.
+
+        tap_vlan_pairs: lista de (tap_name, vlan_id)
+
+        Llamada 1 — crear y levantar todos los TAPs en un solo bash:
+          bash -c 'ip tuntap add tap1 || true; ip link set tap1 up; ...'
+
+        Llamada 2 — OVS batch: add-br + N×(add-port + set tag) en un solo ovs-vsctl:
+          ovs-vsctl --may-exist add-br br-int
+                    -- --may-exist add-port br-int tap1 -- set port tap1 tag=100
+                    -- --may-exist add-port br-int tap2 -- set port tap2 tag=200 ...
+        """
+        if not tap_vlan_pairs:
+            return
+
+        # 1. Crear y levantar todos los TAPs en un único shell one-liner
+        tap_cmds = "; ".join(
+            f"sudo ip tuntap add dev {tap} mode tap 2>/dev/null || true; sudo ip link set {tap} up || true"
+            for tap, _ in tap_vlan_pairs
+        )
+        ssh.exec(f"bash -c '{tap_cmds}'")
+
+        # 2. OVS: crear br-int + add-port + set tag para TODOS los TAPs en una sola llamada
+        ovs_parts = ["--may-exist add-br br-int"]
+        for tap, vlan in tap_vlan_pairs:
+            ovs_parts.append(f"--may-exist add-port br-int {tap}")
+            ovs_parts.append(f"set port {tap} tag={vlan}")
+        exit_code, _, err = ssh.exec("sudo ovs-vsctl " + " -- ".join(ovs_parts))
+        if exit_code != 0:
+            raise RuntimeError(f"Fallo OVS batch en {self.worker_ip}: {err}")
+
+        for tap, vlan in tap_vlan_pairs:
+            logger.info(f"[{self.worker_ip}] Enlace configurado: {tap} -> VLAN {vlan}")
+
+    def ensure_br_int(self, ssh: SSHClient) -> None:
+        """Legado — el batch ya incluye add-br. Se mantiene por compatibilidad."""
+        pass
+
     def configure_vlan_and_port(self, ssh: SSHClient, tap_interface: str, vlan_id: int) -> None:
-        """Conecta el TAP al switch virtual y le asigna la VLAN (Aislamiento Capa 2)."""
-        
-        # 1. Asegurar que el switch de integración exista
-        ssh.exec("sudo ovs-vsctl --may-exist add-br br-int")
-        
-        # 2. Enchufar la interfaz virtual (TAP) al switch
-        exit_code, _, err = ssh.exec(f"sudo ovs-vsctl --may-exist add-port br-int {tap_interface}")
-        if exit_code != 0:
-            raise RuntimeError(f"Fallo al enchufar {tap_interface} a OVS: {err}")
-            
-        # 3. Asignar la VLAN de aislamiento para el slice
-        exit_code, _, err = ssh.exec(f"sudo ovs-vsctl set port {tap_interface} tag={vlan_id}")
-        if exit_code != 0:
-            raise RuntimeError(f"Fallo al configurar VLAN {vlan_id} en {tap_interface}: {err}")
-            
-        logger.info(f"[{self.worker_ip}] Enlace configurado: {tap_interface} -> VLAN {vlan_id}")
+        """Versión unitaria — usa configure_taps_batch internamente."""
+        self.configure_taps_batch(ssh, [(tap_interface, vlan_id)])
 
     def apply_security_groups(self, ssh: SSHClient, tap_interface: str, rules: list[SecurityRule]) -> None:
         """Aplica el firewall básico usando iptables."""
@@ -50,12 +75,19 @@ class NetworkExecutor:
                 logger.debug(f"[{self.worker_ip}] FW Permitido: {rule.protocol}/{rule.allow_port} -> {tap_interface}")
 
     def destroy_port(self, ssh: SSHClient, tap_interface: str) -> None:
-        """Desconecta el TAP del switch virtual durante la destrucción del slice."""
+        """Desconecta el TAP del switch virtual y lo elimina del OS durante la destrucción del slice."""
         exit_code, _, err = ssh.exec(f"sudo ovs-vsctl --if-exists del-port br-int {tap_interface}")
         if exit_code == 0:
             logger.info(f"[{self.worker_ip}] Puerto {tap_interface} eliminado de OVS")
         else:
             logger.warning(f"[{self.worker_ip}] Error borrando puerto OVS {tap_interface}: {err}")
+            
+        # 🔥 ELIMINAR EL TAP DEL SO (Asumimos responsabilidad total)
+        exit_code_ip, _, err_ip = ssh.exec(f"sudo ip tuntap del dev {tap_interface} mode tap || true")
+        if exit_code_ip == 0:
+            logger.info(f"[{self.worker_ip}] TAP {tap_interface} eliminada físicamente del OS")
+        else:
+            logger.warning(f"[{self.worker_ip}] Error eliminando TAP {tap_interface} del OS: {err_ip}")
 
     def configure_gateway_and_nat(self, ssh: SSHClient, slice_id: str, vms: list, mgmt_vlan: int) -> None:
         """

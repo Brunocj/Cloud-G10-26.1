@@ -8,3 +8,6 @@ SQLAlchemy==2.0.30
 pymysql==1.1.0
 cryptography==42.0.5
 paramiko==3.4.0
+# OpenStack SDK — interacción con Nova/Glance vía API (NO SSH)
+openstacksdk>=2.0.0
+PySocks>=1.7.1

@@ -68,6 +68,11 @@ class NATSQueueClient:
         await self._nc.subscribe(settings.QUEUE_DESTROY, cb=handler)
         logger.info(f"Suscrito a '{settings.QUEUE_DESTROY}'")
 
+    async def subscribe_console_refresh(self, handler) -> None:
+        """Suscribe al subject compute.console.refresh para tokens VNC on-demand."""
+        await self._nc.subscribe(settings.QUEUE_CONSOLE_REFRESH, cb=handler)
+        logger.info(f"Suscrito a '{settings.QUEUE_CONSOLE_REFRESH}'")
+
     # ── Respuesta al Queue Manager ────────────────────────────────────────────
 
     async def reply(self, reply_subject: str, payload: dict) -> None:

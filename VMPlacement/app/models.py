@@ -17,15 +17,18 @@ class WorkerState(BaseModel):
 
 
 class PlacementRequest(BaseModel):
-    slice_id: str
-    availability_zone: str  # ID de la zona como string
-    vms: List[VMSpec]
-    workers: List[WorkerState]
+    slice_id:             str
+    availability_zone_id: int = 1   # 1=Linux Cluster, 2=OpenStack (BYOS)
+    vms:     List[VMSpec]
+    workers: List[WorkerState] = []  # Vacío cuando az_id=OpenStack (se consulta dinámicamente)
 
 
 class PlacementEntry(BaseModel):
-    vm_id: str
-    worker_id: int
+    vm_id:         str
+    worker_id:     int    # ID numérico del worker (Linux) o índice del hipervisor
+    selected_host: str    # Nombre físico del host ganador (BYOS manifiesto de salida)
+                          # Linux:     hostname del worker (ej: worker-2)
+                          # OpenStack: nombre del hipervisor Nova (ej: compute-node-1)
 
 
 class PlacementResponse(BaseModel):

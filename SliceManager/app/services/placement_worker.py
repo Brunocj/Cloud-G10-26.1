@@ -154,7 +154,7 @@ async def process_placement_worker():
                 logger.info("[PLACEMENT]    VM: %-20s vcpus=%.1f ram_gb=%.2f disco_gb=%.1f",
                             dv['vm_id'], dv['vcpus'], dv['ram_gb'], dv['disco_gb'])
 
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
                 response = await client.post(VM_PLACEMENT_URL, json=payload)
                 if response.status_code == 422:
                     logger.error("[PLACEMENT] 422 detalle: %s", response.text)
@@ -175,22 +175,40 @@ async def process_placement_worker():
                 placement_map = placement_result.get("placement_map", [])
 
                 def get_ssh_key(filepath: str) -> str:
-                    if not os.path.exists(filepath):
-                        logger.warning(f"[PLACEMENT] ⚠️ Clave SSH no encontrada en {filepath}. Se enviará vacía.")
+                    if not filepath:
+                        logger.error("[PLACEMENT] ❌ ssh_key_path es None/vacío en BD para este worker.")
                         return ""
-                    with open(filepath, "r") as key_file:
-                        return key_file.read()
+                    filename = os.path.basename(filepath)
+                    container_path = f"/app/keys/{filename}"
+                    candidates = [filepath, container_path]
+                    for path in candidates:
+                        exists = os.path.exists(path)
+                        logger.info("[PLACEMENT] 🔑 Buscando clave en '%s' → existe=%s", path, exists)
+                        if exists:
+                            try:
+                                content = open(path, "r").read()
+                                logger.info("[PLACEMENT] ✅ Clave leída de '%s' len=%d", path, len(content))
+                                return content
+                            except Exception as exc:
+                                logger.error("[PLACEMENT] ❌ Error leyendo '%s': %s", path, exc)
+                    # Listar /app/keys para diagnóstico
+                    try:
+                        keys_dir = "/app/keys"
+                        files = os.listdir(keys_dir) if os.path.isdir(keys_dir) else []
+                        logger.error("[PLACEMENT] ❌ Clave no encontrada. Archivos en %s: %s", keys_dir, files)
+                    except Exception as exc:
+                        logger.error("[PLACEMENT] ❌ No se pudo listar /app/keys: %s", exc)
+                    return ""
 
-                # Nueva topología: App VM → gateway (10.20.11.119) → workers
-                # Clave SSH compartida en ruta absoluta (montada vía docker volume)
-                GATEWAY_IP = "10.20.11.119"
-                _KEY = "/app/keys/id_ed25519"
-                server_inventory = {
-                    1: {"ip": GATEWAY_IP, "port": 5811, "user": "ubuntu", "key_path": _KEY},
-                    2: {"ip": GATEWAY_IP, "port": 5812, "user": "ubuntu", "key_path": _KEY},
-                    3: {"ip": GATEWAY_IP, "port": 5813, "user": "ubuntu", "key_path": _KEY},
-                    4: {"ip": GATEWAY_IP, "port": 5814, "user": "ubuntu", "key_path": _KEY},
-                }
+                # Construir el inventario leyendo credenciales SSH desde la BD
+                server_inventory = {}
+                for w in workers_zona:
+                    server_inventory[w.id] = {
+                        "ip": w.ip,
+                        "port": getattr(w, "ssh_port", None),
+                        "user": getattr(w, "ssh_user", None),
+                        "key_path": getattr(w, "ssh_key_path", None)
+                    }
 
                 slice_json = db_slice.slice_json
                 if isinstance(slice_json, str):
@@ -295,9 +313,9 @@ async def process_placement_worker():
                     if not vm.vnc_port:
                         while True:
                             candidato = random.randint(5901, 5999)
-                            if candidato not in vnc_por_worker[worker_id]:
+                            if candidato not in vnc_por_worker.get(worker_id, set()):
                                 vm.vnc_port = candidato
-                                vnc_por_worker[worker_id].add(candidato)
+                                vnc_por_worker.setdefault(worker_id, set()).add(candidato)
                                 logger.info("[PLACEMENT]    VNC asignado: VM %-20s → Worker-%d puerto %d",
                                             vm.name, worker_id, candidato)
                                 break
@@ -305,16 +323,22 @@ async def process_placement_worker():
                     image_obj = db.query(Image).filter(Image.id == vm.image_id).first()
                     img_path  = image_obj.path if image_obj and image_obj.path else ""
 
+                    nodo_ui = next((n for n in slice_json.get("nodes", []) if n.get("id") == vm.name), {})
+                    if not img_path:
+                        img_path = nodo_ui.get("image", "")
+
                     ip_interna_asignada = f"10.{octeto_2}.{octeto_3}.{ip_host_counter}"
                     ip_host_counter += 1
 
-                    nodo_ui          = next((n for n in slice_json.get("nodes", []) if n.get("id") == vm.name), {})
-                    image_name_lower = (image_obj.name if image_obj else "ubuntu").lower().split("-")[0].split(".")[0]
+                    image_name = image_obj.name if image_obj else nodo_ui.get("image", "ubuntu")
+                    image_name_lower = image_name.lower().split("-")[0].split(".")[0]
                     vm_user     = nodo_ui.get("vm_user")     or image_name_lower
                     vm_password = nodo_ui.get("vm_password") or "pucp2026"
 
                     vms_payload.append({
                         "vm_id":           vm.name,
+                        "vm_label":        nodo_ui.get("label") or vm.name,
+                        "slice_name":      db_slice.name or str(slice_id),
                         "worker_ip":       server_info.get("ip", "0.0.0.0"),
                         "worker_port":     server_info.get("port", 22),
                         "ssh_user":        server_info.get("user", "ubuntu"),
@@ -340,10 +364,12 @@ async def process_placement_worker():
                             slice_id, len(vms_payload), len(network_links))
 
                 queue_manager_payload = {
-                    "slice_id":   str(slice_id),
-                    "request_id": f"req-{uuid.uuid4().hex[:8]}",
-                    "vms":        vms_payload,
-                    "links":      network_links
+                    "slice_id":             str(slice_id),
+                    "request_id":           f"req-{uuid.uuid4().hex[:8]}",
+                    "availability_zone_id": zone_id,
+                    "vms":                  vms_payload,
+                    "links":                network_links,
+                    "workers":              servers_state
                 }
 
                 slice_json = db_slice.slice_json
@@ -354,10 +380,11 @@ async def process_placement_worker():
 
                 slice_json["deployed_vms"]   = vms_payload
                 slice_json["deployed_links"] = network_links
-                db_slice.slice_json = dict(slice_json)
+                db_slice.slice_json           = dict(slice_json)
+                db_slice.availability_zone_id = zone_id
 
-                logger.info("[PLACEMENT %s] Guardando deployed_vms (%d) y deployed_links (%d)",
-                            slice_id, len(vms_payload), len(network_links))
+                logger.info("[PLACEMENT %s] Guardando deployed_vms (%d), deployed_links (%d), az_id=%s",
+                            slice_id, len(vms_payload), len(network_links), zone_id)
                 db.commit()
                 logger.info("[PLACEMENT] 💾 deployed_vms/links persistidos en BD")
 

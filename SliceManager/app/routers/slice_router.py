@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.auth import CurrentUser, get_current_user, require_roles
 from app.database import get_db
-from app.models import Image, IpPool, Slice, Vm, Worker
+from app.models import AvailabilityZone, Image, IpPool, Slice, Vm, Worker
 from app.repositories.slice_repo import SliceRepository
 from app.schemas import DraftSaveRequest
 
@@ -38,11 +39,14 @@ def _serialize_slice(t: Slice) -> dict:
                     node["worker_ip"]   = d_vm.get("worker_ip")
                     node["worker_port"] = d_vm.get("worker_port")   # puerto SSH al gateway
                     node["vnc_port"]    = d_vm.get("vnc_port")
+                    node["vnc_url"]     = d_vm.get("vnc_url")       # token VNC de OpenStack (None en Linux Cluster)
+                    node["external_ip"] = d_vm.get("external_ip")   # IP externa asignada (Linux Cluster o puerto provider de OpenStack)
 
     return {
         "id":        t.id,
         "name":      t.name if t.name else f"Slice {t.id}",
         "status":    t.status,
+        "availability_zone_id": t.availability_zone_id,
         "owner_id":  t.creator_id,
         "nodeCount": len(nodes),
         "edgeCount": len(edges),
@@ -112,6 +116,10 @@ def create_draft(
             ext_ip     = vm_data.get("external_ip", None)
             int_access = 1 if ext_ip else int(vm_data.get("internet_access", 0))
 
+            img_id = vm_data.get("image_id")
+            if img_id is not None and int(img_id) < 0:
+                img_id = None
+
             nueva_vm = Vm(
                 name=vm_data.get("id"),
                 vcore=int(vm_data.get("vcores", 1)),
@@ -119,7 +127,7 @@ def create_draft(
                 disk=float(vm_data.get("disk", 5.0)),
                 state="DRAFT",
                 slice_id=slice_creado.id,
-                image_id=vm_data.get("image_id"),
+                image_id=img_id,
                 worker_id=asignado.id if asignado else None,
                 external_ip=ext_ip,
                 internet_access=int_access,
@@ -132,12 +140,15 @@ def create_draft(
             db.flush()
 
             if ext_ip:
-                ip_record = db.query(IpPool).filter(
-                    IpPool.ip_address == ext_ip, IpPool.is_used == 0
-                ).first()
-                if ip_record:
-                    ip_record.is_used = 1
-                    ip_record.vm_id   = nueva_vm.id
+                ip_record = db.query(IpPool).filter(IpPool.ip_address == ext_ip).first()
+                if not ip_record:
+                    db.rollback()
+                    raise HTTPException(status_code=400, detail=f"La IP '{ext_ip}' no existe en el pool.")
+                if ip_record.is_used and ip_record.vm_id != nueva_vm.id:
+                    db.rollback()
+                    raise HTTPException(status_code=409, detail=f"La IP '{ext_ip}' ya está en uso por otra VM.")
+                ip_record.is_used = 1
+                ip_record.vm_id   = nueva_vm.id
 
         slice_creado.slice_json = {
             "nodes": nodes_list,
@@ -179,8 +190,6 @@ def update_draft(
     # ── Autorización de negocio ────────────────────────────────────
     _assert_owner_or_admin(db_slice, user)
 
-    db_slice.slice_json = {"edges": request.slice_json.get("edges", [])}
-
     # Liberar IPs antes de destruir VMs viejas
     vms_antiguas = db.query(Vm).filter(Vm.slice_id == slice_id).all()
     for v in vms_antiguas:
@@ -198,6 +207,10 @@ def update_draft(
         ext_ip     = vm_data.get("external_ip", None)
         int_access = 1 if ext_ip else int(vm_data.get("internet_access", 0))
 
+        img_id = vm_data.get("image_id")
+        if img_id is not None and int(img_id) < 0:
+            img_id = None
+
         nueva_vm = Vm(
             name=vm_data.get("id"),
             vcore=int(vm_data.get("vcores", 1)),
@@ -205,7 +218,7 @@ def update_draft(
             disk=float(vm_data.get("disk", 5.0)),
             state="DRAFT",
             slice_id=slice_id,
-            image_id=vm_data.get("image_id"),
+            image_id=img_id,
             worker_id=vm_data.get("worker_id"),
             external_ip=ext_ip,
             internet_access=int_access,
@@ -213,6 +226,23 @@ def update_draft(
         db.add(nueva_vm)
         db.flush()
 
+        if ext_ip:
+            ip_record = db.query(IpPool).filter(IpPool.ip_address == ext_ip).first()
+            if not ip_record:
+                db.rollback()
+                raise HTTPException(status_code=400, detail=f"La IP '{ext_ip}' no existe en el pool.")
+            if ip_record.is_used and ip_record.vm_id != nueva_vm.id:
+                db.rollback()
+                raise HTTPException(status_code=409, detail=f"La IP '{ext_ip}' ya está en uso por otra VM.")
+            ip_record.is_used = 1
+            ip_record.vm_id   = nueva_vm.id
+
+    # Guardar slice_json con nodes + edges DESPUÉS del loop,
+    # igual que create_draft — así _serialize_slice puede leer los nodos.
+    db_slice.slice_json = {
+        "nodes": [vm_data for vm_data in request.slice_json.get("nodes", [])],
+        "edges": request.slice_json.get("edges", []),
+    }
     db.commit()
     logger.info(
         "Borrador actualizado: slice_id=%s por user=%s…",
@@ -223,15 +253,6 @@ def update_draft(
 
 # ── Utils (sin restricción de rol — cualquier usuario autenticado) ─────────────
 
-@router.get("/utils/images", status_code=200)
-def get_available_images(
-    db:   Session     = Depends(get_db),
-    user: CurrentUser = Depends(get_current_user),   # noqa: autenticado
-):
-    imagenes = db.query(Image).all()
-    if not imagenes:
-        return [{"id": 0, "name": "Ubuntu 22.04 LTS (Fallback)"}]
-    return [{"id": img.id, "name": img.name} for img in imagenes]
 
 
 @router.get("/utils/workers", status_code=200)
@@ -245,10 +266,56 @@ def get_available_workers(
     return [w.name for w in workers]
 
 
-@router.get("/utils/available-ips", status_code=200)
-def get_available_ips(
+@router.get("/utils/availability-zones", status_code=200)
+def get_availability_zones(
     db:   Session     = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),   # noqa: autenticado
 ):
-    ips = db.query(IpPool).filter(IpPool.is_used == 0).all()
-    return [ip.ip_address for ip in ips]
+    zones = db.query(AvailabilityZone).all()
+    return [{"id": z.id, "name": z.name} for z in zones]
+
+
+@router.get("/utils/available-ips", status_code=200)
+def get_available_ips(
+    zone_id: Optional[int] = None,
+    db:      Session     = Depends(get_db),
+    user:    CurrentUser = Depends(get_current_user),   # noqa: autenticado
+):
+    query = db.query(IpPool).filter(IpPool.is_used == 0)
+    if zone_id is not None:
+        query = query.filter(IpPool.availability_zone_id == zone_id)
+    ips = query.all()
+    return sorted(
+        (ip.ip_address for ip in ips),
+        key=lambda addr: [int(octet) for octet in addr.split(".")],
+    )
+
+
+@router.get("/{slice_id}/vms/{vm_id}/console", status_code=200)
+async def get_vm_console(
+    slice_id: int,
+    vm_id:    str,
+    db:       Session     = Depends(get_db),
+    user:     CurrentUser = Depends(get_current_user),
+):
+    """
+    Pide un token de consola noVNC nuevo para una VM de OpenStack.
+    Los tokens de nova-novncproxy expiran/se consumen rápido, así que se
+    solicita uno fresco cada vez que el usuario abre la consola, en vez de
+    reusar el guardado en el momento del deploy.
+    """
+    db_slice = db.query(Slice).filter(Slice.id == slice_id).first()
+    if not db_slice:
+        raise HTTPException(status_code=404, detail="Slice no encontrado")
+    if not user.is_owner_or_above(db_slice.creator_id, min_role="admin"):
+        raise HTTPException(status_code=403, detail="No tienes permiso para acceder a este slice.")
+
+    db_vm = db.query(Vm).filter(Vm.slice_id == slice_id, Vm.name == vm_id).first()
+    if not db_vm or not db_vm.provider_instance_id:
+        raise HTTPException(status_code=404, detail="La VM no tiene una instancia de OpenStack asociada.")
+
+    from app.nats_producer import nats_producer
+    result = await nats_producer.request_console_refresh(db_vm.provider_instance_id)
+    if not result.get("vnc_url"):
+        raise HTTPException(status_code=502, detail=result.get("error") or "No se pudo obtener la consola.")
+    return {"vnc_url": result["vnc_url"]}

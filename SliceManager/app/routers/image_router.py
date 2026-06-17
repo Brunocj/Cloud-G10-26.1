@@ -3,7 +3,7 @@
 Router para gestión de imágenes de VMs.
 
 Funcionalidades:
-  - GET  /utils/images          → Lista todas las imágenes
+  - GET  /utils/images          → Lista catálogo híbrido (BD local + OpenStack Glance)
   - GET  /utils/images/unused   → Lista imágenes sin VMs activas (candidatas a borrar)
   - POST /utils/images/upload   → Sube un archivo .qcow2/.img al NFS y registra en BD
   - DELETE /utils/images/{id}   → Elimina imagen (verifica que no esté en uso)
@@ -12,14 +12,17 @@ Funcionalidades:
 import logging
 import os
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from typing import List, Optional
 
 import paramiko
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.database import get_db
-from app.models import Image, Vm
+from app.models import AvailabilityZone, Image, Vm
+from app.schemas import ImageResponse
 from app.services.gc_scheduler import run_gc_cycle
 from app.auth import CurrentUser, get_current_user, require_roles
 
@@ -41,6 +44,9 @@ _WORKER_INVENTORY = {
 
 # Estados que se consideran "activos" (la imagen no se puede borrar)
 _ACTIVE_VM_STATES = ("DRAFT", "PROVISIONING", "ACTIVE", "PENDING_APPROVAL")
+
+# ID de zona OpenStack (se asume id=2 si no se configura via env)
+OPENSTACK_AZ_ID = int(os.getenv("OPENSTACK_AZ_ID", "2"))
 
 
 # ── Helpers SSH ──────────────────────────────────────────────────────────────
@@ -75,38 +81,231 @@ def _delete_file_via_ssh(file_path: str) -> None:
         logger.warning("No se pudo borrar %s via SSH: %s", file_path, exc)
 
 
-# ── Endpoints ────────────────────────────────────────────────────────────────
+# ── OpenStack Glance helper ───────────────────────────────────────────────────
 
-@router.get("/", status_code=200)
-def list_images(db: Session = Depends(get_db), current_user: CurrentUser = Depends(get_current_user)):
-    """Lista todas las imágenes con información de uso (filtrado por rol/dueño)."""
-    if current_user.can_manage_all():
-        images = db.query(Image).filter(Image.is_general.isnot(None)).all()
-    else:
-        images = db.query(Image).filter(
-            Image.is_general.isnot(None),
-            (Image.is_general == 1) | (Image.user_id == current_user.user_id)
-        ).all()
+def _fetch_openstack_images() -> List[dict]:
+    """
+    Se conecta a OpenStack Glance usando openstacksdk y devuelve la lista
+    de imágenes disponibles como dicts normalizados.
 
-    if not images:
+    Lee las credenciales desde variables de entorno:
+      OS_AUTH_URL, OS_USERNAME, OS_PASSWORD, OS_PROJECT_NAME,
+      OS_USER_DOMAIN_NAME, OS_PROJECT_DOMAIN_NAME
+
+    Si OpenStack está caído o faltan credenciales, retorna lista vacía
+    y loguea el error (no lanza excepción — fail-safe).
+    """
+    try:
+        import openstack  # openstacksdk
+
+        auth_url = os.getenv("OS_AUTH_URL")
+        if not auth_url:
+            logger.warning("[OpenStack] OS_AUTH_URL no configurado — omitiendo imágenes de OpenStack")
+            return []
+
+        conn = openstack.connect(
+            auth_url=auth_url,
+            username=os.getenv("OS_USERNAME", "admin"),
+            password=os.getenv("OS_PASSWORD", ""),
+            project_name=os.getenv("OS_PROJECT_NAME", "admin"),
+            user_domain_name=os.getenv("OS_USER_DOMAIN_NAME", "Default"),
+            project_domain_name=os.getenv("OS_PROJECT_DOMAIN_NAME", "Default"),
+        )
+
+        images = []
+        for img in conn.image.images():
+            images.append({
+                "name":       img.name,
+                "os_id":      img.id,           # UUID de Glance
+                "status":     img.status,
+                "size":       img.size,
+                "visibility": getattr(img, "visibility", "private"),
+            })
+
+        logger.info("[OpenStack] Glance devolvió %d imágenes", len(images))
+        return images
+
+    except Exception as exc:
+        logger.error("[OpenStack] Error conectando a Glance: %s", exc)
         return []
 
+def _upload_openstack_image(name: str, filepath: str, is_general: int) -> str:
+    """
+    Sube un archivo local a OpenStack Glance y devuelve el UUID generado.
+    Usa visibilidad 'private' porque el control de acceso global (is_general)
+    se gestiona en nuestra propia BD, y OpenStack solo requiere acceso del admin.
+    """
+    import openstack
+
+    auth_url = os.getenv("OS_AUTH_URL")
+    if not auth_url:
+        raise ValueError("OS_AUTH_URL no configurado")
+
+    conn = openstack.connect(
+        auth_url=auth_url,
+        username=os.getenv("OS_USERNAME", "admin"),
+        password=os.getenv("OS_PASSWORD", ""),
+        project_name=os.getenv("OS_PROJECT_NAME", "admin"),
+        user_domain_name=os.getenv("OS_USER_DOMAIN_NAME", "Default"),
+        project_domain_name=os.getenv("OS_PROJECT_DOMAIN_NAME", "Default"),
+    )
+
+    # Creamos el registro en Glance (visibility='private' por defecto es suficiente)
+    logger.info("[OpenStack] Creando imagen en Glance: %s", name)
+    image = conn.image.create_image(
+        name=name,
+        disk_format='qcow2',
+        container_format='bare',
+        visibility='private'
+    )
+
+    # Subimos el archivo binario
+    logger.info("[OpenStack] Subiendo archivo a Glance (UUID=%s)...", image.id)
+    with open(filepath, 'rb') as f:
+        conn.image.upload_image(image.id, f)
+    
+    logger.info("[OpenStack] Subida a Glance finalizada exitosamente.")
+    return image.id
+
+def _delete_openstack_image(glance_id: str) -> None:
+    """
+    Elimina una imagen de OpenStack Glance por su UUID.
+    """
+    import openstack
+
+    auth_url = os.getenv("OS_AUTH_URL")
+    if not auth_url:
+        logger.warning("[OpenStack] OS_AUTH_URL no configurado, no se borrará la imagen %s de Glance", glance_id)
+        return
+
+    try:
+        conn = openstack.connect(
+            auth_url=auth_url,
+            username=os.getenv("OS_USERNAME", "admin"),
+            password=os.getenv("OS_PASSWORD", ""),
+            project_name=os.getenv("OS_PROJECT_NAME", "admin"),
+            user_domain_name=os.getenv("OS_USER_DOMAIN_NAME", "Default"),
+            project_domain_name=os.getenv("OS_PROJECT_DOMAIN_NAME", "Default"),
+        )
+        logger.info("[OpenStack] Eliminando imagen %s de Glance...", glance_id)
+        conn.image.delete_image(glance_id)
+        logger.info("[OpenStack] Imagen eliminada de Glance.")
+    except Exception as exc:
+        logger.error("[OpenStack] Error eliminando imagen de Glance: %s", exc)
+
+
+# ── Endpoints ────────────────────────────────────────────────────────────────
+
+@router.get("", status_code=200, response_model=List[ImageResponse])
+def list_images(db: Session = Depends(get_db), current_user: CurrentUser = Depends(get_current_user)):
+    """
+    Catálogo híbrido de imágenes.
+
+    1. Consulta la BD local (con JOIN a AvailabilityZone para saber el az_name).
+    2. Consulta Glance de OpenStack en un thread-pool (no bloquea el event loop).
+    3. Para cada imagen de Glance que NO exista ya en la BD (por nombre),
+       crea un registro efímero en memoria (no en BD) con az_name="OpenStack".
+    4. Si OpenStack falla, se retorna igualmente con las imágenes locales.
+    """
+    # ── 1. Imágenes desde la BD local ────────────────────────────────────────
+    if current_user.can_manage_all():
+        db_images = (
+            db.query(Image)
+            .options(joinedload(Image.availability_zone))
+            .filter(Image.is_general.isnot(None))
+            .all()
+        )
+    else:
+        db_images = (
+            db.query(Image)
+            .options(joinedload(Image.availability_zone))
+            .filter(
+                Image.is_general.isnot(None),
+                (Image.is_general == 1) | (Image.user_id == current_user.user_id),
+            )
+            .all()
+        )
+
     result = []
-    for img in images:
+    db_image_names = set()
+
+    for img in db_images:
         active_count = db.query(Vm).filter(
             Vm.image_id == img.id,
             Vm.state.in_(_ACTIVE_VM_STATES),
         ).count()
 
-        result.append({
-            "id": img.id,
-            "name": img.name,
-            "path": img.path,
-            "is_general": img.is_general,
-            "date_uploaded": img.date_uploaded,
-            "in_use": active_count > 0,
-            "active_vm_count": active_count,
-        })
+        az_name = img.availability_zone.name if img.availability_zone else None
+
+        result.append(ImageResponse(
+            id=img.id,
+            name=img.name,
+            availability_zone_id=img.availability_zone_id,
+            az_name=az_name,
+            path=img.path,
+            is_general=img.is_general,
+            date_uploaded=img.date_uploaded,
+            in_use=active_count > 0,
+            active_vm_count=active_count,
+            cloud_init_support=img.cloud_init_support or 0,
+            default_username=img.default_username,
+            default_password=img.default_password,
+        ))
+        db_image_names.add(img.name)
+
+    # ── 2. Imágenes desde OpenStack Glance (en thread-pool) ─────────────────
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_fetch_openstack_images)
+            os_images = future.result(timeout=10)
+    except Exception as exc:
+        logger.error("[OpenStack] Timeout o error en thread-pool Glance: %s", exc)
+        os_images = []
+
+    # ── 3. Sincronización: añadir imágenes de OpenStack no presentes en BD ───
+    # Buscamos el AZ de OpenStack en la BD para obtener su nombre oficial
+    os_az = db.query(AvailabilityZone).filter(AvailabilityZone.id == OPENSTACK_AZ_ID).first()
+    os_az_name = os_az.name if os_az else "OpenStack"
+
+    new_images_synced = 0
+    for os_img in os_images:
+        if os_img["name"] not in db_image_names and os_img.get("status") == "active":
+            is_gen = 1 if os_img.get("visibility") == "public" else 0
+            
+            nueva_imagen = Image(
+                name=os_img["name"],
+                user_id="system_sync",
+                date_uploaded=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                is_general=is_gen,
+                path=os_img["os_id"], # Glance UUID
+                availability_zone_id=OPENSTACK_AZ_ID
+            )
+            db.add(nueva_imagen)
+            db.flush() # Para obtener el ID generado
+
+            # Si el current_user no puede ver todas y la imagen es privada, no la añadimos al result (sólo se sincroniza en BD)
+            if is_gen == 0 and not current_user.can_manage_all():
+                new_images_synced += 1
+                continue
+
+            result.append(ImageResponse(
+                id=nueva_imagen.id,
+                name=nueva_imagen.name,
+                availability_zone_id=OPENSTACK_AZ_ID,
+                az_name=os_az_name,
+                path=nueva_imagen.path,
+                is_general=is_gen,
+                date_uploaded=nueva_imagen.date_uploaded,
+                in_use=False,
+                active_vm_count=0,
+            ))
+            new_images_synced += 1
+            
+    if new_images_synced > 0:
+        db.commit()
+
+    logger.info("[Images] Catálogo híbrido: %d imágenes BD + %d nuevas de OpenStack (total=%d)",
+                len(db_images), new_images_synced, len(result))
     return result
 
 
@@ -151,11 +350,22 @@ def get_unused_images(db: Session = Depends(get_db), current_user: CurrentUser =
 async def upload_image(
     name: str = Form(...),
     is_general: int = Form(0),
+    availability_zone_id: int = Form(1),  # Por defecto: Linux Cluster (id=1)
+    cloud_init_support: int = Form(0),
+    default_username: Optional[str] = Form(None),
+    default_password: Optional[str] = Form(None),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    """Sube un archivo de imagen al NFS y lo registra en BD."""
+    """Sube un archivo de imagen al NFS y lo registra en BD, asociado a una AZ."""
+    # Si la imagen no soporta cloud-init, las credenciales son fijas y deben registrarse
+    if not cloud_init_support and not (default_username and default_password):
+        raise HTTPException(
+            status_code=400,
+            detail="Esta imagen no soporta cloud-init: debe indicar el usuario y contraseña por defecto.",
+        )
+
     # Validación de rol: solo admins/superadmins pueden crear imágenes generales
     if is_general == 1 and not current_user.can_manage_all():
         raise HTTPException(
@@ -171,33 +381,54 @@ async def upload_image(
         )
 
     safe_filename = file.filename.replace(" ", "_")
-    dest_path = os.path.join(IMAGES_DIR, safe_filename)
-
-    existing = db.query(Image).filter(Image.path == dest_path).first()
-    if existing:
-        if existing.is_general is None:
-            # Imagen soft-deleted: reutilizamos el registro y sobreescribimos el archivo
-            logger.info("Imagen '%s' estaba soft-deleted — se reutiliza el registro (id=%d)", name, existing.id)
-            # El archivo se sobreescribirá más abajo
-        else:
-            raise HTTPException(
-                status_code=409,
-                detail=f"Ya existe una imagen activa registrada en esa ruta: {dest_path}",
-            )
+    
+    if availability_zone_id == OPENSTACK_AZ_ID:
+        import uuid
+        dest_path = f"/tmp/os_upload_{uuid.uuid4().hex}_{safe_filename}"
+        existing = None # No chequear path porque es temporal en /tmp
+    else:
+        dest_path = os.path.join(IMAGES_DIR, safe_filename)
+        existing = db.query(Image).filter(Image.path == dest_path).first()
+        if existing:
+            if existing.is_general is None:
+                # Imagen soft-deleted: reutilizamos el registro y sobreescribimos el archivo
+                logger.info("Imagen '%s' estaba soft-deleted — se reutiliza el registro (id=%d)", name, existing.id)
+            else:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Ya existe una imagen activa registrada en esa ruta: {dest_path}",
+                )
 
     try:
-        os.makedirs(IMAGES_DIR, exist_ok=True)
+        if availability_zone_id != OPENSTACK_AZ_ID:
+            os.makedirs(IMAGES_DIR, exist_ok=True)
         with open(dest_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
     except OSError as exc:
         logger.error("Error guardando imagen en %s: %s", dest_path, exc)
         raise HTTPException(
             status_code=500,
-            detail=f"No se pudo guardar el archivo. ¿El volumen NFS está montado? ({IMAGES_DIR})",
+            detail=f"No se pudo guardar el archivo localmente en {dest_path}",
         )
 
+    # Si es para OpenStack (OPENSTACK_AZ_ID), subimos a Glance y no guardamos permanentemente en local
+    final_path = dest_path
+    if availability_zone_id == OPENSTACK_AZ_ID:
+        try:
+            glance_id = _upload_openstack_image(name, dest_path, is_general)
+            final_path = f"glance://{glance_id}"
+            
+            # Limpiamos el archivo local que solo servía como puente temporal
+            os.remove(dest_path)
+            logger.info("Archivo local temporal eliminado: %s", dest_path)
+        except Exception as exc:
+            # Limpiamos en caso de error
+            if os.path.exists(dest_path):
+                os.remove(dest_path)
+            logger.error("Error subiendo a Glance: %s", exc)
+            raise HTTPException(status_code=500, detail=f"Error subiendo imagen a OpenStack Glance: {exc}")
+
     if existing and existing.is_general is None:
-        # Reactivar registro soft-deleted: validamos propiedad o rol admin
         if existing.user_id != current_user.user_id and not current_user.can_manage_all():
             raise HTTPException(
                 status_code=403,
@@ -207,13 +438,18 @@ async def upload_image(
         existing.is_general = is_general
         existing.user_id = current_user.user_id
         existing.date_uploaded = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        existing.availability_zone_id = availability_zone_id
+        existing.path = final_path
+        existing.cloud_init_support = cloud_init_support
+        existing.default_username = default_username
+        existing.default_password = default_password
         db.commit()
         db.refresh(existing)
-        logger.info("Imagen '%s' reactivada → %s", name, dest_path)
+        logger.info("Imagen '%s' reactivada → %s", name, final_path)
         return {
             "id": existing.id,
             "name": existing.name,
-            "path": dest_path,
+            "path": final_path,
             "message": f"Imagen '{name}' reactivada correctamente.",
         }
 
@@ -222,17 +458,21 @@ async def upload_image(
         name=name,
         date_uploaded=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
         is_general=is_general,
-        path=dest_path,
+        path=final_path,
+        availability_zone_id=availability_zone_id,
+        cloud_init_support=cloud_init_support,
+        default_username=default_username,
+        default_password=default_password,
     )
     db.add(nueva_imagen)
     db.commit()
     db.refresh(nueva_imagen)
 
-    logger.info("Imagen '%s' subida → %s", name, dest_path)
+    logger.info("Imagen '%s' subida → %s (AZ=%d)", name, final_path, availability_zone_id)
     return {
         "id": nueva_imagen.id,
         "name": nueva_imagen.name,
-        "path": dest_path,
+        "path": final_path,
         "message": f"Imagen '{name}' registrada correctamente.",
     }
 
@@ -271,17 +511,21 @@ def delete_image(image_id: int, db: Session = Depends(get_db), current_user: Cur
             detail=f"La imagen está en uso por {active_vms} VM(s) activa(s).",
         )
 
-    # Borramos el archivo físico
+    # Borramos el archivo físico o llamamos a Glance
     if img.path:
-        if os.path.exists(img.path):
-            try:
-                os.remove(img.path)
-                logger.info("Archivo %s eliminado directamente.", img.path)
-            except OSError:
-                logger.warning("Borrado directo falló, intentando via SSH...")
-                _delete_file_via_ssh(img.path)
+        if img.path.startswith("glance://"):
+            glance_id = img.path.split("://")[1]
+            _delete_openstack_image(glance_id)
         else:
-            _delete_file_via_ssh(img.path)
+            if os.path.exists(img.path):
+                try:
+                    os.remove(img.path)
+                    logger.info("Archivo %s eliminado directamente.", img.path)
+                except OSError:
+                    logger.warning("Borrado directo falló, intentando via SSH...")
+                    _delete_file_via_ssh(img.path)
+            else:
+                _delete_file_via_ssh(img.path)
 
     # Soft-delete: marcamos is_general=NULL para preservar FK con vms históricos
     img.is_general = None
@@ -303,4 +547,3 @@ def run_gc_now(
     background_tasks.add_task(run_gc_cycle)
     logger.info("[GC] Ciclo manual disparado desde la API por %s.", current_user.user_id)
     return {"message": "Ciclo de GC iniciado en background. Revisa los logs para ver el resultado."}
-

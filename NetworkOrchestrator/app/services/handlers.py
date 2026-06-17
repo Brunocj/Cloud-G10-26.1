@@ -10,6 +10,7 @@ from nats.aio.msg import Msg
 
 from app.models.schemas import DeployNetworkRequest, DestroyNetworkRequest
 from app.services.provisioner import NetworkProvisioner
+from app.services.openstack_network_executor import OpenStackNetworkExecutor
 from app.services.queue_client import queue_client
 
 logger = logging.getLogger(__name__)
@@ -26,10 +27,17 @@ async def handle_deploy(msg: Msg) -> None:
         # Pydantic valida que la lista de enlaces y VLANs venga correcta
         request = DeployNetworkRequest(**payload)
 
-        # Ejecutamos la configuración de switches en un hilo aparte para no bloquear asynico
-        response = await asyncio.get_running_loop().run_in_executor(
-            None, _provisioner.deploy, request
-        )
+        # Bifurcación Strategy Pattern por availability_zone_id
+        if request.availability_zone_id == 2:
+            logger.info(f"[deploy] Strategy: OpenStack (slice_id={request.slice_id})")
+            os_executor = OpenStackNetworkExecutor()
+            response = await os_executor.deploy(request)
+        else:
+            logger.info(f"[deploy] Strategy: Linux Cluster (slice_id={request.slice_id})")
+            # Ejecutamos la configuración de switches en un hilo aparte para no bloquear asynico
+            response = await asyncio.get_running_loop().run_in_executor(
+                None, _provisioner.deploy, request
+            )
         logger.info(f"[deploy] Configuración de red terminada: status={response.status}")
 
         if msg.reply:
@@ -57,9 +65,16 @@ async def handle_destroy(msg: Msg) -> None:
 
         request = DestroyNetworkRequest(**payload)
 
-        response = await asyncio.get_running_loop().run_in_executor(
-            None, _provisioner.destroy, request
-        )
+        # Bifurcación Strategy Pattern por availability_zone_id
+        if request.availability_zone_id == 2:
+            logger.info(f"[destroy] Strategy: OpenStack (slice_id={request.slice_id})")
+            os_executor = OpenStackNetworkExecutor()
+            response = await os_executor.destroy(request)
+        else:
+            logger.info(f"[destroy] Strategy: Linux Cluster (slice_id={request.slice_id})")
+            response = await asyncio.get_running_loop().run_in_executor(
+                None, _provisioner.destroy, request
+            )
 
         if msg.reply:
             await queue_client.reply(msg.reply, response.model_dump())

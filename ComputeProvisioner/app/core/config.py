@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     NATS_URL:        str = "nats://nats:4222"
     QUEUE_DEPLOY:    str = "compute.deploy"
     QUEUE_DESTROY:   str = "compute.destroy"
+    QUEUE_CONSOLE_REFRESH: str = "compute.console.refresh"
     NATS_KV_BUCKET:  str = "compute-state"
 
     # ── SSH ─────────────────────────────────────────────────────────────────
