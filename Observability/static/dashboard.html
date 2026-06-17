@@ -1,0 +1,580 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Observability — PUCP Cloud</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:       #0a0e17;
+    --surface:  #111827;
+    --border:   #1e293b;
+    --accent:   #00d4aa;
+    --warn:     #f59e0b;
+    --danger:   #ef4444;
+    --muted:    #4b5563;
+    --text:     #e2e8f0;
+    --subtext:  #94a3b8;
+    --mono:     'IBM Plex Mono', monospace;
+    --sans:     'IBM Plex Sans', sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 14px;
+    min-height: 100vh;
+  }
+
+  header {
+    border-bottom: 1px solid var(--border);
+    padding: 16px 32px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    background: var(--bg);
+    z-index: 10;
+  }
+
+  .logo {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--accent);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+
+  .logo span { color: var(--subtext); }
+
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+  }
+
+  .refresh-badge {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--subtext);
+  }
+
+  .pulse {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: pulse 2s infinite;
+    margin-right: 6px;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%       { opacity: 0.4; transform: scale(0.8); }
+  }
+
+  main {
+    padding: 32px;
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+
+  .section-title {
+    font-family: var(--mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    color: var(--subtext);
+    margin-bottom: 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  /* Status bar */
+  .status-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    margin-bottom: 32px;
+  }
+
+  .stat-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 16px 20px;
+  }
+
+  .stat-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--subtext);
+    margin-bottom: 8px;
+  }
+
+  .stat-value {
+    font-family: var(--mono);
+    font-size: 22px;
+    font-weight: 600;
+    color: var(--accent);
+  }
+
+  .stat-value.warn  { color: var(--warn); }
+  .stat-value.error { color: var(--danger); }
+
+  /* Workers grid */
+  .workers-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+    gap: 16px;
+    margin-bottom: 32px;
+  }
+
+  .worker-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    transition: border-color 0.2s;
+  }
+
+  .worker-card:hover { border-color: var(--accent); }
+
+  .worker-card.unreachable { border-color: var(--danger); opacity: 0.7; }
+
+  .worker-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .worker-id {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .worker-target {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--subtext);
+  }
+
+  .status-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .status-dot.up   { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+  .status-dot.down { background: var(--danger); }
+
+  .worker-body { padding: 16px; }
+
+  /* Resource bars */
+  .resource-row {
+    margin-bottom: 12px;
+  }
+
+  .resource-label {
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--subtext);
+    margin-bottom: 5px;
+  }
+
+  .resource-label .value { color: var(--text); }
+
+  .bar-track {
+    height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .bar-fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.6s ease;
+  }
+
+  .bar-fill.cpu  { background: var(--accent); }
+  .bar-fill.ram  { background: #818cf8; }
+  .bar-fill.high { background: var(--warn); }
+  .bar-fill.crit { background: var(--danger); }
+
+  /* OC factors */
+  .oc-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+  }
+
+  .oc-item {
+    text-align: center;
+  }
+
+  .oc-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--subtext);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+  }
+
+  .oc-value {
+    font-family: var(--mono);
+    font-size: 16px;
+    font-weight: 600;
+    margin-top: 2px;
+  }
+
+  .oc-value.default { color: var(--muted); }
+  .oc-value.live    { color: var(--accent); }
+
+  .oc-source {
+    font-family: var(--mono);
+    font-size: 9px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+
+  /* VM table */
+  .vm-section { margin-bottom: 32px; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+
+  th {
+    text-align: left;
+    padding: 10px 12px;
+    color: var(--subtext);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    border-bottom: 1px solid var(--border);
+    font-weight: 400;
+  }
+
+  td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+  }
+
+  tr:hover td { background: rgba(255,255,255,0.02); }
+
+  .tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 10px;
+    font-family: var(--mono);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  .tag.active  { background: rgba(0,212,170,0.15); color: var(--accent); }
+  .tag.default { background: rgba(75,85,99,0.3);   color: var(--subtext); }
+  .tag.live    { background: rgba(129,140,248,0.15); color: #818cf8; }
+
+  /* Scheduler status */
+  .scheduler-bar {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 14px 20px;
+    display: flex;
+    align-items: center;
+    gap: 32px;
+    font-family: var(--mono);
+    font-size: 12px;
+    margin-bottom: 32px;
+  }
+
+  .sched-item { display: flex; flex-direction: column; gap: 2px; }
+  .sched-key  { font-size: 10px; color: var(--subtext); text-transform: uppercase; }
+  .sched-val  { color: var(--text); }
+  .sched-val.ok    { color: var(--accent); }
+  .sched-val.error { color: var(--danger); }
+
+  .error-msg {
+    background: rgba(239,68,68,0.1);
+    border: 1px solid rgba(239,68,68,0.3);
+    border-radius: 4px;
+    padding: 8px 12px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--danger);
+    margin-bottom: 16px;
+  }
+
+  #loading {
+    text-align: center;
+    padding: 80px;
+    font-family: var(--mono);
+    color: var(--subtext);
+    font-size: 13px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">PUCP Cloud <span>/</span> Observability</div>
+  <div class="header-right">
+    <span class="refresh-badge"><span class="pulse"></span>Auto-refresh <span id="countdown">15</span>s</span>
+  </div>
+</header>
+
+<main>
+  <div id="loading">Loading metrics...</div>
+  <div id="content" style="display:none">
+
+    <!-- Scheduler status -->
+    <div class="section-title">Scheduler</div>
+    <div class="scheduler-bar" id="scheduler-bar"></div>
+
+    <!-- Summary stats -->
+    <div class="section-title">Summary</div>
+    <div class="status-row" id="summary-row"></div>
+
+    <!-- Workers -->
+    <div class="section-title">Workers</div>
+    <div class="workers-grid" id="workers-grid"></div>
+
+    <!-- Worker Welford State table -->
+    <div class="vm-section">
+      <div class="section-title">Worker Welford State</div>
+      <div id="error-box" style="display:none" class="error-msg"></div>
+      <table>
+        <thead>
+          <tr>
+            <th>Worker</th>
+            <th>μ ratio CPU</th>
+            <th>σ ratio CPU</th>
+            <th>μ ratio RAM</th>
+            <th>σ ratio RAM</th>
+            <th>Baseline CPU</th>
+            <th>Baseline RAM</th>
+            <th>Samples</th>
+            <th>Window</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="welford-table-body"></tbody>
+      </table>
+    </div>
+
+  </div>
+</main>
+
+<script>
+const REFRESH_INTERVAL = 15;
+let countdown = REFRESH_INTERVAL;
+
+async function fetchJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+function bar(pct, type) {
+  const cls = pct > 90 ? 'crit' : pct > 70 ? 'high' : type;
+  return `<div class="bar-track"><div class="bar-fill ${cls}" style="width:${Math.min(pct,100)}%"></div></div>`;
+}
+
+function renderScheduler(status) {
+  const s = status.scheduler;
+  document.getElementById('scheduler-bar').innerHTML = `
+    <div class="sched-item">
+      <span class="sched-key">Status</span>
+      <span class="sched-val ${s.last_error ? 'error' : 'ok'}">${s.last_error ? 'ERROR' : 'OK'}</span>
+    </div>
+    <div class="sched-item">
+      <span class="sched-key">Cycles</span>
+      <span class="sched-val">${s.cycle_count}</span>
+    </div>
+    <div class="sched-item">
+      <span class="sched-key">Last Run</span>
+      <span class="sched-val">${s.last_cycle_at ? new Date(s.last_cycle_at).toLocaleTimeString() : '—'}</span>
+    </div>
+    <div class="sched-item">
+      <span class="sched-key">Interval</span>
+      <span class="sched-val">${s.interval_s}s</span>
+    </div>
+    ${s.last_error ? `<div class="sched-item"><span class="sched-key">Error</span><span class="sched-val error">${s.last_error}</span></div>` : ''}
+  `;
+
+  // Connectivity summary
+  const conn = status.connectivity;
+  const up   = Object.values(conn).filter(v => v).length;
+  const total = Object.keys(conn).length;
+  document.getElementById('summary-row').innerHTML = `
+    <div class="stat-card">
+      <div class="stat-label">Targets Up</div>
+      <div class="stat-value ${up < total ? 'warn' : ''}">${up} / ${total}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Cycles Run</div>
+      <div class="stat-value">${s.cycle_count}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">OC Source</div>
+      <div class="stat-value" style="font-size:14px">${s.cycle_count > 0 ? 'LIVE' : 'DEFAULT'}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Last Error</div>
+      <div class="stat-value ${s.last_error ? 'error' : ''}" style="font-size:14px">${s.last_error ? 'YES' : 'NONE'}</div>
+    </div>
+  `;
+}
+
+function renderWorkers(data) {
+  const grid = document.getElementById('workers-grid');
+  grid.innerHTML = data.workers.map(w => {
+    const cpu = w.live_cpu_usage_pct ?? 0;
+    const ram = w.live_ram_usage_pct ?? 0;
+    const isLive = w.oc_source === 'observability';
+
+    return `
+    <div class="worker-card ${w.reachable ? '' : 'unreachable'}">
+      <div class="worker-header">
+        <div>
+          <div class="worker-id">worker-${w.worker_id}</div>
+          <div class="worker-target">${w.prometheus_target || '—'}</div>
+        </div>
+        <div class="status-dot ${w.reachable ? 'up' : 'down'}"></div>
+      </div>
+      <div class="worker-body">
+        <div class="resource-row">
+          <div class="resource-label">
+            <span>CPU</span>
+            <span class="value">${w.live_cpu_usage_pct != null ? w.live_cpu_usage_pct + '%' : 'N/A'}</span>
+          </div>
+          ${bar(cpu, 'cpu')}
+        </div>
+        <div class="resource-row">
+          <div class="resource-label">
+            <span>RAM</span>
+            <span class="value">${w.live_ram_usage_pct != null ? w.live_ram_usage_pct + '%' : 'N/A'}</span>
+          </div>
+          ${bar(ram, 'ram')}
+        </div>
+        <div class="oc-grid">
+          <div class="oc-item">
+            <div class="oc-label">OC CPU</div>
+            <div class="oc-value ${isLive ? 'live' : 'default'}">${w.oc_cpu.toFixed(2)}×</div>
+            <div class="oc-source">${isLive ? 'live' : 'default'}</div>
+          </div>
+          <div class="oc-item">
+            <div class="oc-label">OC RAM</div>
+            <div class="oc-value ${isLive ? 'live' : 'default'}">${w.oc_ram.toFixed(2)}×</div>
+            <div class="oc-source">${isLive ? 'live' : 'default'}</div>
+          </div>
+          <div class="oc-item">
+            <div class="oc-label">OC Disk</div>
+            <div class="oc-value default">${w.oc_disco.toFixed(2)}×</div>
+            <div class="oc-source">fixed</div>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderWelford(data) {
+  const tbody = document.getElementById('welford-table-body');
+  const workers = data.workers.filter(w => w.window && (w.window.n_samples > 0 || w.window.baseline_n > 0));
+
+  if (workers.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="8" style="color:var(--subtext);text-align:center;padding:24px">No data yet — waiting for first cycle</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = workers.map(w => {
+    const wf = w.window;
+    const pct = wf.window_pct || 0;
+    const isReady = pct >= 10;
+    const barColor = pct >= 80 ? 'var(--accent)' : pct >= 30 ? 'var(--warn)' : 'var(--muted)';
+    return `
+    <tr>
+      <td>worker-${w.worker_id}</td>
+      <td>${(wf.mu_ratio_cpu || 0).toFixed(4)}</td>
+      <td>${(wf.sigma_ratio_cpu || 0).toFixed(4)}</td>
+      <td>${(wf.mu_ratio_ram || 0).toFixed(4)}</td>
+      <td>${(wf.sigma_ratio_ram || 0).toFixed(4)}</td>
+      <td>${(wf.baseline_mu_cpu || 0).toFixed(3)} cores (n=${wf.baseline_n || 0})</td>
+      <td>${(wf.baseline_mu_ram || 0).toFixed(3)} GB</td>
+      <td>${wf.n_samples} / ${wf.window_size}</td>
+      <td>
+        <div style="display:flex;align-items:center;gap:8px">
+          <div class="bar-track" style="width:80px">
+            <div class="bar-fill" style="width:${pct}%;background:${barColor}"></div>
+          </div>
+          <span style="font-family:var(--mono);font-size:11px;color:var(--subtext)">${pct}%</span>
+        </div>
+      </td>
+      <td>
+        ${wf.n_samples > 0 && isReady
+          ? '<span class="tag live">Live</span>'
+          : wf.n_samples > 0
+          ? '<span class="tag default">Warming up</span>'
+          : '<span class="tag" style="background:rgba(245,158,11,0.15);color:var(--warn)">Baseline</span>'}
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+async function refresh() {
+  try {
+    const [status, workers] = await Promise.all([
+      fetchJSON('/metrics/status'),
+      fetchJSON('/metrics/workers'),
+    ]);
+
+    document.getElementById('loading').style.display  = 'none';
+    document.getElementById('content').style.display  = 'block';
+    document.getElementById('error-box').style.display = 'none';
+
+    renderScheduler(status);
+    renderWorkers(workers);
+    renderWelford(workers);
+  } catch (e) {
+    document.getElementById('error-box').style.display = 'block';
+    document.getElementById('error-box').textContent   = 'Error fetching data: ' + e.message;
+  }
+}
+
+// Countdown timer
+setInterval(() => {
+  countdown--;
+  document.getElementById('countdown').textContent = countdown;
+  if (countdown <= 0) {
+    countdown = REFRESH_INTERVAL;
+    refresh();
+  }
+}, 1000);
+
+refresh();
+</script>
+</body>
+</html>

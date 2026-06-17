@@ -1,0 +1,11 @@
+[0;1;32m●[0m autossh-worker2.service - autossh tunnel to worker 2 (192.168.201.2) — PUCP Cloud
+     Loaded: loaded (/etc/systemd/system/autossh-worker2.service; enabled; vendor preset: enabled)
+     Active: [0;1;32mactive (running)[0m since Tue 2026-06-09 22:46:33 UTC; 10min ago
+   Main PID: 932323 (autossh)
+      Tasks: 2 (limit: 9513)
+     Memory: 1.5M
+     CGroup: /system.slice/autossh-worker2.service
+             ├─932323 /usr/lib/autossh/autossh -M 0 -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=no -o ExitOnForwardFailure=yes -i /home/ubuntu/.ssh/id_ed25519 -N -L 0.0.0.0:19178:192.168.201.2:9177 -L 0.0.0.0:19278:192.168.201.2:9100 ubuntu@10.20.11.119 -p 5812
+             └─932327 /usr/bin/ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=no -o ExitOnForwardFailure=yes -i /home/ubuntu/.ssh/id_ed25519 -N -L 0.0.0.0:19178:192.168.201.2:9177 -L 0.0.0.0:19278:192.168.201.2:9100 -p 5812 ubuntu@10.20.11.119
+
+Jun 09 22:46:33 app systemd[1]: Started autossh tunnel to worker 2 (192.168.201.2) — PUCP Cloud.

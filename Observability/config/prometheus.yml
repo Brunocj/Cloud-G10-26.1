@@ -1,0 +1,28 @@
+global:
+  scrape_interval:     1m
+  evaluation_interval: 1m
+
+scrape_configs:
+  # libvirt_exporter por worker — puerto 9177 via tunnels autossh (191XX en host)
+  - job_name: 'libvirt'
+    static_configs:
+      - targets:
+          - 'host.docker.internal:19177'   # worker 1
+          - 'host.docker.internal:19178'   # worker 2
+          - 'host.docker.internal:19179'   # worker 3
+          - 'host.docker.internal:19180'   # worker 4
+          - 'host.docker.internal:19181'   # worker 5
+          - 'host.docker.internal:19182'   # worker 6
+          - 'host.docker.internal:19183'   # worker 7
+
+  # node_exporter por worker — puerto 9100 via tunnels autossh (192XX en host)
+  - job_name: 'node'
+    static_configs:
+      - targets:
+          - 'host.docker.internal:19277'   # worker 1
+          - 'host.docker.internal:19278'   # worker 2
+          - 'host.docker.internal:19279'   # worker 3
+          - 'host.docker.internal:19280'   # worker 4
+          - 'host.docker.internal:19281'   # worker 5
+          - 'host.docker.internal:19282'   # worker 6
+          - 'host.docker.internal:19283'   # worker 7

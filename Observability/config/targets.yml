@@ -1,0 +1,33 @@
+# Worker ID → Prometheus scrape target mapping
+# Por worker hay dos targets:
+#   prometheus_target → libvirt_exporter (puerto 9177 en worker → 191XX en host)
+#   node_target       → node_exporter   (puerto 9100 en worker → 192XX en host)
+#
+# Ambos son accesibles desde los containers via host.docker.internal.
+# Run setup_tunnels.sh to configure the tunnels — it prints this block at the end.
+
+workers:
+  # Linux Cluster
+  - worker_id: 1
+    prometheus_target: "host.docker.internal:19177"
+    node_target:       "host.docker.internal:19277"
+  - worker_id: 2
+    prometheus_target: "host.docker.internal:19178"
+    node_target:       "host.docker.internal:19278"
+  - worker_id: 3
+    prometheus_target: "host.docker.internal:19179"
+    node_target:       "host.docker.internal:19279"
+  - worker_id: 4
+    prometheus_target: "host.docker.internal:19180"
+    node_target:       "host.docker.internal:19280"
+
+  # OpenStack
+  - worker_id: 5
+    prometheus_target: "host.docker.internal:19181"
+    node_target:       "host.docker.internal:19281"
+  - worker_id: 6
+    prometheus_target: "host.docker.internal:19182"
+    node_target:       "host.docker.internal:19282"
+  - worker_id: 7
+    prometheus_target: "host.docker.internal:19183"
+    node_target:       "host.docker.internal:19283"
