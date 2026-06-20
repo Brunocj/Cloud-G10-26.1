@@ -196,18 +196,18 @@ class NetworkExecutor:
                     ssh.exec(f"sudo ip addr add {ext_ip}/32 dev {settings.EXTERNAL_INTERFACE} || true")
 
                     cmd_dnat = (
-                        f"sudo iptables -t nat -A PREROUTING -i {settings.EXTERNAL_INTERFACE} "
+                        f"sudo iptables -t nat -A PREROUTING "
                         f"-d {ext_ip} -j DNAT --to-destination {internal_vm_ip}"
                     )
                     ssh.exec(cmd_dnat)
 
                     # Forward explícito para permitir el flujo de entrada/salida
                     ssh.exec(
-                        f"sudo iptables -I FORWARD 1 -i {settings.EXTERNAL_INTERFACE} "
+                        f"sudo iptables -I FORWARD 1 "
                         f"-d {internal_vm_ip}/32 -j ACCEPT"
                     )
                     ssh.exec(
-                        f"sudo iptables -I FORWARD 1 -o {settings.EXTERNAL_INTERFACE} "
+                        f"sudo iptables -I FORWARD 1 "
                         f"-s {internal_vm_ip}/32 -m state --state ESTABLISHED,RELATED -j ACCEPT"
                     )
 
@@ -305,7 +305,7 @@ class NetworkExecutor:
                 if getattr(vm, 'external_ip', None) and internal_vm_ip:
                     ext_ip = vm.external_ip
                     cmd_dnat_del = (
-                        f"sudo iptables -t nat -D PREROUTING -i {settings.EXTERNAL_INTERFACE} "
+                        f"sudo iptables -t nat -D PREROUTING "
                         f"-d {ext_ip} -j DNAT --to-destination {internal_vm_ip} || true"
                     )
                     exit_code_dnat, _, err_dnat = ssh.exec(cmd_dnat_del)
@@ -313,11 +313,11 @@ class NetworkExecutor:
 
                     # Remover reglas de forward para acceso exterior
                     ssh.exec(
-                        f"sudo iptables -D FORWARD -i {settings.EXTERNAL_INTERFACE} "
+                        f"sudo iptables -D FORWARD "
                         f"-d {internal_vm_ip}/32 -j ACCEPT || true"
                     )
                     ssh.exec(
-                        f"sudo iptables -D FORWARD -o {settings.EXTERNAL_INTERFACE} "
+                        f"sudo iptables -D FORWARD "
                         f"-s {internal_vm_ip}/32 -m state --state ESTABLISHED,RELATED -j ACCEPT || true"
                     )
                     dnat_count += 1

@@ -59,8 +59,7 @@ async def process_placement_worker():
             # Si aún no existe, se usa el valor referencial de arranque.
 
             workers_zona = db.query(Worker).filter(
-                Worker.availability_zones_id == zone_id,
-                Worker.id != 1  # excluir headnode
+                Worker.availability_zones_id == zone_id
             ).all()
 
             if not workers_zona:
