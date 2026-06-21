@@ -13,7 +13,7 @@ import VmConsole from "../../VmConsole";
  *   vncPort    → puerto VNC (Linux Cluster)
  *   onClose    → callback de cierre
  */
-export const ConsoleModal = ({ vm, workerIp, workerPort, vncPort, onClose }) => (
+export const ConsoleModal = ({ token, vm, workerIp, workerPort, vncPort, onClose }) => (
     <Overlay>
         <div style={{
             background: T.surface, border: `1px solid ${T.border}`,
@@ -31,7 +31,7 @@ export const ConsoleModal = ({ vm, workerIp, workerPort, vncPort, onClose }) => 
                 </button>
             </div>
             {/* VmConsole detecta automáticamente el tipo: OpenStack (iframe) o Linux Cluster (noVNC) */}
-            <VmConsole vm={vm} workerIp={workerIp} workerPort={workerPort} vncPort={vncPort} />
+            <VmConsole token={token} vm={vm} workerIp={workerIp} workerPort={workerPort} vncPort={vncPort} />
         </div>
     </Overlay>
 );

@@ -556,7 +556,7 @@ export default function App() {
             })()}
             {modal === "draft"         && <SaveDraftModal nodes={nodes} edges={edges} onSave={saveDraft}            onClose={() => setModal(null)} />}
             {modal?.type === "confirm" && <ConfirmModal title={modal.title} msg={modal.msg} onOk={modal.onOk} onCancel={() => setModal(null)} />}
-            {consoleVm                 && <ConsoleModal vm={consoleVm} workerIp={consoleVm.workerIp} workerPort={consoleVm.workerPort} vncPort={consoleVm.vncPort} onClose={() => setConsoleVm(null)} />}
+            {consoleVm                 && <ConsoleModal token={token} vm={consoleVm} workerIp={consoleVm.workerIp} workerPort={consoleVm.workerPort} vncPort={consoleVm.vncPort} onClose={() => setConsoleVm(null)} />}
 
             {toast && <Toast {...toast} />}
             <style key={themeRev}>{getGlobalCss()}</style>

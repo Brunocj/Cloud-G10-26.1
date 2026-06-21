@@ -70,8 +70,9 @@ const SpecialKeysToolbar = ({ vncRef }) => {
 };
 
 // ─── Consola NoVNC (Linux Cluster) ────────────────────────────────────────────
-const LinuxClusterConsole = ({ workerIp, workerPort, vncPort }) => {
+const LinuxClusterConsole = ({ token, workerIp, workerPort, vncPort }) => {
     const vncRef = useRef(null);
+    const containerRef = useRef(null);
 
     // display = vncPort - 5900  (ej: 5944 - 5900 = 44)
     // QEMU abre WebSocket en puerto 5700 + display  (ej: 5744)
@@ -79,7 +80,53 @@ const LinuxClusterConsole = ({ workerIp, workerPort, vncPort }) => {
     const display = vncPort - 5900;
     const wsPort  = 5700 + display;
     const sshPort = workerPort || 22;   // puerto SSH en el gateway (5811-5814)
-    const wsUrl   = `ws://${API_GW}/vnc/${workerIp}/${sshPort}/${wsPort}`;
+    const wsUrl   = `ws://${API_GW}/vnc/${workerIp}/${sshPort}/${wsPort}${token ? `?token=${token}` : ""}`;
+
+    useEffect(() => {
+        const container = containerRef.current;
+        if (!container) return;
+
+        let canvas = container.querySelector("canvas");
+
+        const setupCanvas = (targetCanvas) => {
+            if (!targetCanvas) return;
+            if (!targetCanvas.getAttribute("tabindex")) {
+                targetCanvas.setAttribute("tabindex", "0");
+            }
+            targetCanvas.style.outline = "none";
+        };
+
+        const observer = new MutationObserver(() => {
+            const foundCanvas = container.querySelector("canvas");
+            if (foundCanvas && foundCanvas !== canvas) {
+                canvas = foundCanvas;
+                setupCanvas(canvas);
+            }
+        });
+
+        observer.observe(container, { childList: true, subtree: true });
+
+        if (canvas) {
+            setupCanvas(canvas);
+        }
+
+        const handleMouseDown = () => {
+            const activeCanvas = container.querySelector("canvas");
+            if (activeCanvas) activeCanvas.focus();
+        };
+
+        container.addEventListener("mousedown", handleMouseDown);
+
+        setTimeout(() => {
+            const activeCanvas = container.querySelector("canvas");
+            if (activeCanvas) activeCanvas.focus();
+        }, 100);
+
+        return () => {
+            observer.disconnect();
+            container.removeEventListener("mousedown", handleMouseDown);
+        };
+    }, [wsUrl]);
 
     return (
         <div style={{ width: "800px", backgroundColor: "#000", borderRadius: "8px", overflow: "hidden" }}>
@@ -99,27 +146,34 @@ const LinuxClusterConsole = ({ workerIp, workerPort, vncPort }) => {
 
             <SpecialKeysToolbar vncRef={vncRef} />
 
-            <VncScreen
-                url={wsUrl}
-                scaleViewport={true}
-                background="#000000"
+            <div
+                ref={containerRef}
                 style={{ width: "100%", height: "556px" }}
-                ref={vncRef}
-                onConnect={() => console.log("[VNC] Conectado:", wsUrl)}
-                onDisconnect={(e) => console.warn("[VNC] Desconectado:", e)}
-            />
+            >
+                <VncScreen
+                    url={wsUrl}
+                    scaleViewport={true}
+                    background="#000000"
+                    style={{ width: "100%", height: "100%" }}
+                    ref={vncRef}
+                    focusOnClick={true}
+                    onConnect={() => console.log("[VNC] Conectado:", wsUrl)}
+                    onDisconnect={(e) => console.warn("[VNC] Desconectado:", e)}
+                />
+            </div>
         </div>
     );
 };
 
 // ─── Consola OpenStack NoVNC (WebSocket via ApiGW → SSH → nova-novncproxy) ────
-const OpenStackConsole = ({ vncUrl, sliceId, vmId, apiFetch }) => {
+const OpenStackConsole = ({ jwtToken, vncUrl, sliceId, vmId, apiFetch }) => {
     // Los tokens de nova-novncproxy expiran/se consumen rápido (~10 min, un solo uso).
     // Si tenemos sliceId+vmId+apiFetch pedimos uno fresco; si no, usamos el guardado
     // (compatibilidad hacia atrás).
     const [freshToken, setFreshToken] = useState(null);
     const [status, setStatus] = useState(sliceId && vmId && apiFetch ? "loading" : "ready");
     const vncRef = useRef(null);
+    const containerRef = useRef(null);
 
     useEffect(() => {
         if (!(sliceId && vmId && apiFetch)) return;
@@ -131,7 +185,53 @@ const OpenStackConsole = ({ vncUrl, sliceId, vmId, apiFetch }) => {
     }, [sliceId, vmId, apiFetch]);
 
     const token = freshToken || vncUrl;
-    const wsUrl = `ws://${API_GW}/vnc/openstack/${token}`;
+    const wsUrl = `ws://${API_GW}/vnc/openstack/${token}${jwtToken ? `?token=${jwtToken}` : ""}`;
+
+    useEffect(() => {
+        const container = containerRef.current;
+        if (!container) return;
+
+        let canvas = container.querySelector("canvas");
+
+        const setupCanvas = (targetCanvas) => {
+            if (!targetCanvas) return;
+            if (!targetCanvas.getAttribute("tabindex")) {
+                targetCanvas.setAttribute("tabindex", "0");
+            }
+            targetCanvas.style.outline = "none";
+        };
+
+        const observer = new MutationObserver(() => {
+            const foundCanvas = container.querySelector("canvas");
+            if (foundCanvas && foundCanvas !== canvas) {
+                canvas = foundCanvas;
+                setupCanvas(canvas);
+            }
+        });
+
+        observer.observe(container, { childList: true, subtree: true });
+
+        if (canvas) {
+            setupCanvas(canvas);
+        }
+
+        const handleMouseDown = () => {
+            const activeCanvas = container.querySelector("canvas");
+            if (activeCanvas) activeCanvas.focus();
+        };
+
+        container.addEventListener("mousedown", handleMouseDown);
+
+        setTimeout(() => {
+            const activeCanvas = container.querySelector("canvas");
+            if (activeCanvas) activeCanvas.focus();
+        }, 100);
+
+        return () => {
+            observer.disconnect();
+            container.removeEventListener("mousedown", handleMouseDown);
+        };
+    }, [wsUrl]);
 
     if (status === "loading") {
         return <div style={{ width: "800px", height: "556px", backgroundColor: "#000", borderRadius: "8px",
@@ -174,15 +274,21 @@ const OpenStackConsole = ({ vncUrl, sliceId, vmId, apiFetch }) => {
 
             <SpecialKeysToolbar vncRef={vncRef} />
 
-            <VncScreen
-                url={wsUrl}
-                scaleViewport={true}
-                background="#000000"
+            <div
+                ref={containerRef}
                 style={{ width: "100%", height: "556px" }}
-                ref={vncRef}
-                onConnect={() => console.log("[VNC-OS] Conectado:", wsUrl)}
-                onDisconnect={(e) => console.warn("[VNC-OS] Desconectado:", e)}
-            />
+            >
+                <VncScreen
+                    url={wsUrl}
+                    scaleViewport={true}
+                    background="#000000"
+                    style={{ width: "100%", height: "100%" }}
+                    ref={vncRef}
+                    focusOnClick={true}
+                    onConnect={() => console.log("[VNC-OS] Conectado:", wsUrl)}
+                    onDisconnect={(e) => console.warn("[VNC-OS] Desconectado:", e)}
+                />
+            </div>
         </div>
     );
 };
@@ -198,14 +304,14 @@ const OpenStackConsole = ({ vncUrl, sliceId, vmId, apiFetch }) => {
  *   workerIp, workerPort, vncPort  → Linux Cluster
  *   vm                            → objeto completo (para detectar vnc_url)
  */
-const VmConsole = ({ workerIp, workerPort, vncPort, vm }) => {
+const VmConsole = ({ token, workerIp, workerPort, vncPort, vm }) => {
     // Prioridad: vnc_url de OpenStack > vncPort de Linux Cluster
     if (vm?.vnc_url) {
-        return <OpenStackConsole vncUrl={vm.vnc_url} sliceId={vm.sliceId} vmId={vm.vmId} apiFetch={vm.apiFetch} />;
+        return <OpenStackConsole jwtToken={token} vncUrl={vm.vnc_url} sliceId={vm.sliceId} vmId={vm.vmId} apiFetch={vm.apiFetch} />;
     }
 
     // Fallback Linux Cluster
-    return <LinuxClusterConsole workerIp={workerIp} workerPort={workerPort} vncPort={vncPort} />;
+    return <LinuxClusterConsole token={token} workerIp={workerIp} workerPort={workerPort} vncPort={vncPort} />;
 };
 
 export default VmConsole;

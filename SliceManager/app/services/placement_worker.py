@@ -25,20 +25,19 @@ placement_queue = asyncio.Queue()
 
 async def process_placement_worker():
     """Worker asíncrono que procesa los despliegues uno por uno"""
-    db = SessionLocal()
 
     while True:
         request_data = await placement_queue.get()
 
         slice_id = request_data["slice_id"]
         zone_id  = request_data["zone_id"]
+        db = SessionLocal()
 
         try:
             logger.info(f"[{slice_id}] Iniciando proceso de Placement...")
             db_slice = db.query(Slice).filter(Slice.id == slice_id).first()
 
             if not db_slice:
-                placement_queue.task_done()
                 continue
 
             # ── 1. EXTRACCIÓN DE VMs DESDE BD ─────────────────────────────────
@@ -47,7 +46,6 @@ async def process_placement_worker():
             if not vms_de_bd:
                 db_slice.status = "FAILED"
                 db.commit()
-                placement_queue.task_done()
                 continue
 
             # ── 2. CONSTRUCCIÓN DEL SERVERS' STATE MULTIDIMENSIONAL ───────────
@@ -404,8 +402,13 @@ async def process_placement_worker():
 
         except Exception as e:
             logger.error(f"[{slice_id}] Error procesando placement: {str(e)}", exc_info=True)
+            db.rollback()
             if 'db_slice' in locals() and db_slice:
-                db_slice.status = "FAILED"
-                db.commit()
+                try:
+                    db_slice.status = "FAILED"
+                    db.commit()
+                except Exception as rollback_err:
+                    logger.error(f"[{slice_id}] No se pudo actualizar el estado del slice a FAILED: {rollback_err}")
         finally:
+            db.close()
             placement_queue.task_done()

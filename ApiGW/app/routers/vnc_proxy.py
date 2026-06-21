@@ -22,10 +22,64 @@ import threading
 
 import paramiko
 import websockets
+import jwt
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from app.config import settings
 
 logger = logging.getLogger("api-gateway.vnc")
 router = APIRouter(tags=["VNC Proxy"])
+
+async def verify_vnc_token(websocket: WebSocket) -> bool:
+    """
+    Valida el token JWT de Keycloak pasado como query parameter (?token=...)
+    si la autenticación JWT está habilitada.
+    """
+    if not settings.JWT_ENABLED:
+        return True
+
+    token = websocket.query_params.get("token")
+    if not token:
+        logger.warning("VNC: Intento de conexión sin token query parameter.")
+        await websocket.close(code=1008, reason="Authentication token is required")
+        return False
+
+    jwks_client = getattr(websocket.app.state, "jwks_client", None)
+    if not jwks_client:
+        logger.error("VNC: jwks_client no inicializado en el state de la aplicación.")
+        await websocket.close(code=1011, reason="Authentication service unavailable")
+        return False
+
+    try:
+        loop = asyncio.get_running_loop()
+        signing_key = await loop.run_in_executor(None, jwks_client.get_signing_key_from_jwt, token)
+
+        decode_options = {"verify_exp": True}
+        decode_kwargs = {
+            "algorithms": ["RS256"],
+            "issuer":     settings.JWT_ISSUER,
+            "options":    decode_options,
+        }
+
+        if settings.JWT_AUDIENCE:
+            decode_kwargs["audience"] = settings.JWT_AUDIENCE
+        else:
+            decode_options["verify_aud"] = False
+
+        jwt.decode(token, signing_key.key, **decode_kwargs)
+        return True
+
+    except jwt.ExpiredSignatureError:
+        logger.warning("VNC: Token expirado.")
+        await websocket.close(code=1008, reason="Token has expired")
+        return False
+    except jwt.InvalidTokenError as exc:
+        logger.warning("VNC: Token inválido: %s", exc)
+        await websocket.close(code=1008, reason="Invalid token")
+        return False
+    except Exception as exc:
+        logger.error("VNC: Error inesperado validando JWT: %s", exc, exc_info=True)
+        await websocket.close(code=1011, reason="Internal authentication error")
+        return False
 
 VNC_SSH_KEY_PATH      = os.getenv("VNC_SSH_KEY_PATH",      "/app/keys/id_ed25519")
 VNC_SSH_USER          = os.getenv("VNC_SSH_USER",          "ubuntu")
@@ -89,6 +143,8 @@ async def vnc_proxy(websocket: WebSocket,
       Browser  ←→  ApiGW WebSocket  ←→  SSH tunnel  ←→  QEMU WebSocket en worker
     """
     await websocket.accept()
+    if not await verify_vnc_token(websocket):
+        return
     logger.info("VNC proxy via SSH: %s:%d → QEMU ws_port=%d", gateway_ip, ssh_port, ws_port)
 
     loop = asyncio.get_running_loop()
@@ -208,6 +264,8 @@ async def vnc_proxy_openstack(websocket: WebSocket, token: str):
     URL:  ws://apigw:8085/vnc/openstack/{nova_token}
     """
     await websocket.accept()
+    if not await verify_vnc_token(websocket):
+        return
     logger.info("VNC OpenStack proxy: token=%s", token[:8])
 
     loop = asyncio.get_running_loop()

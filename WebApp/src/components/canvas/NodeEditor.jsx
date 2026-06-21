@@ -319,33 +319,20 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, sliceId, zoneId
                                     </div>
                                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 5 }}>
                                         <div style={{ fontSize: 10, fontWeight: 700, color: T.textMuted }}>IP del Pool {zoneIdNum === 2 ? "(10.60.16.X)" : "(10.60.15.X)"}</div>
-                                        {!f.external_ip && zoneIdNum !== 2 && <span style={{ fontSize: 8, color: T.textMuted, fontStyle: "italic" }}>Sin acceso inbound si no se asigna</span>}
+                                        {!f.external_ip && <span style={{ fontSize: 8, color: T.textMuted, fontStyle: "italic" }}>Sin acceso inbound si no se asigna</span>}
                                     </div>
                                     <select value={f.external_ip||""} disabled={isReadOnly}
                                         onChange={e => u("external_ip", e.target.value)}
                                         style={{ ...inp, fontSize: 12, cursor: "pointer" }}>
-                                        <option value="">{zoneIdNum === 2 ? "— IP aleatoria (asignada automáticamente) —" : "— Sin IP VPN (solo NAT saliente) —"}</option>
+                                        <option value="">— Sin IP VPN (solo NAT saliente) —</option>
+                                        {zoneIdNum === 2 && <option value="random">— IP aleatoria (asignada automáticamente) —</option>}
                                         {availableIps.map(ip => <option key={ip} value={ip}>{ip}</option>)}
                                     </select>
                                     {f.external_ip && (
                                         <div style={{ fontSize: 10, color: T.accent, marginTop: 6, background: T.accentLight, borderRadius: 6, padding: "6px 9px", lineHeight: 1.5 }}>
                                             <CheckCircle size={11} style={{ display: "inline", marginRight: 4 }} />
-                                            IP VPN: <strong>{f.external_ip}</strong><br />
-                                            <code style={{ fontFamily: "monospace", fontSize: 10 }}>ssh usuario@{f.external_ip}</code>
-                                        </div>
-                                    )}
-
-                                    {zoneIdNum === 2 && !selectedImage?.cloud_init_support && (
-                                        <div style={{ fontSize: 10, color: T.yellow, marginTop: 8, background: T.yellowLight, border: `1px solid ${T.yellow}44`, borderRadius: 6, padding: "8px 9px", lineHeight: 1.5 }}>
-                                            <AlertTriangle size={11} style={{ display: "inline", marginRight: 4, verticalAlign: "text-top" }} />
-                                            Esta imagen no soporta cloud-init: la interfaz de red externa <strong>no se configura sola</strong>.
-                                            Después de desplegar, abre la consola web de la VM y ejecuta dentro de ella:
-                                            <div style={{ marginTop: 4 }}>
-                                                <code style={{ fontFamily: "monospace", fontSize: 10, display: "block", background: T.surface, borderRadius: 4, padding: "4px 6px" }}>
-                                                    sudo cirros-dhcpc up eth1
-                                                </code>
-                                            </div>
-                                            (si la imagen no es CirrOS, usa el comando equivalente para activar DHCP en la segunda interfaz de red).
+                                            IP VPN: <strong>{f.external_ip === "random" ? "Asignación automática" : f.external_ip}</strong><br />
+                                            <code style={{ fontFamily: "monospace", fontSize: 10 }}>ssh usuario@{f.external_ip === "random" ? "<IP_ASIGNADA>" : f.external_ip}</code>
                                         </div>
                                     )}
                                 </div>

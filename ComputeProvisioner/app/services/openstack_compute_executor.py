@@ -126,10 +126,12 @@ class OpenStackComputeExecutor:
             port_id = None
             external_port_id = None
             external_ip = None
+            link_ports = []
             if vm.network_ports and isinstance(vm.network_ports, dict):
                 port_id = vm.network_ports.get("provider_port_id")
                 external_port_id = vm.network_ports.get("external_port_id")
                 external_ip = vm.network_ports.get("external_ip")
+                link_ports = vm.network_ports.get("link_ports", [])
             elif vm.network_ports and isinstance(vm.network_ports, list) and vm.network_ports:
                 port_id = vm.network_ports[0]
 
@@ -145,6 +147,10 @@ class OpenStackComputeExecutor:
             if external_port_id:
                 networks.append({"port": external_port_id})
                 logger.info(f"[OpenStack] VM {vm.vm_id}: adjuntando puerto externo {external_port_id} (ip={external_ip})")
+            
+            for lp_id in link_ports:
+                networks.append({"port": lp_id})
+                logger.info(f"[OpenStack] VM {vm.vm_id}: adjuntando puerto de enlace {lp_id}")
 
             create_kwargs = dict(
                 name=server_name,
