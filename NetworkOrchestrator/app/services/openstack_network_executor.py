@@ -425,15 +425,23 @@ class OpenStackNetworkExecutor:
             
             # 1. Borrar IPs Flotantes y Puertos
             if network:
-                ports = list(await asyncio.to_thread(conn.network.ports, network_id=network.id))
-                for port in ports:
-                    fips = list(await asyncio.to_thread(conn.network.ips, port_id=port.id))
-                    for fip in fips:
-                        logger.info(f"[OpenStack] Liberando IP flotante: {fip.floating_ip_address}")
-                        await asyncio.to_thread(conn.network.delete_ip, fip.id)
-                        
-                    logger.info(f"[OpenStack] Eliminando puerto Neutron: {port.id}")
-                    await asyncio.to_thread(conn.network.delete_port, port.id)
+                try:
+                    ports = list(await asyncio.to_thread(conn.network.ports, network_id=network.id))
+                    for port in ports:
+                        try:
+                            fips = list(await asyncio.to_thread(conn.network.ips, port_id=port.id))
+                            for fip in fips:
+                                try:
+                                    logger.info(f"[OpenStack] Liberando IP flotante: {fip.floating_ip_address}")
+                                    await asyncio.to_thread(conn.network.delete_ip, fip.id)
+                                except Exception as e:
+                                    logger.warning(f"[OpenStack] Error al liberar IP flotante {fip.id}: {e}")
+                            logger.info(f"[OpenStack] Eliminando puerto Neutron: {port.id}")
+                            await asyncio.to_thread(conn.network.delete_port, port.id)
+                        except Exception as e:
+                            logger.warning(f"[OpenStack] Error al eliminar puerto Neutron {port.id}: {e}")
+                except Exception as e:
+                    logger.warning(f"[OpenStack] Error al listar o procesar puertos de red {network_name}: {e}")
             
             # 1.5 Borrar puertos externos (red provider "external", compartida — no se borra la red)
             try:
@@ -463,29 +471,44 @@ class OpenStackNetworkExecutor:
                         )
                     except Exception as e:
                         logger.warning(f"[OpenStack] No se pudo desasociar la subnet del router: {e}")
-                logger.info(f"[OpenStack] Eliminando router virtual: {router.name}")
-                await asyncio.to_thread(conn.network.delete_router, router.id)
+                try:
+                    logger.info(f"[OpenStack] Eliminando router virtual: {router.name}")
+                    await asyncio.to_thread(conn.network.delete_router, router.id)
+                except Exception as e:
+                    logger.warning(f"[OpenStack] No se pudo eliminar router virtual: {e}")
                 
             # 3. Eliminar Subred
             if subnet:
-                logger.info(f"[OpenStack] Eliminando subnet: {subnet.name}")
-                await asyncio.to_thread(conn.network.delete_subnet, subnet.id)
+                try:
+                    logger.info(f"[OpenStack] Eliminando subnet: {subnet.name}")
+                    await asyncio.to_thread(conn.network.delete_subnet, subnet.id)
+                except Exception as e:
+                    logger.warning(f"[OpenStack] No se pudo eliminar subnet: {e}")
                 
             # 4. Eliminar Red
             if network:
-                logger.info(f"[OpenStack] Eliminando red: {network.name}")
-                await asyncio.to_thread(conn.network.delete_network, network.id)
+                try:
+                    logger.info(f"[OpenStack] Eliminando red: {network.name}")
+                    await asyncio.to_thread(conn.network.delete_network, network.id)
+                except Exception as e:
+                    logger.warning(f"[OpenStack] No se pudo eliminar red: {e}")
                 
             # 5. Eliminar Security Groups
-            sec_group = await asyncio.to_thread(conn.network.find_security_group, secgroup_name)
-            if sec_group:
-                logger.info(f"[OpenStack] Eliminando Security Group: {sec_group.name}")
-                await asyncio.to_thread(conn.network.delete_security_group, sec_group.id)
+            try:
+                sec_group = await asyncio.to_thread(conn.network.find_security_group, secgroup_name)
+                if sec_group:
+                    logger.info(f"[OpenStack] Eliminando Security Group: {sec_group.name}")
+                    await asyncio.to_thread(conn.network.delete_security_group, sec_group.id)
+            except Exception as e:
+                logger.warning(f"[OpenStack] No se pudo eliminar Security Group {secgroup_name}: {e}")
                 
-            sec_group_no_int = await asyncio.to_thread(conn.network.find_security_group, f"secgroup-slice-{slice_id}-no-internet")
-            if sec_group_no_int:
-                logger.info(f"[OpenStack] Eliminando Security Group No-Internet: {sec_group_no_int.name}")
-                await asyncio.to_thread(conn.network.delete_security_group, sec_group_no_int.id)
+            try:
+                sec_group_no_int = await asyncio.to_thread(conn.network.find_security_group, f"secgroup-slice-{slice_id}-no-internet")
+                if sec_group_no_int:
+                    logger.info(f"[OpenStack] Eliminando Security Group No-Internet: {sec_group_no_int.name}")
+                    await asyncio.to_thread(conn.network.delete_security_group, sec_group_no_int.id)
+            except Exception as e:
+                logger.warning(f"[OpenStack] No se pudo eliminar Security Group No-Internet: {e}")
                 
             logger.info(f"[OpenStack] Destrucción de red completada para slice {slice_id}")
             return DestroyNetworkResponse(

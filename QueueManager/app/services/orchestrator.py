@@ -217,16 +217,8 @@ class WorkflowOrchestrator:
         )
         await self._save_state(state)
 
-        # ── Paso 0: Network (siempre primero en destroy) ──────────────────────
-        logger.info("[SAGA][%s] Paso 0: Limpiando red física …", slice_id)
-        network_result = await self._step_network_destroy(request, az_id)
-        if not network_result:
-            logger.warning(
-                "[SAGA][%s] Network no respondió al destroy — continuando igualmente.", slice_id
-            )
-
-        # ── Paso 1: Compute ───────────────────────────────────────────────────
-        logger.info("[SAGA][%s] Paso 1: Destruyendo instancias/VMs …", slice_id)
+        # ── Paso 0: Compute (terminar instancias) ─────────────────────────────
+        logger.info("[SAGA][%s] Paso 0: Destruyendo instancias/VMs …", slice_id)
         compute_result = await self._step_compute_destroy(request, az_id)
 
         if compute_result is None:
@@ -237,6 +229,14 @@ class WorkflowOrchestrator:
         destroyed = compute_result.get("destroyed_vms", [])
         failed    = compute_result.get("failed_vms", [])
         status    = compute_result.get("status", "error")
+
+        # ── Paso 1: Network (Limpiar red física, puertos Neutron, SGs) ────────
+        logger.info("[SAGA][%s] Paso 1: Limpiando red física …", slice_id)
+        network_result = await self._step_network_destroy(request, az_id)
+        if not network_result:
+            logger.warning(
+                "[SAGA][%s] Network no respondió al destroy — continuando igualmente.", slice_id
+            )
 
         await self._delete_state(slice_id)
 
