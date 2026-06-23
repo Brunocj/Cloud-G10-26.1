@@ -150,21 +150,23 @@ def _upload_openstack_image(name: str, filepath: str, is_general: int) -> str:
         project_domain_name=os.getenv("OS_PROJECT_DOMAIN_NAME", "Default"),
     )
 
-    # Creamos el registro en Glance (visibility='private' por defecto es suficiente)
-    logger.info("[OpenStack] Creando imagen en Glance: %s", name)
-    image = conn.image.create_image(
+    # Detectar disk_format según extensión del archivo
+    ext = os.path.splitext(filepath)[1].lower()
+    disk_format_map = {".qcow2": "qcow2", ".img": "raw", ".iso": "iso"}
+    disk_fmt = disk_format_map.get(ext, "raw")
+
+    # Cloud layer: crea el registro + sube el archivo en una sola llamada
+    logger.info("[OpenStack] Subiendo imagen a Glance: %s (disk_format=%s)", name, disk_fmt)
+    image = conn.create_image(
         name=name,
-        disk_format='qcow2',
-        container_format='bare',
-        visibility='private'
+        filename=filepath,
+        disk_format=disk_fmt,
+        container_format="bare",
+        visibility="private",
+        wait=True,
     )
 
-    # Subimos el archivo binario
-    logger.info("[OpenStack] Subiendo archivo a Glance (UUID=%s)...", image.id)
-    with open(filepath, 'rb') as f:
-        conn.image.upload_image(image.id, f)
-    
-    logger.info("[OpenStack] Subida a Glance finalizada exitosamente.")
+    logger.info("[OpenStack] Subida a Glance finalizada (UUID=%s).", image.id)
     return image.id
 
 def _delete_openstack_image(glance_id: str) -> None:
