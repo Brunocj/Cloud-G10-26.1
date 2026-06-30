@@ -194,28 +194,23 @@ async def run_update_cycle():
                 )
 
             ratio_cpu = net_cpu / nominal_cpu
-            ratio_ram = net_ram / nominal_ram_gb
 
             # Cap ratio at 1.0 — if net > nominal, no overcommit possible
             ratio_cpu = min(ratio_cpu, 1.0)
-            ratio_ram = min(ratio_ram, 1.0)
 
             if worker_id not in _state:
                 _state[worker_id] = _init_state()
 
             s = _state[worker_id]
             s["mu_cpu"], s["M2_cpu"] = _welford_add(s["buf_cpu"], s["mu_cpu"], s["M2_cpu"], ratio_cpu)
-            s["mu_ram"], s["M2_ram"] = _welford_add(s["buf_ram"], s["mu_ram"], s["M2_ram"], ratio_ram)
 
             n = len(s["buf_cpu"])
             sig_cpu = _sigma(s["M2_cpu"], n)
-            sig_ram = _sigma(s["M2_ram"], n)
 
             denom_cpu = s["mu_cpu"] + K_CPU * sig_cpu
-            denom_ram = s["mu_ram"] + K_RAM * sig_ram
 
             oc_cpu = min(1.0 / denom_cpu, OC_CPU_MAX) if denom_cpu > 0 else OC_CPU_DEFAULT
-            oc_ram = min(1.0 / denom_ram, OC_RAM_MAX) if denom_ram > 0 else OC_RAM_DEFAULT
+            oc_ram = 2.0  # Fixed — RAM overcommit disabled, always 2.0
 
             worker = db.query(Worker).filter(Worker.id == worker_id).first()
             if not worker:
@@ -226,11 +221,11 @@ async def run_update_cycle():
             worker.oc_disco = OC_DISK_DEFAULT
 
             logger.info(
-                "[worker=%d] OC → oc_cpu=%.3f oc_ram=%.3f "
-                "(ratio_cpu=%.4f σ=%.4f ratio_ram=%.4f σ=%.4f "
+                "[worker=%d] OC → oc_cpu=%.3f oc_ram=%.3f (fixed) "
+                "(ratio_cpu=%.4f σ=%.4f "
                 "net_cpu=%.3f net_ram=%.3fGB nominal_cpu=%.0f nominal_ram=%.2fGB n=%d)",
                 worker_id, oc_cpu, oc_ram,
-                s["mu_cpu"], sig_cpu, s["mu_ram"], sig_ram,
+                s["mu_cpu"], sig_cpu,
                 net_cpu, net_ram, nominal_cpu, nominal_ram_gb, n
             )
             updated += 1
@@ -258,8 +253,9 @@ def get_window_state() -> Dict:
             "window_pct":      round(n / WINDOW_SIZE * 100, 1),
             "mu_ratio_cpu":    round(s["mu_cpu"], 4),
             "sigma_ratio_cpu": round(_sigma(s["M2_cpu"], n), 4),
-            "mu_ratio_ram":    round(s["mu_ram"], 4),
-            "sigma_ratio_ram": round(_sigma(s["M2_ram"], n), 4),
+            "mu_ratio_ram":    "fixed",
+            "sigma_ratio_ram": "fixed",
+            "oc_ram":          2.0,
             "baseline_n":      nb,
             "baseline_mu_cpu": round(b["mu_cpu"], 4) if b else 0,
             "baseline_mu_ram": round(b["mu_ram"], 4) if b else 0,
