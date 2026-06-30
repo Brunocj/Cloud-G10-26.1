@@ -12,13 +12,52 @@ from sqlalchemy import func
 from app.nats_producer import nats_producer
 
 logger = logging.getLogger("SliceManager.Worker")
-VM_PLACEMENT_URL = os.getenv("VM_PLACEMENT_URL", "http://vm-placement:8080/placement")
+VM_PLACEMENT_URL  = os.getenv("VM_PLACEMENT_URL",  "http://vm-placement:8080/placement")
+OBSERVABILITY_URL = os.getenv("OBSERVABILITY_URL", "http://observability:8006")
+
+# Umbrales de uso en vivo: workers que superen estos valores son excluidos
+# como candidatos al placement (gate previo al solver).
+MAX_CPU_USAGE_PCT = float(os.getenv("MAX_CPU_USAGE_PCT", "95"))
+MAX_RAM_USAGE_PCT = float(os.getenv("MAX_RAM_USAGE_PCT", "90"))
 
 # Factores de overcommit de arranque por dimensión (usados si Observabilidad
 # aún no ha calculado OC_r[j] para el worker)
 OC_CPU_DEFAULT   = 2.0
 OC_RAM_DEFAULT   = 1.54   # 1/0.65
 OC_DISCO_DEFAULT = 1.0    # sin overcommit
+
+
+async def fetch_worker_usage() -> dict:
+    """
+    Consulta Observability `/metrics/workers` y devuelve un dict
+    { worker_id (int): { 'cpu_pct': float, 'ram_pct': float } }.
+
+    Fallback: si Observability no responde dentro del timeout, retorna {} y
+    el filtro de elegibilidad queda inactivo (no se bloquea el despliegue).
+    """
+    url = f"{OBSERVABILITY_URL.rstrip('/')}/metrics/workers"
+    try:
+        async with httpx.AsyncClient(timeout=3.0, trust_env=False) as client:
+            r = await client.get(url)
+            r.raise_for_status()
+            data = r.json()
+    except Exception as e:
+        logger.warning("[USAGE_GATE] Observability no respondió (%s) — sin filtro de uso", e)
+        return {}
+
+    workers = data.get("workers", data) if isinstance(data, dict) else data
+    usage = {}
+    if isinstance(workers, list):
+        for w in workers:
+            try:
+                wid = int(w.get("worker_id") or w.get("id"))
+                usage[wid] = {
+                    "cpu_pct": float(w.get("live_cpu_usage_pct") or 0),
+                    "ram_pct": float(w.get("live_ram_usage_pct") or 0),
+                }
+            except (TypeError, ValueError):
+                continue
+    return usage
 
 # Cola global
 placement_queue = asyncio.Queue()
@@ -84,8 +123,26 @@ async def process_placement_worker():
                 .group_by(Vm.worker_id).all()
             )
 
+            # Uso en vivo de cada worker (CPU%/RAM%) reportado por Observability.
+            # Workers que superen los umbrales se excluyen del placement.
+            worker_usage = await fetch_worker_usage()
+
             servers_state = []
+            excluded_by_usage = []
             for w in workers_zona:
+                # Gate de elegibilidad por uso real reportado
+                u = worker_usage.get(w.id)
+                if u is not None:
+                    if u["ram_pct"] > MAX_RAM_USAGE_PCT or u["cpu_pct"] > MAX_CPU_USAGE_PCT:
+                        excluded_by_usage.append((w.id, u["cpu_pct"], u["ram_pct"]))
+                        logger.warning(
+                            "[USAGE_GATE] Worker-%d excluido: cpu=%.1f%% (max %.0f%%) "
+                            "ram=%.1f%% (max %.0f%%)",
+                            w.id, u["cpu_pct"], MAX_CPU_USAGE_PCT,
+                            u["ram_pct"], MAX_RAM_USAGE_PCT
+                        )
+                        continue
+
                 # Capacidades nominales del worker
                 cpu_nominal   = float(w.cpu or 0)
                 ram_nominal   = float(w.ram or 0) / 1024.0   # MB → GB
@@ -127,6 +184,16 @@ async def process_placement_worker():
                     ram_nominal,   oc_ram,   c_ef_ram,   usado_ram,   disp_ram,
                     disco_nominal, oc_disco, c_ef_disco, usado_disco, disp_disco,
                 )
+
+            if not servers_state:
+                logger.error(
+                    "[PLACEMENT] ❌ Sin workers elegibles en zona_id=%s "
+                    "(excluidos por uso: %d)", zone_id, len(excluded_by_usage)
+                )
+                db_slice.status = "FAILED"
+                db.commit()
+                placement_queue.task_done()
+                continue
 
             # Formateamos VMs con recursos crudos para el VM Placement
             dynamic_vms = []
