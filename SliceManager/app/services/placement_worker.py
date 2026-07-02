@@ -18,7 +18,7 @@ OBSERVABILITY_URL = os.getenv("OBSERVABILITY_URL", "http://observability:8006")
 # Umbrales de uso en vivo: workers que superen estos valores son excluidos
 # como candidatos al placement (gate previo al solver).
 MAX_CPU_USAGE_PCT = float(os.getenv("MAX_CPU_USAGE_PCT", "95"))
-MAX_RAM_USAGE_PCT = float(os.getenv("MAX_RAM_USAGE_PCT", "90"))
+MAX_RAM_USAGE_PCT = float(os.getenv("MAX_RAM_USAGE_PCT", "95"))
 
 # Factores de overcommit de arranque por dimensión (usados si Observabilidad
 # aún no ha calculado OC_r[j] para el worker)
