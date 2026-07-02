@@ -12,10 +12,10 @@ use en el siguiente placement.
 
 - Consultar métricas instantáneas de CPU y RAM del host por worker desde Prometheus (vía `node_exporter`).
 - Mantener un baseline por worker: consumo del host cuando no hay VMs activas.
-- Calcular el ratio de eficiencia: `ratio = (consumo_real - baseline) / nominal_solicitado`.
-- Mantener una ventana deslizante de 15 días de ratios por worker con Welford incremental — O(1) por ciclo.
-- Calcular factores OC por worker: `OC_r[j] = 1 / (μ_ratio_r[j] + k_r · σ_ratio_r[j])`.
-- Escribir `oc_cpu`, `oc_ram`, `oc_disco` en la tabla `workers` de MySQL.
+- Calcular el ratio de eficiencia de CPU: `ratio_cpu = (consumo_real - baseline) / nominal_solicitado`.
+- Mantener una ventana deslizante de 15 días de ratios de CPU por worker con Welford incremental — O(1) por ciclo.
+- Calcular el factor OC de CPU por worker: `OC_cpu[j] = 1 / (μ_ratio_cpu[j] + K_CPU · σ_ratio_cpu[j])`.
+- Escribir `oc_cpu`, `oc_ram`, `oc_disco` en la tabla `workers` de MySQL. **`oc_ram` es un valor fijo (2.0)** — no se calcula estadísticamente.
 - Exponer endpoints REST para monitoreo de métricas y estado de la ventana.
 - Exponer dashboard web opcional (controlado por `ENABLE_DASHBOARD`).
 
@@ -70,55 +70,68 @@ Esto captura el consumo del SO, hipervisor y procesos del sistema.
 Resta el baseline del consumo real para aislar el consumo atribuible a las VMs,
 luego calcula el ratio de eficiencia y acumula Welford sobre ese ratio.
 
-### Fórmula del ratio de eficiencia
+### Fórmula del ratio de eficiencia (solo CPU)
 
-Para cada worker `j` y dimensión `r` en cada ciclo:
+Para cada worker `j` en cada ciclo:
 
 ```
-consumo_real_r[j]   ← Prometheus (node_exporter del host)
-baseline_r[j]       ← μ Welford del consumo sin VMs (modo baseline)
-nominal_r[j]        ← Σ recursos solicitados por VMs ACTIVE (MySQL)
+consumo_real_cpu[j]   ← Prometheus (node_exporter del host)
+baseline_cpu[j]       ← μ Welford del consumo sin VMs (modo baseline)
+nominal_cpu[j]        ← Σ vcores solicitados por VMs ACTIVE (MySQL)
 
-consumo_neto_r[j] = max(consumo_real_r[j] - baseline_r[j], 0)
-ratio_r[j]         = min(consumo_neto_r[j] / nominal_r[j], 1.0)
+consumo_neto_cpu[j] = max(consumo_real_cpu[j] - baseline_cpu[j], 0)
+ratio_cpu[j]         = min(consumo_neto_cpu[j] / nominal_cpu[j], 1.0)
 ```
 
 El ratio se acota a máximo 1.0: si el consumo neto supera lo solicitado,
 no hay sobreasignación posible en esa dimensión.
 
-### Fórmula del OC
+**RAM ya no sigue este cálculo** — ver sección "RAM: overcommit fijo" más abajo.
+
+### Fórmula del OC (CPU)
 
 ```
-OC_r[j] = 1 / (μ_ratio_r[j] + k_r · σ_ratio_r[j])
+OC_cpu[j] = 1 / (μ_ratio_cpu[j] + K_CPU · σ_ratio_cpu[j])
 ```
 
-Donde `μ_ratio_r[j]` y `σ_ratio_r[j]` se calculan con Welford sobre el
-historial de ratios del worker.
+Donde `μ_ratio_cpu[j]` y `σ_ratio_cpu[j]` se calculan con Welford sobre el
+historial de ratios de CPU del worker.
 
-Si `OC_r[j]` supera el techo configurado (`OC_CPU_MAX`, `OC_RAM_MAX`), se limita.
+Si `OC_cpu[j]` supera el techo configurado (`OC_CPU_MAX`), se limita.
+
+### RAM: overcommit fijo
+
+`oc_ram` ya no se calcula estadísticamente. `weight_updater.py` escribe
+`oc_ram = 2.0` directamente en cada ciclo, sin Welford, sin ratio, sin
+baseline aplicado a RAM. Los buffers `buf_ram`/`mu_ram`/`M2_ram` y las
+variables `K_RAM`, `OC_RAM_DEFAULT`, `OC_RAM_MAX` quedaron sin efecto para
+este cálculo (el baseline de RAM en modo Baseline sigue acumulándose por
+compatibilidad, pero no se usa para determinar `oc_ram`).
 
 ### Guard de baseline
 
 Para evitar contaminar el buffer Welford con ratios calculados sin baseline
 (que sesgarían μ_ratio hacia arriba), el scheduler **no acumula ninguna muestra
-de ratio** hasta que el baseline tenga al menos `BASELINE_MIN_SAMPLES` muestras.
-Mientras tanto, el worker mantiene los defaults en BD.
+de ratio de CPU** hasta que el baseline tenga al menos `BASELINE_MIN_SAMPLES`
+muestras. Mientras tanto, el worker mantiene `OC_CPU_DEFAULT` en BD.
 
-### Ejemplo de cálculo
+### Ejemplo de cálculo (CPU)
 
-Worker 2 con una VM de 256MB de RAM:
+Worker 2 con una VM de 1 vCPU:
 
 ```
-baseline_ram    = 0.631 GB    ← consumo del host sin VMs
-consumo_real    = 0.810 GB    ← Prometheus (node_exporter)
-nominal_ram     = 0.250 GB    ← 1 VM × 256MB (MySQL)
+baseline_cpu    = 0.09 cores  ← consumo del host sin VMs
+consumo_real    = 0.31 cores  ← Prometheus (node_exporter)
+nominal_cpu     = 1.0 cores   ← 1 VM × 1 vcore (MySQL)
 
-consumo_neto    = 0.810 - 0.631 = 0.179 GB
-ratio_ram       = 0.179 / 0.250 = 0.716     → las VMs usan el 71.6% de lo pedido
+consumo_neto    = 0.31 - 0.09 = 0.22 cores
+ratio_cpu       = 0.22 / 1.0  = 0.22        → las VMs usan el 22% de lo pedido
 
-Con μ_ratio=0.716 y σ≈0 (poca varianza):
-OC_ram = 1 / (0.716 + 2.0×0) = 1.40×       → limitado a OC_RAM_MAX si aplica
+Con μ_ratio=0.22 y σ≈0 (poca varianza):
+OC_cpu = 1 / (0.22 + 1.0×0) = 4.5×          → limitado a OC_CPU_MAX si aplica
 ```
+
+`oc_ram` para este mismo worker sería `2.0` fijo, sin este cálculo.
 
 ### Algoritmo de Welford con ventana deslizante
 
@@ -138,16 +151,16 @@ sigma   = sqrt(M2_new / N)
 | Dimensión | k   | Confianza | Razonamiento |
 |-----------|-----|-----------|--------------|
 | CPU       | 1.0 | 84%       | Time-shared, throttling recuperable |
-| RAM       | 2.0 | 97.7%     | OOM-killer irreversible — conservador |
+| RAM       | —   | —         | **Fijo en 2.0** — ya no usa Welford/ratio/k |
 | Disco     | 0.0 | —         | Asignación persistente — sin overcommit (OC=1.0 fijo) |
 
-### Valores de arranque (mientras OC = NULL en BD)
+### Valores de arranque / fijos
 
-| Dimensión | Default |
-|-----------|---------|
-| CPU       | 2.0     |
-| RAM       | 1.54    |
-| Disco     | 1.0     |
+| Dimensión | Valor | Origen |
+|-----------|-------|--------|
+| CPU       | 2.0   | Default de arranque (mientras OC_cpu = NULL en BD); luego calculado |
+| RAM       | 2.0   | **Fijo — escrito en cada ciclo, no calculado** |
+| Disco     | 1.0   | Fijo — sin overcommit |
 
 ---
 
@@ -279,10 +292,10 @@ ALTER TABLE workers ADD COLUMN oc_disco FLOAT NULL;
 | `OC_UPDATE_INTERVAL`   | `900`                     | Intervalo del scheduler en segundos |
 | `WINDOW_DAYS`          | `15`                      | Días de historia en la ventana deslizante |
 | `K_CPU`                | `1.0`                     | Factor de seguridad k para CPU |
-| `K_RAM`                | `2.0`                     | Factor de seguridad k para RAM |
+| `K_RAM`                | `2.0`                     | **Sin efecto** — RAM ya no se calcula estadísticamente (queda por compatibilidad) |
 | `OC_CPU_DEFAULT`       | `2.0`                     | OC CPU de arranque (mientras buffer vacío / NULL) |
-| `OC_RAM_DEFAULT`       | `1.54`                    | OC RAM de arranque |
-| `OC_RAM_MAX`           | `1.6`                     | Techo para OC RAM |
+| `OC_RAM_DEFAULT`       | `1.54`                    | **Sin efecto** — `oc_ram` siempre se escribe como `2.0` |
+| `OC_RAM_MAX`           | `1.6`                     | **Sin efecto** — no hay techo que aplicar sobre un valor fijo |
 | `OC_CPU_MAX`           | `4.0`                     | Techo para OC CPU |
 | `BASELINE_MIN_SAMPLES` | `5`                       | Muestras mínimas de baseline antes de calcular OC |
 | `ENABLE_DASHBOARD`     | `false`                   | `true` para habilitar /dashboard |
@@ -334,11 +347,12 @@ El dashboard muestra en tiempo real:
 **Sección SUMMARY:** targets up/total, cycles run, OC source (live/default), last error.
 
 **Sección WORKERS:** tarjeta por worker con CPU%, RAM% en vivo, y factores OC
-(con badge `default`, `live` o `fixed`).
+(con badge `default`, `live` o `fixed`). `oc_ram` siempre muestra `fixed`.
 
-**Sección WORKER WELFORD STATE:** tabla con μ_ratio y σ_ratio por worker,
+**Sección WORKER WELFORD STATE:** tabla con μ_ratio y σ_ratio de CPU por worker,
 baseline CPU/RAM, número de muestras, barra de progreso de la ventana, y
-estado (Baseline / Warming up / Live).
+estado (Baseline / Warming up / Live). Ya no reporta μ_ratio/σ_ratio de RAM
+(el campo se muestra como `"fixed"`).
 
 ---
 
@@ -368,7 +382,8 @@ docker compose logs -f prometheus
 ## Integración con el Slice Manager
 
 El Slice Manager lee `oc_cpu`, `oc_ram`, `oc_disco` desde la tabla `workers` al
-construir el Servers' State. El cambio en `placement_worker.py` es:
+construir el Servers' State. `oc_ram` siempre vale `2.0` (fijo). El cambio en
+`placement_worker.py` es:
 
 ```python
 # Antes (F_OP escalar hardcodeado):
@@ -377,7 +392,7 @@ C_i = (3*cpu + 5*ram_gb + 1*disk_gb) * F_OP
 
 # Después (factores por dimensión desde BD):
 oc_cpu   = worker.oc_cpu   or OC_CPU_DEFAULT    # 2.0
-oc_ram   = worker.oc_ram   or OC_RAM_DEFAULT    # 1.54
+oc_ram   = worker.oc_ram   or OC_RAM_DEFAULT    # 1.54 (fallback; en BD normalmente ya es 2.0)
 oc_disco = worker.oc_disco or OC_DISCO_DEFAULT  # 1.0
 
 C_i = 3*(cpu * oc_cpu) + 5*(ram_gb * oc_ram) + 1*(disk_gb * oc_disco)
@@ -385,6 +400,12 @@ C_i = 3*(cpu * oc_cpu) + 5*(ram_gb * oc_ram) + 1*(disk_gb * oc_disco)
 
 La estructura de pesos β:α:γ = 5:3:1 se mantiene idéntica. VM Placement no
 requiere cambios — sigue recibiendo `{worker_id, disponible}` escalar.
+
+Además, antes de construir el Servers' State, el Slice Manager consulta
+`GET /metrics/workers` de este servicio para aplicar un **gate de elegibilidad
+por uso en vivo**: workers con `live_ram_usage_pct > 90` o
+`live_cpu_usage_pct > 95` se excluyen del placement (no reciben nuevas VMs).
+Ver `READMEslicemanager.md` para el detalle del filtro.
 
 ---
 

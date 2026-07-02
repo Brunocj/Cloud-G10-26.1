@@ -87,10 +87,30 @@ Compute Provisioner y el Network Orchestrator (Strategy Pattern).
 
 ---
 
+## Gate de elegibilidad por uso en vivo
+
+Antes de construir el Servers' State, `placement_worker` consulta
+`GET http://observability:8006/metrics/workers` y excluye workers cuyo uso
+reportado supere los umbrales configurados:
+
+```
+worker excluido si:  live_ram_usage_pct > MAX_RAM_USAGE_PCT (default 90)
+                   O  live_cpu_usage_pct > MAX_CPU_USAGE_PCT (default 95)
+```
+
+Los umbrales son variables de entorno (`MAX_RAM_USAGE_PCT`, `MAX_CPU_USAGE_PCT`)
+definidas en `placement_worker.py`. Si Observability no responde (timeout 3s),
+el gate queda inactivo y no se excluye a ningún worker (fallback permisivo).
+Si tras el filtro no queda ningún worker elegible en la zona, el slice pasa
+directamente a `FAILED` sin invocar al VM Placement.
+
+---
+
 ## Servers' State multidimensional
 
 Al recibir una orden de deploy, el `placement_worker` construye el Servers' State desde BD
-con tres dimensiones independientes por worker:
+con tres dimensiones independientes por worker, **usando solo los workers que pasaron
+el gate de elegibilidad por uso**:
 
 ```
 OC_r[j]      — factor de overcommit por recurso y worker (calculado por Observabilidad,
@@ -121,16 +141,17 @@ deploy_router.py
 placement_worker.py (background)
     │
     ├─ 1. Lee VMs del slice desde MySQL
-    ├─ 2. Construye Servers' State (cpu/ram/disco) con workers de la zona
-    ├─ 3. POST http://vm-placement:8080/placement → mapa vm→worker
+    ├─ 2. Consulta Observability (/metrics/workers) y excluye workers sobrecargados
+    ├─ 3. Construye Servers' State (cpu/ram/disco) con workers elegibles de la zona
+    ├─ 4. POST http://vm-placement:8080/placement → mapa vm→worker
     │
     │  Si placement == SUCCESS:
-    ├─ 4. Genera TAP de gestión por VM (eth0): t-{slice[-3:]}-{vm[:4]}-m
-    ├─ 5. Para cada edge: genera TAPs de datos, MACs, asigna VLAN libre (100–4000)
-    ├─ 6. Por cada VM: asigna VNC port libre, resuelve image_path, asigna IPs
-    ├─ 7. Guarda deployed_vms y deployed_links en slice_json (MySQL)
-    ├─ 8. Publica slice.deploy en NATS JetStream → Queue Manager
-    └─ 9. Cambia status → PROVISIONING (o FAILED si el publish falló)
+    ├─ 5. Genera TAP de gestión por VM (eth0): t-{slice[-3:]}-{vm[:4]}-m
+    ├─ 6. Para cada edge: genera TAPs de datos, MACs, asigna VLAN libre (100–4000)
+    ├─ 7. Por cada VM: asigna VNC port libre, resuelve image_path, asigna IPs
+    ├─ 8. Guarda deployed_vms y deployed_links en slice_json (MySQL)
+    ├─ 9. Publica slice.deploy en NATS JetStream → Queue Manager
+    └─ 10. Cambia status → PROVISIONING (o FAILED si el publish falló)
     ▼
 Queue Manager → Compute + Network → slice.result
     ▼
@@ -331,6 +352,9 @@ El worker con `id=1` es el headnode — corre los servicios y **no recibe VMs**.
 |---|---|---|
 | `NATS_URL` | `nats://localhost:4222` | URL del servidor NATS |
 | `VM_PLACEMENT_URL` | `http://vm-placement:8080/placement` | URL del VM Placement |
+| `OBSERVABILITY_URL` | `http://observability:8006` | URL de Observability (consulta de uso en vivo) |
+| `MAX_CPU_USAGE_PCT` | `95` | Umbral de CPU% en vivo — workers por encima quedan excluidos del placement |
+| `MAX_RAM_USAGE_PCT` | `90` | Umbral de RAM% en vivo — workers por encima quedan excluidos del placement |
 | `DB_HOST` | `mysql-db` | Host de MySQL |
 | `DB_USER` | `root` | Usuario MySQL |
 | `DB_PASSWORD` | `root` | Contraseña MySQL |
