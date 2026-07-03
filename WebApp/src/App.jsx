@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
-import { Routes, Route, Navigate, useNavigate, useParams, useLocation } from "react-router-dom";
+import { Routes, Route, Navigate, useNavigate, useLocation } from "react-router-dom";
 
 // Theme
 import { T, getGlobalCss } from "./theme/tokens";
@@ -21,13 +21,6 @@ import { Sidebar } from "./components/sidebar/Sidebar";
 // Utilities
 import { mkSlice, refreshMeta } from "./utils/topology";
 import { createApiFetch }       from "./utils/api";
-
-// ─── Route wrapper: extract :id param and pass as activeId ────────────────────
-const SliceRoute = ({ children, setActiveId }) => {
-    const { id } = useParams();
-    useEffect(() => { setActiveId(id ?? null); }, [id]);
-    return children;
-};
 
 // ─── ROOT ─────────────────────────────────────────────────────────────────────
 export default function App() {
@@ -55,6 +48,14 @@ export default function App() {
     const [activeId,   setActiveId]   = useState(null);
     const activeIdRef = useRef(null);
     useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
+
+    // Sync activeId from URL on initial load / page refresh
+    useEffect(() => {
+        const match = location.pathname.match(/^\/slice\/(.+)$/);
+        if (match && match[1] !== "new" && !activeId) {
+            setActiveId(match[1]);
+        }
+    }, []);
 
     // Designer canvas (new slice in progress)
     const [nodes, setNodes] = useState([]);
@@ -452,6 +453,7 @@ export default function App() {
         // Leave-design confirmation callbacks
         onConfirmLeaveDiscard: handleConfirmLeaveDiscard,
         onConfirmLeaveSaveDraft: handleConfirmLeaveSaveDraft,
+        isDesignMode: sidebarMode === "design",
     };
 
     return (
@@ -482,11 +484,9 @@ export default function App() {
 
             {/* View/edit existing slice */}
             <Route path="/slice/:id" element={
-                <SliceRoute setActiveId={setActiveId}>
-                    <AppLayout sidebar={sidebar} toast={toast} themeRev={themeRev}>
-                        <CanvasView {...canvasProps} />
-                    </AppLayout>
-                </SliceRoute>
+                <AppLayout sidebar={sidebar} toast={toast} themeRev={themeRev}>
+                    <CanvasView {...canvasProps} />
+                </AppLayout>
             } />
 
             {/* Browse slices — home */}

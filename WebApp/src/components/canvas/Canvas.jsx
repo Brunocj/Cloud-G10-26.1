@@ -20,7 +20,7 @@ const buildIfaceMap = (edges) => {
 };
 
 // ─── Canvas ──────────────────────────────────────────────────────────────────
-export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlice, onOpenConsole, targetAz, setTargetAz, apiFetch, onCleared }) => {
+export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlice, onOpenConsole, targetAz, setTargetAz, apiFetch, onCleared, isDesignMode }) => {
     const svgRef   = useRef();
     const groupRef = useRef();           // root <g> — updated imperatively during pan/zoom
 
@@ -637,8 +637,8 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                     </g>
                 </svg>
 
-                {/* ── Empty state hint ── */}
-                {nodes.length === 0 && (
+                {/* ── Empty state hint (only in design mode) ── */}
+                {nodes.length === 0 && isDesignMode && (
                     <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column",
                         alignItems: "center", justifyContent: "center", pointerEvents: "none", gap: 12 }}>
                         <AzureVm size={64} />

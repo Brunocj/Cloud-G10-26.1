@@ -3,8 +3,9 @@ import { Badge }       from "../components/ui/Badge";
 import { UserAvatar }  from "../components/ui/UserAvatar";
 import { ThemePicker } from "../components/ui/ThemePicker";
 import {
-    ArrowLeft, Save, Zap, Flame, Upload, Download,
+    ArrowLeft, Save, Zap, Flame, Upload, Download, LayoutList,
 } from "../components/ui/Icon";
+import { AzureVm } from "../components/ui/AzureIcons";
 
 import { Canvas }          from "../components/canvas/Canvas";
 import { DeployModal }     from "../components/modals/DeployModal";
@@ -39,7 +40,12 @@ export const CanvasView = ({
     flash, apiFetch,
     // Leave-design confirmation callbacks
     onConfirmLeaveDiscard, onConfirmLeaveSaveDraft,
+    // Mode
+    isDesignMode,
 }) => {
+    // Three states: "slice" (viewing/editing existing), "design" (new slice), "browse" (nothing selected)
+    const viewState = activeSlice ? "slice" : isDesignMode ? "design" : "browse";
+
     return (
         <>
             {/* ── Topbar ───────────────────────────────────────────────── */}
@@ -49,7 +55,7 @@ export const CanvasView = ({
                 display: "flex", alignItems: "center", gap: 12,
                 flexShrink: 0, boxShadow: "0 2px 8px rgba(20,50,22,0.05)",
             }}>
-                {activeSlice ? (
+                {viewState === "slice" ? (
                     /* ── Viewing / editing an existing slice ── */
                     <>
                         <button onClick={onBack}
@@ -82,7 +88,7 @@ export const CanvasView = ({
                         <UserAvatar user={user} onLogout={logout} onProfile={onProfile} />
                         <ThemePicker onThemeChange={reTheme} />
                     </>
-                ) : (
+                ) : viewState === "design" ? (
                     /* ── New slice designer ── */
                     <>
                         <span style={{ fontSize: 14, fontWeight: 700, color: T.text }}>Diseñador de Topología</span>
@@ -114,15 +120,36 @@ export const CanvasView = ({
                         <div style={{ width: 1, height: 22, background: T.border }} />
                         <UserAvatar user={user} onLogout={logout} onProfile={onProfile} />
                     </>
+                ) : (
+                    /* ── Browse mode — no slice selected ── */
+                    <>
+                        <LayoutList size={16} color={T.accent} />
+                        <span style={{ fontSize: 14, fontWeight: 700, color: T.text }}>Mis Slices</span>
+                        <div style={{ flex: 1 }} />
+                        <ThemePicker onThemeChange={reTheme} />
+                        <UserAvatar user={user} onLogout={logout} onProfile={onProfile} />
+                    </>
                 )}
             </div>
 
-            {/* ── Canvas ───────────────────────────────────────────────── */}
+            {/* ── Main content area ────────────────────────────────────── */}
             <div style={{ flex: 1, overflow: "hidden", display: "flex" }}>
-                {activeSlice
-                    ? <Canvas nodes={activeSlice.nodes} edges={activeSlice.edges} setNodes={setSliceNodes} setEdges={setSliceEdges} imageList={imageList} activeSlice={activeSlice} onOpenConsole={setConsoleVm} targetAz={targetAz} setTargetAz={setTargetAz} apiFetch={apiFetch} />
-                    : <Canvas nodes={nodes}             edges={edges}             setNodes={setNodes}      setEdges={setEdges}      imageList={imageList} activeSlice={null}        onOpenConsole={setConsoleVm} targetAz={targetAz} setTargetAz={setTargetAz} apiFetch={apiFetch} onCleared={() => { setTargetAz(""); setAzModalOpen(true); }} />
-                }
+                {viewState === "slice" ? (
+                    <Canvas nodes={activeSlice.nodes} edges={activeSlice.edges} setNodes={setSliceNodes} setEdges={setSliceEdges} imageList={imageList} activeSlice={activeSlice} onOpenConsole={setConsoleVm} targetAz={targetAz} setTargetAz={setTargetAz} apiFetch={apiFetch} isDesignMode={activeSlice.status === "DRAFT"} />
+                ) : viewState === "design" ? (
+                    <Canvas nodes={nodes} edges={edges} setNodes={setNodes} setEdges={setEdges} imageList={imageList} activeSlice={null} onOpenConsole={setConsoleVm} targetAz={targetAz} setTargetAz={setTargetAz} apiFetch={apiFetch} onCleared={() => { setTargetAz(""); setAzModalOpen(true); }} isDesignMode={true} />
+                ) : (
+                    /* ── Browse empty state — prompt to select a slice ── */
+                    <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12, background: T.bg }}>
+                        <AzureVm size={56} />
+                        <div style={{ fontSize: 14, fontWeight: 600, color: T.textMuted }}>
+                            Seleccione un slice de la barra lateral para visualizarlo
+                        </div>
+                        <div style={{ fontSize: 12, color: T.textFaint }}>
+                            O cree uno nuevo con el botón "Crear Nuevo Slice"
+                        </div>
+                    </div>
+                )}
             </div>
 
             {/* ── Modals ───────────────────────────────────────────────── */}
