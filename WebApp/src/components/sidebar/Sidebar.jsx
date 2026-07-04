@@ -1,35 +1,53 @@
+import { useState } from "react";
 import { T, btnBase } from "../../theme/tokens";
 import { Label }       from "../ui/Label";
 import { AzureVm }     from "../ui/AzureIcons";
 import {
     Cloud, Wrench,
-    LayoutList, Image, Plus, ArrowLeft,
+    LayoutList, Image, Plus, ArrowLeft, Activity, ChevronDown,
 } from "../ui/Icon";
 
 import { TemplatePicker } from "./TemplatePicker";
 import { SliceCard }      from "./SliceCard";
 import { ImagePanel }     from "./ImagePanel";
 
-// ─── Sidebar ──────────────────────────────────────────────────────────────────
-// Two modes:
-//   "browse"  — default: slice list + buttons to enter designer or image manager
-//   "design"  — active when designing a new slice or editing a DRAFT
-//   "images"  — active when managing images (admin/superAdmin/jefeProyecto only)
+// Statuses considered "active" — shown by default
+const ACTIVE_STATUSES = new Set(["ACTIVE", "PROVISIONING", "PENDING_APPROVAL", "DRAFT"]);
+
+// Secondary action button — accent-colored border/text/icon, matches the cloud icon
+const SecondaryBtn = ({ onClick, icon: Icon, label }) => (
+    <button onClick={onClick}
+        style={btnBase({
+            width: "100%", padding: "8px 12px", fontSize: 11,
+            background: T.accentLight,
+            color: T.accent,
+            border: `1px solid ${T.accent}44`,
+            boxShadow: "none",
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+        })}>
+        <Icon size={12} color={T.accent} /> {label}
+    </button>
+);
+
 export const Sidebar = ({
-    // Mode
     sidebarMode, setSidebarMode,
-    // Slice list
     slices, activeId, setActiveId,
     onNewSlice, onDestroySlice, onDeployDraft,
-    // Active slice (for viewing existing)
     activeSlice,
-    // Images
     fullImages, fetchFullImages, fetchImageList,
-    // Shared
     apiFetch, user, flash,
+    isSuperAdmin, onInfraMonitor,
 }) => {
-
     const isAdmin = user?.role === "admin" || user?.role === "superAdmin" || user?.role === "jefeProyecto";
+    const [showArchived, setShowArchived] = useState(false);
+
+    const sorted = [...slices].sort((a, b) => {
+        const p = { ACTIVE: 0, PROVISIONING: 1, PENDING_APPROVAL: 2, DRAFT: 3, FAILED: 4, TERMINATED: 5 };
+        return (p[a.status] ?? 6) - (p[b.status] ?? 6);
+    });
+
+    const visibleSlices  = sorted.filter(s => ACTIVE_STATUSES.has(s.status));
+    const archivedSlices = sorted.filter(s => !ACTIVE_STATUSES.has(s.status));
 
     return (
         <div style={{
@@ -48,35 +66,26 @@ export const Sidebar = ({
                 </div>
             </div>
 
-            {/* ───────────────────────────────────────────────────────────── */}
-            {/* MODE: DESIGN — tools for building topologies               */}
-            {/* ───────────────────────────────────────────────────────────── */}
+            {/* ── DESIGN MODE ──────────────────────────────────────────────── */}
             {sidebarMode === "design" && (
                 <>
-                    {/* Back button */}
-                    <button
-                        onClick={() => setSidebarMode("browse")}
-                        style={{
-                            width: "100%", padding: "10px 16px",
-                            display: "flex", alignItems: "center", gap: 6,
-                            background: "transparent", border: "none", borderBottom: `1px solid ${T.border}`,
-                            cursor: "pointer", fontFamily: "inherit",
-                            color: T.textMuted, fontSize: 11, fontWeight: 700,
-                            transition: "background 0.15s",
-                        }}
+                    <button onClick={() => setSidebarMode("browse")} style={{
+                        width: "100%", padding: "10px 16px",
+                        display: "flex", alignItems: "center", gap: 6,
+                        background: "transparent", border: "none", borderBottom: `1px solid ${T.border}`,
+                        cursor: "pointer", fontFamily: "inherit",
+                        color: T.textMuted, fontSize: 11, fontWeight: 700, transition: "background 0.15s",
+                    }}
                         onMouseEnter={e => e.currentTarget.style.background = T.accentLight}
-                        onMouseLeave={e => e.currentTarget.style.background = "transparent"}
-                    >
+                        onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
                         <ArrowLeft size={12} /> Volver a Slices
                     </button>
 
-                    {/* Section header */}
                     <div style={{ padding: "12px 16px 6px", display: "flex", alignItems: "center", gap: 6 }}>
                         <Wrench size={12} color={T.accent} />
                         <span style={{ fontSize: 11, fontWeight: 700, color: T.accent, textTransform: "uppercase", letterSpacing: "0.06em" }}>Herramientas de Diseño</span>
                     </div>
 
-                    {/* VM Drag */}
                     <div style={{ padding: "8px 14px 10px" }}>
                         <Label>Arrastra una VM al lienzo</Label>
                         <div draggable onDragStart={e => e.dataTransfer.setData("nodeType", "vm")}
@@ -89,48 +98,38 @@ export const Sidebar = ({
                         </div>
                     </div>
 
-                    {/* Templates */}
                     <div style={{ flex: 1, overflowY: "auto", borderTop: `1px solid ${T.border}` }}>
                         <TemplatePicker />
                     </div>
                 </>
             )}
 
-            {/* ───────────────────────────────────────────────────────────── */}
-            {/* MODE: IMAGES — image management (admin roles only)          */}
-            {/* ───────────────────────────────────────────────────────────── */}
+            {/* ── IMAGES MODE ─────────────────────────────────────────────── */}
             {sidebarMode === "images" && (
                 <>
-                    {/* Back button */}
-                    <button
-                        onClick={() => setSidebarMode("browse")}
-                        style={{
-                            width: "100%", padding: "10px 16px",
-                            display: "flex", alignItems: "center", gap: 6,
-                            background: "transparent", border: "none", borderBottom: `1px solid ${T.border}`,
-                            cursor: "pointer", fontFamily: "inherit",
-                            color: T.textMuted, fontSize: 11, fontWeight: 700,
-                            transition: "background 0.15s",
-                        }}
+                    <button onClick={() => setSidebarMode("browse")} style={{
+                        width: "100%", padding: "10px 16px",
+                        display: "flex", alignItems: "center", gap: 6,
+                        background: "transparent", border: "none", borderBottom: `1px solid ${T.border}`,
+                        cursor: "pointer", fontFamily: "inherit",
+                        color: T.textMuted, fontSize: 11, fontWeight: 700, transition: "background 0.15s",
+                    }}
                         onMouseEnter={e => e.currentTarget.style.background = T.accentLight}
-                        onMouseLeave={e => e.currentTarget.style.background = "transparent"}
-                    >
+                        onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
                         <ArrowLeft size={12} /> Volver a Slices
                     </button>
-
                     <div style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
                         <ImagePanel fullImages={fullImages} onRefresh={fetchFullImages} flash={flash} refreshImageList={fetchImageList} apiFetch={apiFetch} user={user} />
                     </div>
                 </>
             )}
 
-            {/* ───────────────────────────────────────────────────────────── */}
-            {/* MODE: BROWSE — default: navigate slices + action buttons    */}
-            {/* ───────────────────────────────────────────────────────────── */}
+            {/* ── BROWSE MODE ─────────────────────────────────────────────── */}
             {sidebarMode === "browse" && (
                 <>
                     {/* Action buttons */}
                     <div style={{ padding: "12px 14px", borderBottom: `1px solid ${T.border}`, display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 }}>
+                        {/* Primary — Crear Nuevo Slice */}
                         <button onClick={onNewSlice}
                             style={btnBase({
                                 width: "100%", padding: "9px 12px", fontSize: 12,
@@ -141,16 +140,12 @@ export const Sidebar = ({
                             <Plus size={13} /> Crear Nuevo Slice
                         </button>
 
+                        {/* Secondary buttons — accent-themed */}
                         {isAdmin && (
-                            <button onClick={() => setSidebarMode("images")}
-                                style={btnBase({
-                                    width: "100%", padding: "8px 12px", fontSize: 11,
-                                    background: T.surfaceElevated, color: T.textMuted,
-                                    border: `1px solid ${T.border}`, boxShadow: "none",
-                                    display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-                                })}>
-                                <Image size={12} /> Gestionar Imágenes
-                            </button>
+                            <SecondaryBtn onClick={() => setSidebarMode("images")} icon={Image} label="Gestionar Imágenes" />
+                        )}
+                        {isSuperAdmin && (
+                            <SecondaryBtn onClick={onInfraMonitor} icon={Activity} label="Monitoreo de Infraestructura" />
                         )}
                     </div>
 
@@ -158,18 +153,44 @@ export const Sidebar = ({
                     <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
                         <div style={{ padding: "10px 16px 6px", display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
                             <LayoutList size={12} color={T.accent} />
-                            <Label style={{ marginBottom: 0 }}>Mis Slices <span style={{ color: T.accent, marginLeft: 4 }}>{slices.length}</span></Label>
+                            <Label style={{ marginBottom: 0 }}>
+                                Mis Slices <span style={{ color: T.accent, marginLeft: 4 }}>{slices.length}</span>
+                            </Label>
                         </div>
+
                         <div style={{ flex: 1, overflowY: "auto", padding: "0 10px 12px", display: "flex", flexDirection: "column", gap: 8 }}>
-                            {[...slices].sort((a, b) => {
-                                const p = { ACTIVE: 0, PROVISIONING: 1, PENDING_APPROVAL: 2, DRAFT: 3, FAILED: 4, TERMINATED: 5 };
-                                return (p[a.status] ?? 6) - (p[b.status] ?? 6);
-                            }).map(sl => (
+                            {/* Active/provisioning/draft slices */}
+                            {visibleSlices.map(sl => (
                                 <SliceCard key={sl.id} slice={sl} active={activeId === sl.id}
                                     onClick={() => setActiveId(sl.id)}
                                     onDestroy={onDestroySlice}
                                     onDeploy={onDeployDraft} />
                             ))}
+
+                            {/* Archived slices (FAILED, TERMINATED) */}
+                            {archivedSlices.length > 0 && (
+                                <>
+                                    <button onClick={() => setShowArchived(v => !v)} style={{
+                                        display: "flex", alignItems: "center", justifyContent: "space-between",
+                                        width: "100%", padding: "6px 8px", marginTop: 4,
+                                        background: "transparent", border: "none", borderRadius: 6,
+                                        cursor: "pointer", fontFamily: "inherit",
+                                        fontSize: 10, fontWeight: 700, color: T.textMuted,
+                                        letterSpacing: "0.04em", textTransform: "uppercase",
+                                    }}>
+                                        <span>{showArchived ? "Ocultar" : "Ver"} terminados / fallidos ({archivedSlices.length})</span>
+                                        <ChevronDown size={12} style={{ transition: "transform 0.2s", transform: showArchived ? "rotate(180deg)" : "rotate(0deg)" }} />
+                                    </button>
+
+                                    {showArchived && archivedSlices.map(sl => (
+                                        <SliceCard key={sl.id} slice={sl} active={activeId === sl.id}
+                                            onClick={() => setActiveId(sl.id)}
+                                            onDestroy={onDestroySlice}
+                                            onDeploy={onDeployDraft} />
+                                    ))}
+                                </>
+                            )}
+
                             {slices.length === 0 && (
                                 <div style={{ color: T.textFaint, fontSize: 12, textAlign: "center", padding: 24 }}>
                                     Aún no hay slices

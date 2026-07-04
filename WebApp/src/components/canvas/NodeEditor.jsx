@@ -357,9 +357,9 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, sliceId, zoneId
                         <button
                             onClick={() => onOpenConsole({ workerIp: node.worker_ip, workerPort: node.worker_port, vncPort: node.vnc_port, vnc_url: node.vnc_url, sliceId, vmId: node.id, apiFetch })}
                             disabled={sliceStatus !== "ACTIVE"}
-                            style={btnBase({ width: "100%", background: T.text, color: "#fff", border: "none", padding: "8px 0", opacity: sliceStatus === "ACTIVE" ? 1 : 0.5,
+                            style={btnBase({ width: "100%", background: "#18181b", color: "#ffffff", border: "none", padding: "8px 0", opacity: sliceStatus === "ACTIVE" ? 1 : 0.45,
                                 display: "flex", alignItems: "center", justifyContent: "center", gap: 6 })}>
-                            <Terminal size={14} /> Abrir Consola Web
+                            <Terminal size={14} color="#ffffff" /> Abrir Consola Web
                         </button>
                         <button style={btnBase({ width: "100%", background: T.surface, color: T.accent, border: `1px solid ${T.accent}`,
                             display: "flex", alignItems: "center", justifyContent: "center", gap: 6 })}>

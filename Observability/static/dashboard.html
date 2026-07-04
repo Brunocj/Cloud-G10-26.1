@@ -391,6 +391,12 @@
 const REFRESH_INTERVAL = 15;
 let countdown = REFRESH_INTERVAL;
 
+// Safely coerce any value to a finite number before calling .toFixed()
+function toNum(v, fallback = 0) {
+  const n = parseFloat(v);
+  return isFinite(n) ? n : fallback;
+}
+
 async function fetchJSON(url) {
   const r = await fetch(url);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -482,17 +488,17 @@ function renderWorkers(data) {
         <div class="oc-grid">
           <div class="oc-item">
             <div class="oc-label">OC CPU</div>
-            <div class="oc-value ${isLive ? 'live' : 'default'}">${w.oc_cpu.toFixed(2)}×</div>
+            <div class="oc-value ${isLive ? 'live' : 'default'}">${toNum(w.oc_cpu).toFixed(2)}×</div>
             <div class="oc-source">${isLive ? 'live' : 'default'}</div>
           </div>
           <div class="oc-item">
             <div class="oc-label">OC RAM</div>
-            <div class="oc-value ${isLive ? 'live' : 'default'}">${w.oc_ram.toFixed(2)}×</div>
+            <div class="oc-value ${isLive ? 'live' : 'default'}">${toNum(w.oc_ram).toFixed(2)}×</div>
             <div class="oc-source">${isLive ? 'live' : 'default'}</div>
           </div>
           <div class="oc-item">
             <div class="oc-label">OC Disk</div>
-            <div class="oc-value default">${w.oc_disco.toFixed(2)}×</div>
+            <div class="oc-value default">${toNum(w.oc_disco).toFixed(2)}×</div>
             <div class="oc-source">fixed</div>
           </div>
         </div>
@@ -518,12 +524,12 @@ function renderWelford(data) {
     return `
     <tr>
       <td>worker-${w.worker_id}</td>
-      <td>${(wf.mu_ratio_cpu || 0).toFixed(4)}</td>
-      <td>${(wf.sigma_ratio_cpu || 0).toFixed(4)}</td>
-      <td>${(wf.mu_ratio_ram || 0).toFixed(4)}</td>
-      <td>${(wf.sigma_ratio_ram || 0).toFixed(4)}</td>
-      <td>${(wf.baseline_mu_cpu || 0).toFixed(3)} cores (n=${wf.baseline_n || 0})</td>
-      <td>${(wf.baseline_mu_ram || 0).toFixed(3)} GB</td>
+      <td>${toNum(wf.mu_ratio_cpu).toFixed(4)}</td>
+      <td>${toNum(wf.sigma_ratio_cpu).toFixed(4)}</td>
+      <td>${toNum(wf.mu_ratio_ram).toFixed(4)}</td>
+      <td>${toNum(wf.sigma_ratio_ram).toFixed(4)}</td>
+      <td>${toNum(wf.baseline_mu_cpu).toFixed(3)} cores (n=${wf.baseline_n || 0})</td>
+      <td>${toNum(wf.baseline_mu_ram).toFixed(3)} GB</td>
       <td>${wf.n_samples} / ${wf.window_size}</td>
       <td>
         <div style="display:flex;align-items:center;gap:8px">

@@ -12,8 +12,9 @@ import { LoginPage } from "./components/auth/LoginPage";
 import { AppLayout } from "./layouts/AppLayout";
 
 // Views
-import { CanvasView }  from "./views/CanvasView";
-import { ProfileView } from "./views/ProfileView";
+import { CanvasView }       from "./views/CanvasView";
+import { ProfileView }      from "./views/ProfileView";
+import { InfraMonitorView } from "./views/InfraMonitorView";
 
 // Sidebar
 import { Sidebar } from "./components/sidebar/Sidebar";
@@ -400,8 +401,9 @@ export default function App() {
         return <Navigate to="/" replace />;
     }
 
-    // ── RBAC guard for /images ────────────────────────────────────────────────
-    const isAdmin = user?.role === "admin" || user?.role === "superAdmin" || user?.role === "jefeProyecto";
+    // ── RBAC guards ──────────────────────────────────────────────────────────
+    const isAdmin      = user?.role === "admin" || user?.role === "superAdmin" || user?.role === "jefeProyecto";
+    const isSuperAdmin = user?.role === "superAdmin";
 
     // ── Shared sidebar (for all routes except profile) ────────────────────────
     const sidebar = (
@@ -421,6 +423,8 @@ export default function App() {
             apiFetch={apiFetch}
             user={user}
             flash={flash}
+            isSuperAdmin={isSuperAdmin}
+            onInfraMonitor={() => navigate("/admin/infra")}
         />
     );
 
@@ -464,6 +468,18 @@ export default function App() {
                     user={user} logout={logout} reTheme={reTheme}
                     themeRev={themeRev} onBack={() => navigate("/")}
                 />
+            } />
+
+            {/* Infrastructure monitor — superAdmin only, full screen */}
+            <Route path="/admin/infra" element={
+                isSuperAdmin
+                    ? <InfraMonitorView
+                          user={user} logout={logout} reTheme={reTheme}
+                          themeRev={themeRev} onBack={() => navigate("/")}
+                          onProfile={() => navigate("/profile")}
+                          apiFetch={apiFetch}
+                      />
+                    : <Navigate to="/" replace />
             } />
 
             {/* Images — RBAC guarded */}

@@ -350,12 +350,15 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
 
     // ── Render ────────────────────────────────────────────────────────────────
 
+    // Toolbar is only relevant when designing (new slice or DRAFT edit)
+    const showToolbar = !activeSlice || activeSlice.status === "DRAFT";
+
     return (
         <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", position: "relative",
             userSelect: "none", WebkitUserSelect: "none" }}>
 
-            {/* ── Mode bar ── */}
-            <div style={{ padding: "8px 14px", borderBottom: `1px solid ${T.border}`, background: T.surfaceElevated,
+            {/* ── Mode bar — only shown in design mode ── */}
+            {showToolbar && <div style={{ padding: "8px 14px", borderBottom: `1px solid ${T.border}`, background: T.surfaceElevated,
                 display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
                 {[  ["select", <MousePointer2 size={12} />, "Seleccionar y Mover"],
                     ["link",   <Link2 size={12} />,          "Enlazar Nodos"],
@@ -482,7 +485,7 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                         display: "flex", alignItems: "center", gap: 5 })}>
                     <Trash2 size={12} /> Limpiar
                 </button>
-            </div>
+            </div>}
 
             {/* ── SVG canvas ── */}
             <div style={{ flex: 1, position: "relative", overflow: "hidden" }}
