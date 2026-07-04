@@ -31,6 +31,12 @@ services:
       - HTTP_PROXY=socks5h://openstack-proxy:1080
       - HTTPS_PROXY=socks5h://openstack-proxy:1080
       - NO_PROXY=localhost,127.0.0.1,nats,vm-placement,db,10.20.11.212,host.docker.internal
+      #KEYCLOAK - CREDENCIALES
+      - KEYCLOAK_URL:http://keycloak:8080
+      - KEYCLOAK_REALM:pucp-cloud
+      - KEYCLOAK_ADMIN_USER:admin
+      - KEYCLOAK_ADMIN_PASS:admin123           # ⚠️ cambiar en producción
+      - KEYCLOAK_ADMIN_CLIENT:admin-cli
     volumes:
       # Monta la carpeta local ./keys en la ruta /app/keys dentro del contenedor
       # El ":ro" significa Read-Only (Solo lectura por seguridad)

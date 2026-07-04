@@ -60,6 +60,9 @@ export {
     User,
     Users,
     UserPlus,
+    Crown,
+    Search,
+    Edit3,
 
     // Files / Data
     ClipboardList,

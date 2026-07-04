@@ -15,6 +15,8 @@ import { AppLayout } from "./layouts/AppLayout";
 import { CanvasView }       from "./views/CanvasView";
 import { ProfileView }      from "./views/ProfileView";
 import { InfraMonitorView } from "./views/InfraMonitorView";
+import { ProjectsView }     from "./views/ProjectsView";
+import { UsersView }        from "./views/UsersView";
 
 // Sidebar
 import { Sidebar } from "./components/sidebar/Sidebar";
@@ -193,6 +195,15 @@ export default function App() {
         fetchSlices();
         fetchImageList();
         fetchFullImages();
+        // Sync current user to local cache (needed for project membership)
+        apiFetch("/users/sync", {
+            method: "POST",
+            body: JSON.stringify({
+                username: user?.username,
+                email:    user?.email,
+                fullname: user?.name,
+            }),
+        }).catch(e => console.error("user sync:", e));
         const interval = setInterval(fetchSlices, 8000);
         return () => clearInterval(interval);
     }, [isAuthenticated]);
@@ -425,6 +436,8 @@ export default function App() {
             flash={flash}
             isSuperAdmin={isSuperAdmin}
             onInfraMonitor={() => navigate("/admin/infra")}
+            onProjects={() => navigate("/projects")}
+            onUsersManage={() => navigate("/admin/users")}
         />
     );
 
@@ -478,6 +491,30 @@ export default function App() {
                           themeRev={themeRev} onBack={() => navigate("/")}
                           onProfile={() => navigate("/profile")}
                           apiFetch={apiFetch}
+                      />
+                    : <Navigate to="/" replace />
+            } />
+
+            {/* Projects management — admin/superAdmin/jefeProyecto, full screen */}
+            <Route path="/projects" element={
+                (isAdmin || user?.role === "jefeProyecto")
+                    ? <ProjectsView
+                          user={user} logout={logout} reTheme={reTheme}
+                          themeRev={themeRev} onBack={() => navigate("/")}
+                          onProfile={() => navigate("/profile")}
+                          apiFetch={apiFetch} flash={flash}
+                      />
+                    : <Navigate to="/" replace />
+            } />
+
+            {/* Users management — admin/superAdmin, full screen */}
+            <Route path="/admin/users" element={
+                (user?.role === "admin" || user?.role === "superAdmin")
+                    ? <UsersView
+                          user={user} logout={logout} reTheme={reTheme}
+                          themeRev={themeRev} onBack={() => navigate("/")}
+                          onProfile={() => navigate("/profile")}
+                          apiFetch={apiFetch} flash={flash}
                       />
                     : <Navigate to="/" replace />
             } />

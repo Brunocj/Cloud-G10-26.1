@@ -4,7 +4,7 @@ import { Label }       from "../ui/Label";
 import { AzureVm }     from "../ui/AzureIcons";
 import {
     Cloud, Wrench,
-    LayoutList, Image, Plus, ArrowLeft, Activity, ChevronDown,
+    LayoutList, Image, Plus, ArrowLeft, Activity, ChevronDown, Users, ShieldCheck,
 } from "../ui/Icon";
 
 import { TemplatePicker } from "./TemplatePicker";
@@ -36,9 +36,11 @@ export const Sidebar = ({
     activeSlice,
     fullImages, fetchFullImages, fetchImageList,
     apiFetch, user, flash,
-    isSuperAdmin, onInfraMonitor,
+    isSuperAdmin, onInfraMonitor, onProjects, onUsersManage,
 }) => {
-    const isAdmin = user?.role === "admin" || user?.role === "superAdmin" || user?.role === "jefeProyecto";
+    const isAdmin        = user?.role === "admin" || user?.role === "superAdmin" || user?.role === "jefeProyecto";
+    const isStrictAdmin  = user?.role === "admin" || user?.role === "superAdmin";
+    const canSeeProjects = user?.role === "admin" || user?.role === "superAdmin" || user?.role === "jefeProyecto";
     const [showArchived, setShowArchived] = useState(false);
 
     const sorted = [...slices].sort((a, b) => {
@@ -141,6 +143,12 @@ export const Sidebar = ({
                         </button>
 
                         {/* Secondary buttons — accent-themed */}
+                        {canSeeProjects && (
+                            <SecondaryBtn onClick={onProjects} icon={Users} label="Gestión de Proyectos" />
+                        )}
+                        {isStrictAdmin && (
+                            <SecondaryBtn onClick={onUsersManage} icon={ShieldCheck} label="Gestión de Usuarios" />
+                        )}
                         {isAdmin && (
                             <SecondaryBtn onClick={() => setSidebarMode("images")} icon={Image} label="Gestionar Imágenes" />
                         )}

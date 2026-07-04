@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.routers import slices, vnc_proxy, observability
+from app.routers import slices, vnc_proxy, observability, projects, users
 
 logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL),
@@ -98,6 +98,8 @@ if settings.JWT_ENABLED:
 app.include_router(slices.router)
 app.include_router(vnc_proxy.router)
 app.include_router(observability.router)
+app.include_router(projects.router)
+app.include_router(users.router)
 
 # ── Health ─────────────────────────────────────────────────────────────────
 @app.get("/health", tags=["gateway"])
