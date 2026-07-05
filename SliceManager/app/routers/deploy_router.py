@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Image, Slice, Vm, Vlan, IpPool, Worker
-from app.schemas import DeployRequest
+from app.schemas import DeployRequest, BulkDeployRequest
 from app.auth import CurrentUser, get_current_user
 from app.services.placement_worker import placement_queue
 from app.nats_producer import nats_producer
@@ -177,6 +177,152 @@ async def request_deploy(
             "message": "Solicitud enviada. Requiere aprobación del jefe del proyecto o admin.",
             "direct":  False,
         }
+
+@router.post("/bulk-deploy", status_code=202)
+async def bulk_deploy(
+    request: BulkDeployRequest,
+    db:      Session     = Depends(get_db),
+    user:    CurrentUser = Depends(get_current_user),
+):
+    """
+    Despliegue masivo: clona la topología para cada miembro del proyecto.
+    Solo jefeProyecto (del proyecto), admin o superAdmin.
+    Cada slice se crea con creator_id = UUID del miembro y se encola directamente.
+    """
+    from app.models import UserProject, Role, Project
+
+    logger.info("=" * 70)
+    logger.info("[BULK] 📥 Solicitud de despliegue masivo: project_id=%s, az=%s, prefix='%s'",
+                request.project_id, request.availability_zone_id, request.name_prefix)
+
+    # ── Validar proyecto ────────────────────────────────────────────────────
+    project = db.query(Project).filter(Project.id == request.project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Proyecto no encontrado")
+
+    # ── Autorización: admin/superAdmin o jefe del proyecto ──────────────────
+    if not can_deploy_directly(db, user.user_id, user.role, request.project_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Solo admin, superAdmin o jefeProyecto del proyecto pueden hacer despliegue masivo.",
+        )
+
+    # ── Obtener miembros del proyecto ───────────────────────────────────────
+    memberships = db.query(UserProject).filter(
+        UserProject.project_id == request.project_id
+    ).all()
+    if not memberships:
+        raise HTTPException(status_code=400, detail="El proyecto no tiene miembros")
+
+    # Excluir al usuario que hace el deploy (el jefe ya puede crear su propio slice aparte)
+    member_ids = [m.user_id for m in memberships if m.user_id != user.user_id]
+    if not member_ids:
+        raise HTTPException(status_code=400, detail="No hay otros miembros en el proyecto para desplegar")
+
+    logger.info("[BULK] 👥 %d miembros encontrados (excluyendo al solicitante)", len(member_ids))
+
+    # ── Validar imágenes vs. zona (fail-fast una sola vez) ──────────────────
+    nodes_template = request.slice_json.get("nodes", [])
+    edges_template = request.slice_json.get("edges", [])
+    for node in nodes_template:
+        img_id = node.get("image_id")
+        if img_id is None or int(img_id) < 0:
+            continue
+        img = db.query(Image).filter(Image.id == int(img_id)).first()
+        if img and img.availability_zone_id is not None and img.availability_zone_id != request.availability_zone_id:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Imagen '{img.name}' no compatible con la zona seleccionada.",
+            )
+
+    # ── Workers disponibles ────────────────────────────────────────────────
+    workers_db = db.query(Worker).all()
+    num_workers = len(workers_db)
+
+    results = []
+    errors  = 0
+
+    for member_id in member_ids:
+        try:
+            # 1. Crear draft con owner = miembro
+            import copy
+            nodes_copy = copy.deepcopy(nodes_template)
+            edges_copy = copy.deepcopy(edges_template)
+
+            nuevo_slice = Slice(
+                name=f"{request.name_prefix}-{member_id[:6]}",
+                status="DRAFT",
+                creator_id=member_id,
+                project_id=request.project_id,
+                slice_json={"edges": edges_copy},
+            )
+            db.add(nuevo_slice)
+            db.flush()
+
+            # 2. Crear VMs del slice
+            for index, vm_data in enumerate(nodes_copy):
+                asignado = workers_db[index % num_workers] if num_workers > 0 else None
+
+                img_id = vm_data.get("image_id")
+                if img_id is not None and int(img_id) < 0:
+                    img_id = None
+
+                nueva_vm = Vm(
+                    name=vm_data.get("id"),
+                    vcore=int(vm_data.get("vcores", 1)),
+                    ram=float(vm_data.get("ram", 512.0)),
+                    disk=float(vm_data.get("disk", 5.0)),
+                    state="DRAFT",
+                    slice_id=nuevo_slice.id,
+                    image_id=img_id,
+                    worker_id=asignado.id if asignado else None,
+                    external_ip=None,
+                    internet_access=0,
+                )
+                vm_data["worker"]    = asignado.name if asignado else "Unassigned"
+                vm_data["worker_id"] = asignado.id if asignado else None
+                db.add(nueva_vm)
+                db.flush()
+
+            # 3. Guardar slice_json completo
+            nuevo_slice.slice_json = {"nodes": nodes_copy, "edges": edges_copy}
+
+            # 4. Marcar como PENDING_APPROVAL y encolar
+            nuevo_slice.status = "PENDING_APPROVAL"
+            nuevo_slice.TTL = request.ttl_hours
+            nuevo_slice.availability_zone_id = request.availability_zone_id
+            db.commit()
+
+            await placement_queue.put({"slice_id": nuevo_slice.id, "zone_id": request.availability_zone_id})
+
+            results.append({
+                "member_id": member_id,
+                "slice_id":  nuevo_slice.id,
+                "status":    "QUEUED",
+            })
+            logger.info("[BULK] ✅ Slice %d creado y encolado para user=%s…", nuevo_slice.id, member_id[:8])
+
+        except Exception as e:
+            errors += 1
+            results.append({
+                "member_id": member_id,
+                "slice_id":  None,
+                "status":    "ERROR",
+                "detail":    str(e),
+            })
+            logger.error("[BULK] ❌ Error creando slice para user=%s…: %s", member_id[:8], e)
+            db.rollback()
+
+    logger.info("[BULK] 📊 Resumen: %d creados, %d errores", len(member_ids) - errors, errors)
+    logger.info("=" * 70)
+    return {
+        "message":      f"Despliegue masivo completado: {len(member_ids) - errors} slices creados, {errors} errores",
+        "total":        len(member_ids),
+        "success":      len(member_ids) - errors,
+        "errors":       errors,
+        "results":      results,
+        "project_name": project.name,
+    }
 
 @router.delete("/{slice_id}", status_code=202)
 async def request_destroy(

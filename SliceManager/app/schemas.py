@@ -35,3 +35,11 @@ class DeployRequest(BaseModel):
 class DraftSaveRequest(BaseModel):
     name: str
     slice_json: Dict[str, Any] # El JSON libre que viene del lienzo
+
+# Despliegue masivo: el jefe envía la topología + proyecto, se clona para cada miembro
+class BulkDeployRequest(BaseModel):
+    name_prefix: str                  # Prefijo para nombrar los slices (e.g. "lab1")
+    slice_json: Dict[str, Any]        # Topología del lienzo (nodes + edges)
+    project_id: int
+    availability_zone_id: int
+    ttl_hours: int = 4

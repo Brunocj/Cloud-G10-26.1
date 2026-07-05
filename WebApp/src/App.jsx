@@ -291,6 +291,41 @@ export default function App() {
         } catch { flash("Error de conexión con el servidor", "error"); }
     };
 
+    const bulkDeploy = async (namePrefix, azId, projectId) => {
+        try {
+            const defaultImg = imageList.filter(img => img.availability_zone_id == azId || img.availability_zone_id == null)[0]
+                ?? imageList[0] ?? { id: 1, name: "Cirros" };
+            const processedNodes = nodes.map(n => ({
+                ...n,
+                image_id: n.image_id || defaultImg.id,
+                image:    n.image    || defaultImg.name,
+            }));
+
+            const res = await apiFetch("/slices/bulk-deploy", {
+                method: "POST",
+                body: JSON.stringify({
+                    name_prefix: namePrefix,
+                    slice_json: { nodes: processedNodes, edges },
+                    project_id: projectId,
+                    availability_zone_id: azId,
+                    ttl_hours: 4,
+                }),
+            });
+
+            const data = await res.json();
+            if (!res.ok) {
+                flash(data.detail || "Error en despliegue masivo", "error");
+                return;
+            }
+
+            setNodes([]); setEdges([]);
+            setModal(null);
+            navigate("/");
+            fetchSlices();
+            flash(`Despliegue masivo: ${data.success} slices creados para "${data.project_name}"`);
+        } catch { flash("Error de conexión con el servidor", "error"); }
+    };
+
     const saveDraft = async (name) => {
         try {
             const defaultImg     = imageList[0] ?? { id: 1, name: "Cirros" };
@@ -472,6 +507,7 @@ export default function App() {
         destroySlice,
         deployDraft,
         deployFromDesigner,
+        bulkDeploy,
         saveDraft,
         doDeployDraft,
         updateDraft,

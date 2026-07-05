@@ -29,7 +29,7 @@ export const CanvasView = ({
     // Image data
     imageList,
     // CRUD actions
-    destroySlice, deployDraft, deployFromDesigner, saveDraft,
+    destroySlice, deployDraft, deployFromDesigner, bulkDeploy, saveDraft,
     doDeployDraft, updateDraft,
     // Import / Export
     importarTopologia, exportarTopologia,
@@ -157,7 +157,7 @@ export const CanvasView = ({
                 <SelectZoneModal onSelect={(azId) => { setTargetAz(azId); setAzModalOpen(false); }} />
             )}
             {modal === "deploy" && (
-                <DeployModal userRole={user?.role} nodes={nodes} edges={edges} imageList={imageList} apiFetch={apiFetch} onDeploy={deployFromDesigner} onClose={() => setModal(null)} targetAz={targetAz} />
+                <DeployModal userRole={user?.role} nodes={nodes} edges={edges} imageList={imageList} apiFetch={apiFetch} onDeploy={deployFromDesigner} onBulkDeploy={bulkDeploy} onClose={() => setModal(null)} targetAz={targetAz} />
             )}
             {modal?.type === "deployDraft" && (() => {
                 const draft = slices.find(s => s.id === modal.id);
