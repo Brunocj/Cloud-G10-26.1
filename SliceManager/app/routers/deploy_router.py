@@ -6,6 +6,7 @@ from app.schemas import DeployRequest
 from app.auth import CurrentUser, get_current_user
 from app.services.placement_worker import placement_queue
 from app.nats_producer import nats_producer
+from app.routers.project_router import can_deploy_directly, user_can_choose_project
 import os
 import uuid
 import json
@@ -97,7 +98,9 @@ async def request_deploy(
 ):
     logger.info("="*70)
     logger.info("[DEPLOY] 📥 Solicitud de despliegue recibida para slice_id=%s", slice_id)
-    logger.info("[DEPLOY]    zona=%s  TTL=%sh  motivo=%s", request.availability_zone_id, request.ttl_hours, getattr(request, 'motivo', 'N/A'))
+    logger.info("[DEPLOY]    zona=%s  TTL=%sh  project_id=%s  motivo=%s",
+                request.availability_zone_id, request.ttl_hours,
+                getattr(request, 'project_id', None), getattr(request, 'motivo', 'N/A'))
     db_slice = db.query(Slice).filter(Slice.id == slice_id).first()
     if not db_slice:
         raise HTTPException(status_code=404, detail="Slice no encontrada")
@@ -110,6 +113,18 @@ async def request_deploy(
         )
 
     logger.info("[DEPLOY] ✅ Slice '%s' encontrado en BD (estado actual: %s)", db_slice.name, db_slice.status)
+
+    # ── Validación del proyecto elegido ─────────────────────────────────────
+    project_id = getattr(request, 'project_id', None)
+    if project_id is not None:
+        if not user_can_choose_project(db, user.user_id, user.role, project_id):
+            raise HTTPException(
+                status_code=403,
+                detail="No puedes desplegar en ese proyecto (no eres miembro).",
+            )
+        db_slice.project_id = project_id
+    else:
+        db_slice.project_id = None
 
     # ── Validación Fail-Fast: compatibilidad de imágenes con la AZ ──────────
     # Principio: verificar ANTES de emitir cualquier evento al bus de mensajes.
@@ -137,15 +152,31 @@ async def request_deploy(
     logger.info("[DEPLOY] ✅ Validación Fail-Fast superada: todas las imágenes son compatibles con la zona %d",
                 request.availability_zone_id)
 
+    # ── Decidir despliegue directo vs. solicitud pendiente ──────────────────
+    is_direct = can_deploy_directly(db, user.user_id, user.role, project_id)
+
     db_slice.status = "PENDING_APPROVAL"
     db_slice.TTL = request.ttl_hours
     db.commit()
-    logger.info("[DEPLOY] 🟡 Estado cambiado a PENDING_APPROVAL")
 
-    await placement_queue.put({"slice_id": slice_id, "zone_id": request.availability_zone_id})
-    logger.info("[DEPLOY] 📤 Solicitud encolada en placement_queue → worker en background la procesará")
-    logger.info("="*70)
-    return {"status": "ACCEPTED", "message": "Enviado a validación de recursos."}
+    if is_direct:
+        logger.info("[DEPLOY] 🟢 Despliegue directo — encolando en placement_queue")
+        await placement_queue.put({"slice_id": slice_id, "zone_id": request.availability_zone_id})
+        logger.info("[DEPLOY] 📤 Solicitud encolada en placement_queue → worker en background la procesará")
+        logger.info("="*70)
+        return {
+            "status":  "ACCEPTED",
+            "message": "Enviado a validación de recursos.",
+            "direct":  True,
+        }
+    else:
+        logger.info("[DEPLOY] 🟡 Requiere aprobación humana — NO se encola. Queda en PENDING_APPROVAL.")
+        logger.info("="*70)
+        return {
+            "status":  "PENDING_APPROVAL",
+            "message": "Solicitud enviada. Requiere aprobación del jefe del proyecto o admin.",
+            "direct":  False,
+        }
 
 @router.delete("/{slice_id}", status_code=202)
 async def request_destroy(
@@ -178,6 +209,24 @@ async def request_destroy(
         db.commit()
         logger.info("[DESTROY] Borrador slice_id=%s eliminado por user=%s…", slice_id, user.user_id[:8])
         return {"status": "DELETED", "message": "Borrador eliminado de la base de datos."}
+
+    # Si es PENDING_APPROVAL sin encolar (esperando aprobación humana),
+    # también se puede eliminar directamente ya que no hay recursos desplegados.
+    if db_slice.status == "PENDING_APPROVAL":
+        # Chequeamos si hay VMs con state distinto de DRAFT/PENDING (indicaría
+        # que sí llegó al worker). Si no, es una solicitud pendiente y se
+        # elimina como borrador.
+        vms_deployed = db.query(Vm).filter(
+            Vm.slice_id == slice_id,
+            Vm.state.notin_(["DRAFT", "PENDING"]),
+        ).count()
+        if vms_deployed == 0:
+            _release_external_ips(db, slice_id)
+            db.query(Vm).filter(Vm.slice_id == slice_id).delete()
+            db.delete(db_slice)
+            db.commit()
+            logger.info("[DESTROY] Solicitud pendiente slice_id=%s eliminada por user=%s…", slice_id, user.user_id[:8])
+            return {"status": "DELETED", "message": "Solicitud pendiente eliminada."}
 
     db.query(Vlan).filter(Vlan.slice_id == slice_id).delete()
 

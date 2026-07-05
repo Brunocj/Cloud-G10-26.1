@@ -29,6 +29,7 @@ class DeployRequest(BaseModel):
     availability_zone_id: int
     ttl_hours: int
     motivo: str
+    project_id: Optional[int] = None   # None = slice personal / sin proyecto
 
 # Lo que el Frontend nos envía al guardar un borrador (REQ-US-07)
 class DraftSaveRequest(BaseModel):

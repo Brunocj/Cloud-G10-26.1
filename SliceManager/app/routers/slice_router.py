@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import CurrentUser, get_current_user, require_roles
 from app.database import get_db
-from app.models import AvailabilityZone, Image, IpPool, Slice, Vm, Worker
+from app.models import AvailabilityZone, Image, IpPool, Slice, Vm, Worker, Role, UserProject
 from app.repositories.slice_repo import SliceRepository
 from app.schemas import DraftSaveRequest
 
@@ -77,14 +77,33 @@ def list_slices(
     user: CurrentUser = Depends(get_current_user),
 ):
     """
-    Lista slices.
-    - admin / superAdmin → ven TODOS los slices de la plataforma.
-    - jefeProyecto / usuario → solo ven los suyos.
+    Lista slices según el rol:
+    - admin / superAdmin → TODOS los slices.
+    - jefeProyecto → propios + los slices de proyectos donde figura como jefe.
+    - usuario → solo los propios.
     """
     query = db.query(Slice)
 
-    if not user.can_manage_all():
-        # Filtrar únicamente los slices del usuario autenticado
+    if user.can_manage_all():
+        pass  # sin filtro
+    elif user.role == "jefeProyecto":
+        jefe_role = db.query(Role).filter(Role.role_name == "jefeProyecto").first()
+        leader_project_ids = []
+        if jefe_role:
+            leader_project_ids = [
+                m.project_id for m in db.query(UserProject).filter(
+                    UserProject.user_id == user.user_id,
+                    UserProject.project_role_id == jefe_role.id,
+                ).all()
+            ]
+        if leader_project_ids:
+            query = query.filter(
+                (Slice.creator_id == user.user_id) |
+                (Slice.project_id.in_(leader_project_ids))
+            )
+        else:
+            query = query.filter(Slice.creator_id == user.user_id)
+    else:
         query = query.filter(Slice.creator_id == user.user_id)
 
     slices = query.order_by(Slice.id.desc()).all()

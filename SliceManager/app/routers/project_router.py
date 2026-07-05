@@ -148,6 +148,99 @@ def _serialize_member(db: Session, m: UserProject) -> dict:
     }
 
 
+@router.get("/eligible-for-deploy")
+def eligible_for_deploy(
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """
+    Devuelve los proyectos que el usuario puede elegir al desplegar un slice.
+    Cada uno incluye `direct_deploy` que indica si el despliegue es directo
+    o requiere aprobación.
+
+    Reglas:
+      - admin/superAdmin: todos los proyectos, direct_deploy=True
+      - jefeProyecto: sus proyectos; direct_deploy=True solo si es jefe ahí,
+                      False si solo es miembro. Solo ve sus proyectos (no puede
+                      elegir uno ajeno).
+      - usuario: solo sus proyectos, direct_deploy=False para todos.
+    """
+    result = []
+
+    if user.can_manage_all():
+        # admin/superAdmin: cualquier proyecto, siempre directo
+        projects = db.query(Project).order_by(Project.name).all()
+        for p in projects:
+            result.append({
+                "project_id":    p.id,
+                "project_name":  p.name,
+                "direct_deploy": True,
+            })
+        return result
+
+    # jefeProyecto / usuario: solo proyectos donde figura
+    jefe_role = db.query(Role).filter(Role.role_name == "jefeProyecto").first()
+    memberships = db.query(UserProject).filter(UserProject.user_id == user.user_id).all()
+    for m in memberships:
+        p = db.query(Project).filter(Project.id == m.project_id).first()
+        if not p:
+            continue
+        is_leader_here = jefe_role is not None and m.project_role_id == jefe_role.id
+        result.append({
+            "project_id":    p.id,
+            "project_name":  p.name,
+            "direct_deploy": is_leader_here,
+        })
+
+    # Ordenar: directos primero, luego alfabético
+    result.sort(key=lambda x: (not x["direct_deploy"], x["project_name"]))
+    return result
+
+
+# ── Helper reutilizable por el endpoint de deploy ─────────────────────────────
+
+def can_deploy_directly(db: Session, user_id: str, user_role: str, project_id: Optional[int]) -> bool:
+    """
+    Determina si el usuario puede desplegar directo (sin aprobación) en el
+    proyecto dado (o sin proyecto).
+
+    Reglas:
+      - admin/superAdmin: siempre directo
+      - jefeProyecto: directo solo si project_id es un proyecto donde es jefe
+      - resto: nunca directo (siempre requiere aprobación)
+    """
+    if user_role in ("admin", "superAdmin"):
+        return True
+
+    if user_role == "jefeProyecto" and project_id is not None:
+        jefe_role = db.query(Role).filter(Role.role_name == "jefeProyecto").first()
+        if not jefe_role:
+            return False
+        membership = db.query(UserProject).filter(
+            UserProject.user_id == user_id,
+            UserProject.project_id == project_id,
+            UserProject.project_role_id == jefe_role.id,
+        ).first()
+        return membership is not None
+
+    return False
+
+
+def user_can_choose_project(db: Session, user_id: str, user_role: str, project_id: int) -> bool:
+    """
+    Valida que el usuario tenga derecho a elegir ese proyecto al desplegar.
+    - admin/superAdmin: cualquier proyecto
+    - jefe/usuario: solo proyectos donde es miembro
+    """
+    if user_role in ("admin", "superAdmin"):
+        return db.query(Project).filter(Project.id == project_id).first() is not None
+    membership = db.query(UserProject).filter(
+        UserProject.user_id == user_id,
+        UserProject.project_id == project_id,
+    ).first()
+    return membership is not None
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.get("/", response_model=List[ProjectResponse])

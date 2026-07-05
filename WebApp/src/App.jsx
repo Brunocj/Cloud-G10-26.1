@@ -247,7 +247,7 @@ export default function App() {
         });
     };
 
-    const deployFromDesigner = async (name, azId = 1) => {
+    const deployFromDesigner = async (name, azId = 1, projectId = null, isDirect = false) => {
         try {
             const azImageList = imageList.filter(img => img.availability_zone_id == azId || img.availability_zone_id == null);
             const defaultImg = azImageList[0] ?? imageList[0] ?? { id: 1, name: "Cirros" };
@@ -266,7 +266,12 @@ export default function App() {
 
             const resDeploy = await apiFetch(`/slices/${newSliceId}/deploy`, {
                 method: "POST",
-                body: JSON.stringify({ availability_zone_id: azId, ttl_hours: 4, motivo: "Despliegue directo desde Canvas" }),
+                body: JSON.stringify({
+                    availability_zone_id: azId,
+                    ttl_hours: 4,
+                    motivo: "Despliegue directo desde Canvas",
+                    project_id: projectId,
+                }),
             });
             if (!resDeploy.ok) {
                 const errData = await resDeploy.json().catch(() => ({}));
@@ -280,7 +285,9 @@ export default function App() {
             setNodes([]); setEdges([]);
             setModal(null);
             navigate("/");
-            flash(`"${name}" enviado a validación de recursos!`);
+            flash(isDirect
+                ? `"${name}" enviado a validación de recursos`
+                : `Solicitud de "${name}" enviada — pendiente de aprobación`);
         } catch { flash("Error de conexión con el servidor", "error"); }
     };
 
@@ -312,16 +319,23 @@ export default function App() {
         setModal({ type: "deployDraft", id });
     };
 
-    const doDeployDraft = async (id, azId) => {
+    const doDeployDraft = async (id, azId, projectId = null, isDirect = false) => {
         try {
             const res = await apiFetch(`/slices/${id}/deploy`, {
                 method: "POST",
-                body: JSON.stringify({ availability_zone_id: azId, ttl_hours: 4, motivo: "Despliegue desde la UI" }),
+                body: JSON.stringify({
+                    availability_zone_id: azId,
+                    ttl_hours: 4,
+                    motivo: "Despliegue desde la UI",
+                    project_id: projectId,
+                }),
             });
             if (!res.ok) throw new Error();
             updateSlice(id, { status: "PENDING_APPROVAL" });
             setModal(null);
-            flash("Solicitud de despliegue encolada con éxito");
+            flash(isDirect
+                ? "Solicitud de despliegue encolada"
+                : "Solicitud enviada — pendiente de aprobación");
         } catch { flash("Error al solicitar despliegue", "error"); }
     };
 

@@ -106,7 +106,7 @@ def _user_to_response(u: User, db: Session) -> dict:
 async def _kc_admin_token() -> str:
     """Obtiene un access token de admin de Keycloak (realm master)."""
     url = f"{KEYCLOAK_URL}/realms/master/protocol/openid-connect/token"
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
         resp = await client.post(url, data={
             "grant_type": "password",
             "client_id":  KEYCLOAK_ADMIN_CLIENT,
@@ -125,7 +125,7 @@ async def _kc_create_user(payload: UserCreateRequest) -> str:
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     base    = f"{KEYCLOAK_URL}/admin/realms/{KEYCLOAK_REALM}"
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(timeout=15.0, trust_env=False) as client:
         # 1. Crear el usuario
         create_body = {
             "username":  payload.username,
@@ -177,7 +177,7 @@ async def _kc_get_user_role(user_id: str) -> Optional[str]:
         token   = await _kc_admin_token()
         headers = {"Authorization": f"Bearer {token}"}
         base    = f"{KEYCLOAK_URL}/admin/realms/{KEYCLOAK_REALM}"
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
             r = await client.get(f"{base}/users/{user_id}/role-mappings/realm", headers=headers)
             if r.status_code != 200:
                 return None
@@ -199,7 +199,7 @@ async def _kc_change_role(user_id: str, new_role: str) -> None:
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     base    = f"{KEYCLOAK_URL}/admin/realms/{KEYCLOAK_REALM}"
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(timeout=15.0, trust_env=False) as client:
         # Roles actuales
         r = await client.get(f"{base}/users/{user_id}/role-mappings/realm", headers=headers)
         if r.status_code != 200:

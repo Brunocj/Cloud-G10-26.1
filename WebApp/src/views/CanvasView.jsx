@@ -157,12 +157,12 @@ export const CanvasView = ({
                 <SelectZoneModal onSelect={(azId) => { setTargetAz(azId); setAzModalOpen(false); }} />
             )}
             {modal === "deploy" && (
-                <DeployModal nodes={nodes} edges={edges} imageList={imageList} apiFetch={apiFetch} onDeploy={deployFromDesigner} onClose={() => setModal(null)} targetAz={targetAz} />
+                <DeployModal userRole={user?.role} nodes={nodes} edges={edges} imageList={imageList} apiFetch={apiFetch} onDeploy={deployFromDesigner} onClose={() => setModal(null)} targetAz={targetAz} />
             )}
             {modal?.type === "deployDraft" && (() => {
                 const draft = slices.find(s => s.id === modal.id);
                 if (!draft) return null;
-                return <DeployModal defaultName={draft.name} nodes={draft.nodes} edges={draft.edges} imageList={imageList} apiFetch={apiFetch} onDeploy={(name, azId) => doDeployDraft(modal.id, azId)} onClose={() => setModal(null)} targetAz={targetAz} />;
+                return <DeployModal userRole={user?.role} defaultName={draft.name} nodes={draft.nodes} edges={draft.edges} imageList={imageList} apiFetch={apiFetch} onDeploy={(name, azId, projectId, isDirect) => doDeployDraft(modal.id, azId, projectId, isDirect)} onClose={() => setModal(null)} targetAz={targetAz} />;
             })()}
             {modal === "draft" && (
                 <SaveDraftModal nodes={nodes} edges={edges} onSave={saveDraft} onClose={() => setModal(null)} />

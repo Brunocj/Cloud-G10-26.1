@@ -2,24 +2,30 @@ import { useState, useEffect } from "react";
 import { T, btnBase, inp } from "../../theme/tokens";
 import { Label } from "../ui/Label";
 import { Overlay } from "./Overlay";
-import { Zap, AlertTriangle } from "../ui/Icon";
+import { Zap, AlertTriangle, CheckCircle, Send } from "../ui/Icon";
 
-// AZs hardcoded como fallback; se cargan dinámicamente si el backend responde
 const DEFAULT_AZS = [
     { id: 1, name: "Linux Cluster" },
     { id: 2, name: "OpenStack" },
 ];
 
-export const DeployModal = ({ defaultName, nodes, edges, onDeploy, onClose, imageList = [], apiFetch, targetAz }) => {
+const NO_PROJECT = "__NONE__";
+
+export const DeployModal = ({ defaultName, nodes, edges, onDeploy, onClose, imageList = [], apiFetch, targetAz, userRole }) => {
     const [name, setName] = useState(defaultName || `slice-${Math.random().toString(36).slice(2, 6)}`);
     const [selectedAzId, setSelectedAzId] = useState(targetAz ? Number(targetAz) : 1);
     const [azList, setAzList] = useState(DEFAULT_AZS);
-    const [azConflict, setAzConflict] = useState(null); // mensaje de incompatibilidad o null
+    const [azConflict, setAzConflict] = useState(null);
+
+    // Project selection
+    const [eligibleProjects, setEligibleProjects] = useState([]);
+    const [selectedProject, setSelectedProject] = useState(NO_PROJECT);
+    const [projectsLoaded, setProjectsLoaded] = useState(false);
 
     const totalRam  = nodes.reduce((s, n) => s + (n.ram || 0), 0);
     const ramLabel  = totalRam >= 1024 ? `${(totalRam / 1024).toFixed(1)} GB` : `${totalRam} MB`;
 
-    // ── Carga dinámica de AZs desde el backend ────────────────────────────────
+    // ── Load AZs ───────────────────────────────────────────────────────────
     useEffect(() => {
         if (!apiFetch) return;
         apiFetch("/slices/utils/availability-zones")
@@ -27,80 +33,92 @@ export const DeployModal = ({ defaultName, nodes, edges, onDeploy, onClose, imag
             .then(data => {
                 if (Array.isArray(data) && data.length > 0) setAzList(data);
             })
-            .catch(() => {}); // fail-safe: usa DEFAULT_AZS
+            .catch(() => {});
     }, [apiFetch]);
 
-    // ── Validación en tiempo real: imagen ↔ AZ ────────────────────────────────
+    // ── Load eligible projects ─────────────────────────────────────────────
     useEffect(() => {
-        if (!imageList || imageList.length === 0) {
-            setAzConflict(null);
-            return;
-        }
-        // Construimos un mapa rápido: image_id → {az_id, az_name}
-        const imgMap = {};
-        imageList.forEach(img => {
-            imgMap[img.id] = { az_id: img.availability_zone_id, az_name: img.az_name };
-        });
+        if (!apiFetch) return;
+        apiFetch("/projects/eligible-for-deploy")
+            .then(r => r.ok ? r.json() : [])
+            .then(data => {
+                if (Array.isArray(data)) setEligibleProjects(data);
+            })
+            .catch(() => {})
+            .finally(() => setProjectsLoaded(true));
+    }, [apiFetch]);
 
-        // Imagen por defecto que se usará si el nodo no tiene una asignada
-        const azImageList = imageList.filter(img => img.availability_zone_id == selectedAzId || img.availability_zone_id == null);
-        const defaultImg = azImageList[0] ?? imageList[0] ?? { id: 1, name: "Cirros" };
+    // ── Image ↔ AZ validation ──────────────────────────────────────────────
+    useEffect(() => {
+        if (!imageList || imageList.length === 0) { setAzConflict(null); return; }
+        const imgMap = {};
+        for (const img of imageList) {
+            imgMap[img.id] = { az_id: img.availability_zone_id, az_name: img.az_name };
+        }
+        const targetAzObj = azList.find(a => a.id === selectedAzId);
+        const targetAzName = targetAzObj?.name;
 
         for (const node of nodes) {
-            const imgId = node.image_id || defaultImg.id; // Aplicamos el mismo fallback que App.jsx
-            if (!imgId) continue;
-            const imgInfo = imgMap[imgId];
-            if (!imgInfo || imgInfo.az_id == null) continue; // sin restricción de AZ
-            if (imgInfo.az_id !== selectedAzId) {
-                const nodeName = node.data?.label || node.id || node.name || "nodo";
-                const azName   = imgInfo.az_name || `AZ #${imgInfo.az_id}`;
+            const info = imgMap[node.image_id];
+            if (!info || !info.az_id) continue;
+            if (info.az_id !== selectedAzId) {
                 setAzConflict(
-                    `La imagen seleccionada para el nodo "${nodeName}" pertenece a "${azName}" y no es compatible con la Zona de Disponibilidad elegida.`
+                    `La VM "${node.id}" usa la imagen "${node.image}" que pertenece a ${info.az_name}, pero seleccionaste ${targetAzName}.`
                 );
                 return;
             }
         }
         setAzConflict(null);
-    }, [selectedAzId, nodes, imageList]);
+    }, [selectedAzId, nodes, imageList, azList]);
 
-    const canDeploy = name.trim() && nodes.length > 0 && !azConflict;
+    // ── Determine if selected project is direct-deploy ─────────────────────
+    const chosenProjectMeta = selectedProject === NO_PROJECT
+        ? null
+        : eligibleProjects.find(p => String(p.project_id) === String(selectedProject));
+
+    // Espeja la lógica del backend (can_deploy_directly):
+    //  - admin/superAdmin: siempre directo
+    //  - jefeProyecto: directo solo si es jefe del proyecto elegido
+    //  - resto (incluye "sin proyecto" para no-admins): requiere aprobación
+    const isAdminGlobal = userRole === "admin" || userRole === "superAdmin";
+    const isDirect = isAdminGlobal
+        ? true
+        : (chosenProjectMeta ? chosenProjectMeta.direct_deploy : false);
+
+    const canDeploy = !azConflict && nodes.length > 0 && name.trim() && projectsLoaded;
+
+    const handleSubmit = () => {
+        const projectId = selectedProject === NO_PROJECT ? null : Number(selectedProject);
+        onDeploy(name, selectedAzId, projectId, isDirect);
+    };
 
     return (
         <Overlay>
             <div style={{
-                background: T.surface, border: `1px solid ${T.border}`,
-                borderRadius: 16, padding: 28, maxWidth: 420, width: "90%",
-                boxShadow: T.shadowMd,
+                background: T.surface, borderRadius: 14, width: 460,
+                border: `1px solid ${T.border}`, boxShadow: "0 12px 40px rgba(0,0,0,0.25)",
+                padding: "24px 26px",
             }}>
-                {/* Header */}
-                <div style={{ fontSize: 17, fontWeight: 800, color: T.text, marginBottom: 4, display: "flex", alignItems: "center", gap: 8 }}>
-                    <Zap size={18} color={T.accent} /> Desplegar Slice
+                <div style={{ fontSize: 17, fontWeight: 800, color: T.text, marginBottom: 4 }}>
+                    Desplegar Slice
                 </div>
-                <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 20 }}>
-                    Asigne un nombre, elija la Zona de Disponibilidad y confirme el despliegue.
+                <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 16 }}>
+                    Configura el destino y confirma el despliegue.
                 </div>
 
-                {/* Nombre del Slice */}
+                {/* Name */}
                 <Label>Nombre del Slice</Label>
-                <input
-                    id="deploy-slice-name"
-                    value={name}
-                    onChange={e => setName(e.target.value)}
-                    disabled={!!defaultName}
-                    style={{ ...inp, marginBottom: 14, opacity: defaultName ? 0.7 : 1 }}
-                />
+                <input value={name} onChange={e => setName(e.target.value)}
+                    style={{ ...inp, marginBottom: 14 }} />
 
-                {/* Selector de Zona de Disponibilidad — bloqueado si ya se fijó en el lienzo,
-                    para evitar incompatibilidades con las imágenes ya asignadas a los nodos. */}
+                {/* AZ */}
                 <Label>Zona de Disponibilidad</Label>
                 <select
-                    id="deploy-az-select"
                     value={selectedAzId}
                     disabled={!!targetAz}
                     onChange={e => setSelectedAzId(Number(e.target.value))}
                     style={{
-                        ...inp,
-                        marginBottom: 4,
+                        ...inp, marginBottom: 4,
                         cursor: targetAz ? "not-allowed" : "pointer",
                         opacity: targetAz ? 0.6 : 1,
                         appearance: "none",
@@ -111,19 +129,53 @@ export const DeployModal = ({ defaultName, nodes, edges, onDeploy, onClose, imag
                     }}
                 >
                     {azList.map(az => (
-                        <option key={az.id} value={az.id}>
-                            {az.name}
+                        <option key={az.id} value={az.id}>{az.name}</option>
+                    ))}
+                </select>
+                {targetAz
+                    ? <div style={{ fontSize: 10, color: T.textFaint, marginBottom: 14 }}>
+                        Fijada desde el lienzo — limpia el lienzo para elegir otra zona.
+                      </div>
+                    : <div style={{ height: 14 }} />
+                }
+
+                {/* Project selector */}
+                <Label>Proyecto</Label>
+                <select
+                    value={selectedProject}
+                    onChange={e => setSelectedProject(e.target.value)}
+                    style={{
+                        ...inp, marginBottom: 6,
+                        appearance: "none",
+                        backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E")`,
+                        backgroundRepeat: "no-repeat",
+                        backgroundPosition: "right 10px center",
+                        paddingRight: 28,
+                    }}
+                >
+                    <option value={NO_PROJECT}>Sin proyecto (slice personal)</option>
+                    {eligibleProjects.map(p => (
+                        <option key={p.project_id} value={p.project_id}>
+                            {p.project_name} {p.direct_deploy ? "· despliegue directo" : "· requiere aprobación"}
                         </option>
                     ))}
                 </select>
-                {targetAz && (
-                    <div style={{ fontSize: 10, color: T.textFaint, marginBottom: 14 }}>
-                        Fijada desde el lienzo — limpia el lienzo para elegir otra zona.
-                    </div>
-                )}
-                {!targetAz && <div style={{ height: 14 }} />}
 
-                {/* Banner de incompatibilidad AZ ↔ Imágenes */}
+                {/* Direct vs. approval hint */}
+                <div style={{
+                    display: "flex", alignItems: "center", gap: 8, marginBottom: 14,
+                    padding: "8px 12px", borderRadius: 8, fontSize: 11,
+                    background: isDirect ? "#16a34a15" : "#f59e0b18",
+                    color: isDirect ? "#16a34a" : "#a16207",
+                    border: `1px solid ${isDirect ? "#16a34a44" : "#f59e0b44"}`,
+                }}>
+                    {isDirect
+                        ? <><CheckCircle size={13} /> El slice se desplegará inmediatamente.</>
+                        : <><Send size={13} /> La solicitud quedará pendiente de aprobación.</>
+                    }
+                </div>
+
+                {/* AZ conflict banner */}
                 {azConflict && (
                     <div style={{
                         display: "flex", alignItems: "flex-start", gap: 8,
@@ -131,13 +183,11 @@ export const DeployModal = ({ defaultName, nodes, edges, onDeploy, onClose, imag
                         borderRadius: 8, padding: "10px 12px", marginBottom: 14,
                     }}>
                         <AlertTriangle size={16} color="#ff4d4d" style={{ flexShrink: 0, marginTop: 1 }} />
-                        <span style={{ fontSize: 12, color: "#ff4d4d", lineHeight: 1.5 }}>
-                            {azConflict}
-                        </span>
+                        <span style={{ fontSize: 12, color: "#ff4d4d", lineHeight: 1.5 }}>{azConflict}</span>
                     </div>
                 )}
 
-                {/* Summary metrics */}
+                {/* Metrics */}
                 <div style={{
                     display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10,
                     margin: "0 0 18px", background: T.accentLight, borderRadius: 10,
@@ -156,14 +206,13 @@ export const DeployModal = ({ defaultName, nodes, edges, onDeploy, onClose, imag
                     ))}
                 </div>
 
-                {/* Action buttons */}
+                {/* Actions */}
                 <div style={{ display: "flex", gap: 10 }}>
-                    <button id="deploy-cancel-btn" onClick={onClose} style={btnBase({ flex: 1 })}>
+                    <button onClick={onClose} style={btnBase({ flex: 1 })}>
                         Cancelar
                     </button>
                     <button
-                        id="deploy-confirm-btn"
-                        onClick={() => onDeploy(name, selectedAzId)}
+                        onClick={handleSubmit}
                         disabled={!canDeploy}
                         title={azConflict || (nodes.length === 0 ? "Agregue al menos una VM" : "")}
                         style={btnBase({
@@ -173,7 +222,10 @@ export const DeployModal = ({ defaultName, nodes, edges, onDeploy, onClose, imag
                             display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
                         })}
                     >
-                        <Zap size={14} /> Desplegar Ahora
+                        {isDirect
+                            ? <><Zap size={14} /> Desplegar Ahora</>
+                            : <><Send size={14} /> Enviar Solicitud</>
+                        }
                     </button>
                 </div>
             </div>
