@@ -54,6 +54,12 @@ class VMSpec(BaseModel):
     # Credenciales cloud-init
     vm_user:     Optional[str] = Field(default=None, description="Usuario a crear en la VM (default: nombre de imagen)")
     vm_password: Optional[str] = Field(default=None, description="Contraseña de la VM (default: pucp2026)")
+    owner_ssh_public_key: Optional[str] = Field(default=None, description="Llave pública SSH del dueño del slice (REQ-US-02)")
+
+    # Modo Edición (REQ-US-14): VM ya desplegada — no lanzarla, solo conectar
+    # en caliente las NICs de tap_interfaces (QMP en Linux / Nova en OpenStack).
+    already_deployed:     bool = Field(default=False)
+    provider_instance_id: Optional[str] = Field(default=None, description="UUID Nova de la instancia existente")
 
     tap_interfaces:  List[TapInterface]  = Field(default_factory=list,
                                                   description="Interfaces TAP a crear (orden = índice de NIC en QEMU)")

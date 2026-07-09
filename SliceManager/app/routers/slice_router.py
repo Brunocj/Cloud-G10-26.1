@@ -98,7 +98,7 @@ def list_slices(
     - jefeProyecto → propios + los slices de proyectos donde figura como jefe.
     - usuario → solo los propios.
     """
-    query = db.query(Slice)
+    query = db.query(Slice).filter(Slice.status != "TEMPLATE")   # las plantillas tienen su propio listado
 
     if user.can_manage_all():
         pass  # sin filtro
@@ -301,6 +301,166 @@ def update_draft(
         slice_id, user.user_id[:8],
     )
     return {"message": "Borrador actualizado con éxito"}
+
+
+# ── Plantillas (REQ-US-04 / REQ-JP-03 / REQ-AD-05) ────────────────────────────
+# Se almacenan como filas Slice con status="TEMPLATE" y template_type:
+#   1 = personal (solo el creador)  ·  2 = de proyecto  ·  3 = global
+
+_TPL_PERSONAL, _TPL_PROJECT, _TPL_GLOBAL = 1, 2, 3
+
+
+from pydantic import BaseModel as _BM
+
+class PublishTemplateRequest(_BM):
+    name: str
+    scope: str                      # "personal" | "project" | "global"
+    project_id: Optional[int] = None
+
+
+@router.get("/templates/list", status_code=200)
+def list_templates(
+    db:   Session     = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Plantillas visibles: globales + personales propias + de mis proyectos."""
+    my_project_ids = [
+        m.project_id for m in db.query(UserProject).filter(UserProject.user_id == user.user_id).all()
+    ]
+    templates = db.query(Slice).filter(Slice.status == "TEMPLATE").order_by(Slice.id.desc()).all()
+
+    result = []
+    for t in templates:
+        visible = (
+            t.template_type == _TPL_GLOBAL
+            or (t.template_type == _TPL_PERSONAL and t.creator_id == user.user_id)
+            or (t.template_type == _TPL_PROJECT and (t.project_id in my_project_ids or user.can_manage_all()))
+        )
+        if not visible:
+            continue
+        s_json = t.slice_json or {}
+        if isinstance(s_json, str):
+            s_json = json.loads(s_json)
+        result.append({
+            "id":            t.id,
+            "name":          t.name,
+            "scope":         {1: "personal", 2: "project", 3: "global"}.get(t.template_type, "personal"),
+            "project_id":    t.project_id,
+            "project_name":  t.project.name if t.project else None,
+            "owner_id":      t.creator_id,
+            "can_delete":    t.creator_id == user.user_id or user.can_manage_all(),
+            "nodeCount":     len(s_json.get("nodes", [])),
+            "edgeCount":     len(s_json.get("edges", [])),
+            "nodes":         s_json.get("nodes", []),
+            "edges":         s_json.get("edges", []),
+        })
+    return result
+
+
+@router.post("/{slice_id}/publish-template", status_code=201)
+def publish_template(
+    slice_id: int,
+    request:  PublishTemplateRequest,
+    db:       Session     = Depends(get_db),
+    user:     CurrentUser = Depends(get_current_user),
+):
+    """
+    Convierte la topología de un slice en plantilla reutilizable.
+      personal → cualquier usuario, sobre sus propios slices
+      project  → jefeProyecto del proyecto (o admin+)
+      global   → solo admin/superAdmin, y únicamente con imágenes generales
+                 (REQ-AD-05: validación de integridad)
+    """
+    src = db.query(Slice).filter(Slice.id == slice_id).first()
+    if not src:
+        raise HTTPException(status_code=404, detail="Slice no encontrado")
+
+    s_json = src.slice_json or {}
+    if isinstance(s_json, str):
+        s_json = json.loads(s_json)
+    nodes = s_json.get("nodes", [])
+    if not nodes:
+        raise HTTPException(status_code=400, detail="El slice no tiene nodos para publicar.")
+
+    from app.services.permissions import can_operate_slice, is_project_leader
+
+    scope = request.scope
+    tpl_project_id = None
+
+    if scope == "personal":
+        if not can_operate_slice(db, user, src):
+            raise HTTPException(status_code=403, detail="No puedes publicar el slice de otro usuario.")
+        tpl_type = _TPL_PERSONAL
+    elif scope == "project":
+        tpl_project_id = request.project_id or src.project_id
+        if tpl_project_id is None:
+            raise HTTPException(status_code=400, detail="Indica el proyecto destino de la plantilla.")
+        if not (user.can_manage_all() or is_project_leader(db, user.user_id, tpl_project_id)):
+            raise HTTPException(status_code=403, detail="Solo el jefe del proyecto (o admin) puede publicar plantillas de proyecto.")
+        tpl_type = _TPL_PROJECT
+    elif scope == "global":
+        if not user.can_manage_all():
+            raise HTTPException(status_code=403, detail="Solo admin/superAdmin publican plantillas globales.")
+        # REQ-AD-05: una plantilla global no puede usar imágenes personales
+        for n in nodes:
+            img_id = n.get("image_id")
+            if img_id is None or int(img_id) < 0:
+                continue
+            img = db.query(Image).filter(Image.id == int(img_id)).first()
+            if img and not img.is_general:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Error de Integridad: el nodo '{n.get('id')}' usa la imagen personal "
+                           f"'{img.name}'. Las plantillas globales solo admiten imágenes del catálogo global.",
+                )
+        tpl_type = _TPL_GLOBAL
+    else:
+        raise HTTPException(status_code=400, detail="scope debe ser personal | project | global")
+
+    # Copia limpia del diseño: solo estructura, sin datos de despliegue ni IPs
+    clean_nodes = []
+    for n in nodes:
+        cn = dict(n)
+        for k in ("worker", "worker_id", "worker_ip", "worker_port", "vnc_port",
+                  "vnc_url", "external_ip", "provider_instance_id"):
+            cn.pop(k, None)
+        clean_nodes.append(cn)
+
+    tpl = Slice(
+        name=request.name.strip() or f"Plantilla {slice_id}",
+        status="TEMPLATE",
+        template_type=tpl_type,
+        creator_id=user.user_id,
+        project_id=tpl_project_id,
+        slice_json={"nodes": clean_nodes, "edges": s_json.get("edges", [])},
+    )
+    db.add(tpl)
+    db.commit()
+    db.refresh(tpl)
+
+    from app.services.audit import audit
+    audit(user.user_id, user.role, "Templates", "template_published",
+          f"Plantilla '{tpl.name}' publicada (scope={scope}) desde el slice '{src.name}'.",
+          slice_id=slice_id, project_id=tpl_project_id)
+    logger.info("Plantilla publicada: id=%s scope=%s por %s…", tpl.id, scope, user.user_id[:8])
+    return {"template_id": tpl.id, "message": f"Plantilla '{tpl.name}' publicada."}
+
+
+@router.delete("/templates/{template_id}", status_code=200)
+def delete_template(
+    template_id: int,
+    db:   Session     = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    tpl = db.query(Slice).filter(Slice.id == template_id, Slice.status == "TEMPLATE").first()
+    if not tpl:
+        raise HTTPException(status_code=404, detail="Plantilla no encontrada")
+    if not (tpl.creator_id == user.user_id or user.can_manage_all()):
+        raise HTTPException(status_code=403, detail="No puedes eliminar esta plantilla.")
+    name = tpl.name
+    db.delete(tpl)
+    db.commit()
+    return {"message": f"Plantilla '{name}' eliminada."}
 
 
 # ── Utils (sin restricción de rol — cualquier usuario autenticado) ─────────────

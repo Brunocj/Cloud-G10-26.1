@@ -62,27 +62,69 @@ async def fetch_worker_usage() -> dict:
 # Cola global
 placement_queue = asyncio.Queue()
 
+
+def _fail_extend(db, db_slice, extend_info: dict) -> None:
+    """
+    Revierte una extensión fallida SIN tocar lo ya desplegado:
+    borra las VMs nuevas de BD, quita los nodos/enlaces agregados del
+    slice_json, libera IPs y devuelve el slice a ACTIVE.
+    """
+    import json as _json
+    from app.models import IpPool
+    new_names = set(extend_info.get("new_vm_names", []))
+    new_edges = set(extend_info.get("new_edge_ids", []))
+
+    new_vms = db.query(Vm).filter(Vm.slice_id == db_slice.id, Vm.name.in_(new_names)).all() if new_names else []
+    for v in new_vms:
+        if v.external_ip:
+            rec = db.query(IpPool).filter(IpPool.ip_address == v.external_ip).first()
+            if rec:
+                rec.is_used = 0
+                rec.vm_id = None
+        db.delete(v)
+
+    s_json = db_slice.slice_json or {}
+    if isinstance(s_json, str):
+        s_json = _json.loads(s_json)
+    s_json["nodes"] = [n for n in s_json.get("nodes", []) if n.get("id") not in new_names]
+    s_json["edges"] = [e for e in s_json.get("edges", []) if e.get("id") not in new_edges]
+    s_json.pop("pending_extension", None)
+    db_slice.slice_json = dict(s_json)
+    db_slice.status = "ACTIVE"
+    db.commit()
+    logger.warning("[EXTEND] Extensión del slice %s revertida — el slice sigue ACTIVE.", db_slice.id)
+
 async def process_placement_worker():
     """Worker asíncrono que procesa los despliegues uno por uno"""
 
     while True:
         request_data = await placement_queue.get()
 
-        slice_id = request_data["slice_id"]
-        zone_id  = request_data["zone_id"]
+        slice_id    = request_data["slice_id"]
+        zone_id     = request_data["zone_id"]
+        extend_info = request_data.get("extend")   # None = deploy normal
         db = SessionLocal()
 
         try:
-            logger.info(f"[{slice_id}] Iniciando proceso de Placement...")
+            logger.info(f"[{slice_id}] Iniciando proceso de Placement...%s",
+                        " (MODO EXTEND)" if extend_info else "")
             db_slice = db.query(Slice).filter(Slice.id == slice_id).first()
 
             if not db_slice:
                 continue
 
             # ── 1. EXTRACCIÓN DE VMs DESDE BD ─────────────────────────────────
-            vms_de_bd = db.query(Vm).filter(Vm.slice_id == slice_id).all()
+            all_vms_de_bd = db.query(Vm).filter(Vm.slice_id == slice_id).all()
 
-            if not vms_de_bd:
+            if extend_info:
+                # Solo las VMs NUEVAS pasan por placement/deploy; las existentes
+                # siguen corriendo y (si un enlace las toca) reciben hot-plug.
+                new_names = set(extend_info.get("new_vm_names", []))
+                vms_de_bd = [v for v in all_vms_de_bd if v.name in new_names]
+            else:
+                vms_de_bd = all_vms_de_bd
+
+            if not vms_de_bd and not extend_info:
                 db_slice.status = "FAILED"
                 db.commit()
                 continue
@@ -101,8 +143,11 @@ async def process_placement_worker():
 
             if not workers_zona:
                 logger.error("[PLACEMENT] ❌ No hay workers en la zona id=%s", zone_id)
-                db_slice.status = "FAILED"
-                db.commit()
+                if extend_info:
+                    _fail_extend(db, db_slice, extend_info)
+                else:
+                    db_slice.status = "FAILED"
+                    db.commit()
                 placement_queue.task_done()
                 continue
 
@@ -190,8 +235,11 @@ async def process_placement_worker():
                     "[PLACEMENT] ❌ Sin workers elegibles en zona_id=%s "
                     "(excluidos por uso: %d)", zone_id, len(excluded_by_usage)
                 )
-                db_slice.status = "FAILED"
-                db.commit()
+                if extend_info:
+                    _fail_extend(db, db_slice, extend_info)
+                else:
+                    db_slice.status = "FAILED"
+                    db.commit()
                 placement_queue.task_done()
                 continue
 
@@ -218,12 +266,17 @@ async def process_placement_worker():
                 logger.info("[PLACEMENT]    VM: %-20s vcpus=%.1f ram_gb=%.2f disco_gb=%.1f",
                             dv['vm_id'], dv['vcpus'], dv['ram_gb'], dv['disco_gb'])
 
-            async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
-                response = await client.post(VM_PLACEMENT_URL, json=payload)
-                if response.status_code == 422:
-                    logger.error("[PLACEMENT] 422 detalle: %s", response.text)
-                response.raise_for_status()
-                placement_result = response.json()
+            if extend_info and not dynamic_vms:
+                # Extensión con solo enlaces nuevos entre VMs existentes:
+                # no hay nada que colocar, saltamos directo al enriquecimiento.
+                placement_result = {"status": "SUCCESS", "placement_map": []}
+            else:
+                async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
+                    response = await client.post(VM_PLACEMENT_URL, json=payload)
+                    if response.status_code == 422:
+                        logger.error("[PLACEMENT] 422 detalle: %s", response.text)
+                    response.raise_for_status()
+                    placement_result = response.json()
 
             placement_status = placement_result.get('status')
             placement_map    = placement_result.get('placement_map', [])
@@ -279,7 +332,13 @@ async def process_placement_worker():
                     slice_json = json.loads(slice_json)
                 edges = slice_json.get("edges", []) if slice_json else []
 
-                vms_dict          = {vm.name: vm for vm in vms_de_bd}
+                # En modo extend, solo se procesan los ENLACES NUEVOS
+                if extend_info:
+                    new_edge_ids = set(extend_info.get("new_edge_ids", []))
+                    edges = [e for e in edges if e.get("id") in new_edge_ids]
+
+                # El dict incluye TODAS las VMs (los enlaces nuevos pueden tocar existentes)
+                vms_dict          = {vm.name: vm for vm in all_vms_de_bd}
                 vlans_ocupadas_db = db.query(Vlan.id).all()
                 vlans_ocupadas    = [v[0] for v in vlans_ocupadas_db]
 
@@ -292,9 +351,15 @@ async def process_placement_worker():
 
                 slice_hash         = hashlib.sha256(str(slice_id).encode()).hexdigest()
                 mac_prefix         = f"52:54:00:{slice_hash[:2]}:{slice_hash[2:4]}"
-                global_mac_counter = 0
                 network_links      = []
                 vms_payload_data   = {vm.name: {"tap_interfaces": []} for vm in vms_de_bd}
+
+                # Hot-plug: taps nuevos destinados a VMs YA desplegadas (modo extend)
+                hotplug_taps: dict = {}
+
+                existing_deployed = slice_json.get("deployed_vms", []) if extend_info else []
+                # El contador de MACs continúa después de las ya usadas por el slice
+                global_mac_counter = sum(len(dv.get("tap_interfaces", [])) for dv in existing_deployed)
 
                 # TAP de gestión para cada VM
                 for vm in vms_de_bd:
@@ -313,8 +378,12 @@ async def process_placement_worker():
                     if not vm1_id or not vm2_id or vm1_id not in vms_dict or vm2_id not in vms_dict:
                         continue
 
-                    worker1_id = next(w["worker_id"] for w in placement_map if w["vm_id"] == vm1_id)
-                    worker2_id = next(w["worker_id"] for w in placement_map if w["vm_id"] == vm2_id)
+                    # Worker de cada extremo: del placement si la VM es nueva,
+                    # o de la BD si ya está desplegada (modo extend).
+                    worker1_id = next((w["worker_id"] for w in placement_map if w["vm_id"] == vm1_id),
+                                      vms_dict[vm1_id].worker_id)
+                    worker2_id = next((w["worker_id"] for w in placement_map if w["vm_id"] == vm2_id),
+                                      vms_dict[vm2_id].worker_id)
                     worker1    = server_inventory.get(worker1_id, {})
                     worker2    = server_inventory.get(worker2_id, {})
 
@@ -326,8 +395,13 @@ async def process_placement_worker():
 
                     vlan_actual = obtener_vlan_libre()
 
-                    vms_payload_data[vm1_id]["tap_interfaces"].append({"tap_name": tap1, "mac": mac1})
-                    vms_payload_data[vm2_id]["tap_interfaces"].append({"tap_name": tap2, "mac": mac2})
+                    # VM nueva → tap al arranque; VM existente → hot-plug vía QMP/Nova
+                    for _vid, _tap in ((vm1_id, {"tap_name": tap1, "mac": mac1}),
+                                       (vm2_id, {"tap_name": tap2, "mac": mac2})):
+                        if _vid in vms_payload_data:
+                            vms_payload_data[_vid]["tap_interfaces"].append(_tap)
+                        else:
+                            hotplug_taps.setdefault(_vid, []).append(_tap)
 
                     network_links.append({
                         "connection_id":       f"{vm1_id}-{vm2_id}-{vlan_actual}",
@@ -365,7 +439,18 @@ async def process_placement_worker():
 
                 octeto_2        = (int(slice_id) // 256) % 256
                 octeto_3        = int(slice_id) % 256
-                ip_host_counter = 10
+                # En extend, las IPs internas continúan después de las ya asignadas
+                ip_host_counter = 10 + (len(existing_deployed) if extend_info else 0)
+
+                # Llave pública SSH del dueño del slice (REQ-US-02):
+                # se inyecta vía cloud-init en todas las VMs del despliegue.
+                from app.models import UserSshKey
+                owner_key_rec = db.query(UserSshKey).filter(
+                    UserSshKey.user_id == db_slice.creator_id
+                ).first()
+                owner_ssh_key = owner_key_rec.public_key if owner_key_rec else ""
+                if owner_ssh_key:
+                    logger.info("[PLACEMENT] 🔑 Llave SSH del dueño encontrada — se inyectará en las VMs")
 
                 vms_payload = []
                 for vm in vms_de_bd:
@@ -419,11 +504,42 @@ async def process_placement_worker():
                         "internal_ip":     ip_interna_asignada,
                         "vm_user":         vm_user,
                         "vm_password":     vm_password,
+                        "owner_ssh_public_key": owner_ssh_key,
                     })
+
+                # ── 3.5 STUBS DE HOT-PLUG (modo extend) ────────────────────────
+                # VMs existentes que reciben NICs nuevas: viajan al CP marcadas
+                # con already_deployed=True; el CP no las lanza, solo conecta
+                # las interfaces en caliente (QMP en Linux / Nova en OpenStack).
+                for hp_vm_name, hp_taps in hotplug_taps.items():
+                    hp_vm = vms_dict.get(hp_vm_name)
+                    if not hp_vm:
+                        continue
+                    hp_worker = server_inventory.get(hp_vm.worker_id, {})
+                    vms_payload.append({
+                        "vm_id":           hp_vm_name,
+                        "already_deployed": True,
+                        "provider_instance_id": getattr(hp_vm, "provider_instance_id", None),
+                        "worker_ip":       hp_worker.get("ip", "0.0.0.0"),
+                        "worker_port":     hp_worker.get("port", 22),
+                        "ssh_user":        hp_worker.get("user", "ubuntu"),
+                        "ssh_private_key": get_ssh_key(hp_worker.get("key_path", "")),
+                        "vcpus":           int(hp_vm.vcore or 1),
+                        "ram_mb":          float(hp_vm.ram or 512),
+                        "disk_gb":         float(hp_vm.disk or 5),
+                        "image_path":      "",
+                        "vnc_port":        hp_vm.vnc_port,
+                        "vnc_display":     (hp_vm.vnc_port - 5900) if hp_vm.vnc_port else None,
+                        "tap_interfaces":  hp_taps,   # SOLO las NICs a conectar en caliente
+                        "internal_ip":     "0.0.0.0",
+                    })
+                    logger.info("[EXTEND] 🔌 VM existente '%s' recibirá %d NIC(s) por hot-plug",
+                                hp_vm_name, len(hp_taps))
 
                 # ── 4. PUBLICACIÓN EN NATS ─────────────────────────────────────
                 logger.info("="*70)
-                logger.info("[PLACEMENT] 📤 Publicando en NATS → QueueManager")
+                logger.info("[PLACEMENT] 📤 Publicando en NATS → QueueManager%s",
+                            " (EXTEND)" if extend_info else "")
                 logger.info("[PLACEMENT]    slice_id=%s  VMs=%d  links=%d",
                             slice_id, len(vms_payload), len(network_links))
 
@@ -431,6 +547,7 @@ async def process_placement_worker():
                     "slice_id":             str(slice_id),
                     "request_id":           f"req-{uuid.uuid4().hex[:8]}",
                     "availability_zone_id": zone_id,
+                    "mode":                 "extend" if extend_info else "deploy",
                     "vms":                  vms_payload,
                     "links":                network_links,
                     "workers":              servers_state
@@ -442,8 +559,23 @@ async def process_placement_worker():
                 if not slice_json:
                     slice_json = {}
 
-                slice_json["deployed_vms"]   = vms_payload
-                slice_json["deployed_links"] = network_links
+                if extend_info:
+                    # MERGE: lo existente se conserva; se agregan las VMs nuevas
+                    # (no los stubs) y los enlaces nuevos. Las VMs con hot-plug
+                    # suman sus taps nuevos (necesario para el destroy futuro).
+                    new_real_vms = [v for v in vms_payload if not v.get("already_deployed")]
+                    merged_vms = slice_json.get("deployed_vms", []) + new_real_vms
+                    for dv in merged_vms:
+                        if dv.get("vm_id") in hotplug_taps and not any(
+                            t.get("tap_name") == ht.get("tap_name")
+                            for t in dv.get("tap_interfaces", []) for ht in hotplug_taps[dv["vm_id"]]
+                        ):
+                            dv.setdefault("tap_interfaces", []).extend(hotplug_taps[dv["vm_id"]])
+                    slice_json["deployed_vms"]   = merged_vms
+                    slice_json["deployed_links"] = slice_json.get("deployed_links", []) + network_links
+                else:
+                    slice_json["deployed_vms"]   = vms_payload
+                    slice_json["deployed_links"] = network_links
                 db_slice.slice_json           = dict(slice_json)
                 db_slice.availability_zone_id = zone_id
 
@@ -456,26 +588,37 @@ async def process_placement_worker():
                 if published:
                     db_slice.status = "PROVISIONING"
                     logger.info("[PLACEMENT] 🟠 Estado del slice cambiado a PROVISIONING")
+                    db.commit()
+                elif extend_info:
+                    logger.error("[PLACEMENT] ❌ Fallo al publicar extensión en NATS — revirtiendo")
+                    _fail_extend(db, db_slice, extend_info)
                 else:
                     db_slice.status = "FAILED"
                     logger.error("[PLACEMENT] ❌ Fallo al publicar en NATS, estado → FAILED")
-                db.commit()
+                    db.commit()
                 logger.info("[PLACEMENT] 🏁 Flujo de placement completado para slice=%s", slice_id)
                 logger.info("="*70)
 
             else:
-                db_slice.status = "FAILED"
-                db.commit()
+                if extend_info:
+                    logger.error("[EXTEND] Placement FAILED para la extensión — revirtiendo")
+                    _fail_extend(db, db_slice, extend_info)
+                else:
+                    db_slice.status = "FAILED"
+                    db.commit()
 
         except Exception as e:
             logger.error(f"[{slice_id}] Error procesando placement: {str(e)}", exc_info=True)
             db.rollback()
             if 'db_slice' in locals() and db_slice:
                 try:
-                    db_slice.status = "FAILED"
-                    db.commit()
+                    if extend_info:
+                        _fail_extend(db, db_slice, extend_info)
+                    else:
+                        db_slice.status = "FAILED"
+                        db.commit()
                 except Exception as rollback_err:
-                    logger.error(f"[{slice_id}] No se pudo actualizar el estado del slice a FAILED: {rollback_err}")
+                    logger.error(f"[{slice_id}] No se pudo revertir/actualizar el slice: {rollback_err}")
         finally:
             db.close()
             placement_queue.task_done()

@@ -25,7 +25,10 @@ from app.config import settings
 logger = logging.getLogger("api-gateway.jwt")
 
 # ── Rutas que NO requieren token ──────────────────────────────────────────────
-_PUBLIC_EXACT = {"/health", "/docs", "/openapi.json", "/redoc"}
+_PUBLIC_EXACT = {
+    "/health", "/docs", "/openapi.json", "/redoc",
+    "/api/v1/users/register",   # auto-registro (REQ-US-01) — sin token
+}
 _PUBLIC_PREFIX = (
     "/auth/",   # proxy transparente hacia Keycloak
     "/vnc/",    # WebSocket VNC — protegido por túnel SSH, browsers no envían Bearer

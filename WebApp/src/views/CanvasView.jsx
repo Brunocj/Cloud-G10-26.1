@@ -1,3 +1,4 @@
+import { useState, useEffect } from "react";
 import { T, btnBase } from "../theme/tokens";
 import { Badge }       from "../components/ui/Badge";
 import { UserAvatar }  from "../components/ui/UserAvatar";
@@ -14,6 +15,7 @@ import { ConfirmModal }    from "../components/modals/ConfirmModal";
 import { ConsoleModal }    from "../components/modals/ConsoleModal";
 import { SelectZoneModal } from "../components/modals/SelectZoneModal";
 import { KillSwitchModal } from "../components/modals/KillSwitchModal";
+import { PublishTemplateModal } from "../components/modals/PublishTemplateModal";
 import { Overlay }         from "../components/modals/Overlay";
 
 // ─── CanvasView ───────────────────────────────────────────────────────────────
@@ -31,7 +33,7 @@ export const CanvasView = ({
     imageList,
     // CRUD actions
     destroySlice, forceDestroySlice, deployDraft, deployFromDesigner, bulkDeploy, saveDraft,
-    doDeployDraft, updateDraft,
+    doDeployDraft, updateDraft, publishTemplate, modifySlice, fetchSlices,
     // Import / Export
     importarTopologia, exportarTopologia,
     // Modal & UI state
@@ -46,6 +48,23 @@ export const CanvasView = ({
 }) => {
     // Three states: "slice" (viewing/editing existing), "design" (new slice), "browse" (nothing selected)
     const viewState = activeSlice ? "slice" : isDesignMode ? "design" : "browse";
+
+    // Modo Edición Post-Despliegue (REQ-US-14): editar un slice ACTIVO
+    const [editMode, setEditMode] = useState(false);
+    const [applying, setApplying] = useState(false);
+    useEffect(() => { setEditMode(false); }, [activeId]);
+
+    const applyChanges = async () => {
+        setApplying(true);
+        const ok = await modifySlice(activeSlice.id);
+        setApplying(false);
+        if (ok) setEditMode(false);
+    };
+
+    const cancelEdit = () => {
+        setEditMode(false);
+        fetchSlices?.();   // descarta los cambios locales recargando del servidor
+    };
 
     return (
         <>
@@ -76,6 +95,29 @@ export const CanvasView = ({
                                 <button onClick={() => deployDraft(activeSlice.id)}
                                     style={btnBase({ fontSize: 12, padding: "6px 16px", background: T.accent, color: "#fff", border: "none", boxShadow: `0 3px 12px ${T.accent}44`, display: "flex", alignItems: "center", gap: 6 })}>
                                     <Zap size={13} /> Desplegar
+                                </button>
+                            </>
+                        )}
+                        {/* Modo Edición Post-Despliegue (REQ-US-14) */}
+                        {activeSlice.status === "ACTIVE" && !editMode && (
+                            <button onClick={() => { setEditMode(true); }}
+                                title="Agregar nodos y enlaces sin destruir la red"
+                                style={btnBase({ fontSize: 12, padding: "6px 14px", background: T.surfaceElevated, color: T.accent, border: `1px solid ${T.accent}44`, boxShadow: "none", display: "flex", alignItems: "center", gap: 6 })}>
+                                ✏ Modificar Slice
+                            </button>
+                        )}
+                        {activeSlice.status === "ACTIVE" && editMode && (
+                            <>
+                                <span style={{ fontSize: 10, fontWeight: 800, padding: "3px 10px", borderRadius: 20, background: T.yellowLight, color: T.yellow, border: `1px solid ${T.yellow}55` }}>
+                                    MODO EDICIÓN — arrastra nuevos nodos y conéctalos
+                                </span>
+                                <button onClick={cancelEdit} disabled={applying}
+                                    style={btnBase({ fontSize: 12, padding: "6px 12px", background: T.surfaceElevated, color: T.textMuted, border: `1px solid ${T.border}`, boxShadow: "none" })}>
+                                    Cancelar
+                                </button>
+                                <button onClick={applyChanges} disabled={applying}
+                                    style={btnBase({ fontSize: 12, padding: "6px 16px", background: T.accent, color: "#fff", border: "none", boxShadow: `0 3px 12px ${T.accent}44`, display: "flex", alignItems: "center", gap: 6, opacity: applying ? 0.6 : 1 })}>
+                                    <Zap size={13} /> {applying ? "Aplicando…" : "Aplicar Cambios"}
                                 </button>
                             </>
                         )}
@@ -136,7 +178,7 @@ export const CanvasView = ({
             {/* ── Main content area ────────────────────────────────────── */}
             <div style={{ flex: 1, overflow: "hidden", display: "flex" }}>
                 {viewState === "slice" ? (
-                    <Canvas nodes={activeSlice.nodes} edges={activeSlice.edges} setNodes={setSliceNodes} setEdges={setSliceEdges} imageList={imageList} activeSlice={activeSlice} onOpenConsole={setConsoleVm} targetAz={targetAz} setTargetAz={setTargetAz} apiFetch={apiFetch} isDesignMode={activeSlice.status === "DRAFT"} />
+                    <Canvas nodes={activeSlice.nodes} edges={activeSlice.edges} setNodes={setSliceNodes} setEdges={setSliceEdges} imageList={imageList} activeSlice={activeSlice} onOpenConsole={setConsoleVm} targetAz={targetAz} setTargetAz={setTargetAz} apiFetch={apiFetch} isDesignMode={activeSlice.status === "DRAFT" || editMode} editMode={editMode} />
                 ) : viewState === "design" ? (
                     <Canvas nodes={nodes} edges={edges} setNodes={setNodes} setEdges={setEdges} imageList={imageList} activeSlice={null} onOpenConsole={setConsoleVm} targetAz={targetAz} setTargetAz={setTargetAz} apiFetch={apiFetch} onCleared={() => { setTargetAz(""); setAzModalOpen(true); }} isDesignMode={true} />
                 ) : (
@@ -167,6 +209,15 @@ export const CanvasView = ({
             })()}
             {modal === "draft" && (
                 <SaveDraftModal nodes={nodes} edges={edges} onSave={saveDraft} onClose={() => setModal(null)} />
+            )}
+            {modal?.type === "publishTemplate" && (
+                <PublishTemplateModal
+                    sliceName={slices.find(s => s.id === modal.id)?.name}
+                    userRole={user?.role}
+                    apiFetch={apiFetch}
+                    onConfirm={(payload) => publishTemplate(modal.id, payload)}
+                    onClose={() => setModal(null)}
+                />
             )}
             {modal?.type === "killSwitch" && (
                 <KillSwitchModal

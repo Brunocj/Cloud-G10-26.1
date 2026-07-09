@@ -61,12 +61,16 @@ class VMNetworkSpec(BaseModel):
     internet_access: int = 0
     external_ip:     Optional[str] = None
     internal_ip:     str
+    # Modo Edición (REQ-US-14): VM ya desplegada — no crear su puerto de
+    # gestión; solo importan los puertos de los enlaces nuevos que la tocan.
+    already_deployed: bool = False
 
 class DeployNetworkRequest(BaseModel):
     """Payload recibido en network.deploy"""
     slice_id:             str
     request_id:           str
     availability_zone_id: int = Field(default=1, description="1=Linux Cluster, 2=OpenStack")
+    mode:                 str = Field(default="deploy", description="deploy | extend (Modo Edición)")
     host_map:             dict = Field(default_factory=dict, description="vm_id → selected_host (del VMPlacement)")
     links:                List[NetworkLink]
     vms:                  List[VMNetworkSpec] = Field(default_factory=list)

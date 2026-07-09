@@ -98,7 +98,7 @@ class QEMUExecutor:
 
 
 
-    def _prepare_cloud_init(self, vm_id: str, image_path: str, vm_user: str = "ubuntu", vm_password: str = "pucp2026", public_key_path: str = "keys/worker_key.pub") -> str:
+    def _prepare_cloud_init(self, vm_id: str, image_path: str, vm_user: str = "ubuntu", vm_password: str = "pucp2026", public_key_path: str = "keys/worker_key.pub", owner_ssh_key: str = "") -> str:
         """Genera el ISO de cloud-init en el worker fisico para inyectar la llave SSH y credenciales."""
 
         try:
@@ -120,10 +120,19 @@ class QEMUExecutor:
             users_block += f"""  - name: {vm_user}
     ssh-authorized-keys:
       - {pub_key}
-    sudo: ['ALL=(ALL) NOPASSWD:ALL']
+"""
+            if owner_ssh_key:
+                users_block += f"      - {owner_ssh_key}\n"
+            users_block += """    sudo: ['ALL=(ALL) NOPASSWD:ALL']
     groups: sudo
     shell: /bin/bash
 """
+
+        # Llave pública del dueño del slice (REQ-US-02): también para el usuario
+        # por defecto de la imagen, vía ssh_authorized_keys top-level.
+        owner_keys_block = ""
+        if owner_ssh_key:
+            owner_keys_block = f"ssh_authorized_keys:\n  - {owner_ssh_key}\n"
 
         # Siempre seteamos la contraseña para ambos usuarios
         chpasswd_list = f"{default_image_user}:{vm_password}"
@@ -132,7 +141,7 @@ class QEMUExecutor:
 
         user_data = f"""#cloud-config
 ssh_pwauth: true
-{users_block}
+{users_block}{owner_keys_block}
 chpasswd:
   list: |
     {chpasswd_list}
@@ -169,6 +178,7 @@ chpasswd:
         vm_user:        str = "ubuntu",
         vm_password:    str = "pucp2026",
         priority:       int = 0,
+        owner_ssh_key:  str = "",
     ) -> int:
         """
         Lanza el proceso QEMU/KVM en el worker.
@@ -180,7 +190,7 @@ chpasswd:
         linux_nice = priority - 20
         
         # Generamos el cloud-init ISO con usuario y contraseña configurados
-        seed_iso_path = self._prepare_cloud_init(vm_id, image_path, vm_user=vm_user, vm_password=vm_password)
+        seed_iso_path = self._prepare_cloud_init(vm_id, image_path, vm_user=vm_user, vm_password=vm_password, owner_ssh_key=owner_ssh_key)
         
         cmd = (
             f"sudo nice -n {linux_nice} "
@@ -191,8 +201,12 @@ chpasswd:
             f"-smp {vcpus} "
             f"-drive file={disk_path},format=qcow2 "
             f"-cdrom {seed_iso_path} "
-            f"-vnc 0.0.0.0:{vnc_display},websocket={vnc_display + 5700} " 
+            f"-vnc 0.0.0.0:{vnc_display},websocket={vnc_display + 5700} "
             f"{net_args}"
+            # Socket QMP para hot-plug de NICs (Modo Edición, REQ-US-14).
+            # Local al worker (/tmp, no NFS) — se conecta por SSH cuando se
+            # necesita agregar un enlace a esta VM sin reiniciarla.
+            f"-qmp unix:/tmp/qmp-{vm_id}-{slice_id}.sock,server,nowait "
             f"-daemonize"
         )
 
@@ -233,6 +247,55 @@ chpasswd:
             logger.info("Disco eliminado: %s", disk_path)
         else:
             logger.warning("Disco no encontrado (ya eliminado): %s", disk_path)
+
+    def hotplug_nic(self, vm_id: str, slice_id: str, tap_name: str, mac: str) -> None:
+        """
+        Conecta una NIC en caliente a una VM QEMU en ejecución vía QMP
+        (Modo Edición, REQ-US-14). El TAP ya debe existir en el worker
+        (lo crea el NetworkOrchestrator en el paso de red).
+
+        Requiere que la VM haya sido lanzada con el socket QMP
+        (/tmp/qmp-{vm_id}-{slice_id}.sock). Las VMs desplegadas antes de
+        esta versión no lo tienen: hay que redesplegar el slice una vez.
+        """
+        qmp_path  = f"/tmp/qmp-{vm_id}-{slice_id}.sock"
+        netdev_id = f"hp-{tap_name[-12:]}"
+        dev_id    = f"nic-{tap_name[-12:]}"
+
+        # Script QMP ejecutado EN el worker (el socket es local a él).
+        # Handshake → netdev_add(tap) → device_add(virtio-net-pci).
+        qmp_script = (
+            "import socket,json,sys\n"
+            "s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)\n"
+            f"s.connect({qmp_path!r})\n"
+            "f=s.makefile('rw')\n"
+            "f.readline()\n"
+            "def cmd(c):\n"
+            "    f.write(json.dumps(c)+'\\n'); f.flush()\n"
+            "    while True:\n"
+            "        r=json.loads(f.readline())\n"
+            "        if 'return' in r or 'error' in r: return r\n"
+            "cmd({'execute':'qmp_capabilities'})\n"
+            f"r1=cmd({{'execute':'netdev_add','arguments':{{'type':'tap','id':{netdev_id!r},"
+            f"'ifname':{tap_name!r},'script':'no','downscript':'no'}}}})\n"
+            "if 'error' in r1: print('NETDEV_ERR:'+r1['error'].get('desc','?')); sys.exit(1)\n"
+            f"r2=cmd({{'execute':'device_add','arguments':{{'driver':'virtio-net-pci',"
+            f"'netdev':{netdev_id!r},'mac':{mac!r},'id':{dev_id!r}}}}})\n"
+            "if 'error' in r2: print('DEVICE_ERR:'+r2['error'].get('desc','?')); sys.exit(1)\n"
+            "print('HOTPLUG_OK')\n"
+        )
+        script_b64 = __import__("base64").b64encode(qmp_script.encode()).decode()
+        # QEMU corre con sudo → el socket QMP es de root → sudo python3
+        cmd = f"echo {script_b64} | base64 -d | sudo python3 -"
+
+        exit_code, out, err = self._ssh.exec(cmd)
+        output = (out or "") + (err or "")
+        if "HOTPLUG_OK" not in output:
+            raise RuntimeError(
+                f"Hot-plug QMP falló para VM {vm_id} (tap={tap_name}): {output.strip() or 'sin salida'}. "
+                f"Si la VM fue desplegada antes de habilitar QMP, redespliega el slice."
+            )
+        logger.info("Hot-plug OK: VM %s ← NIC %s (MAC %s) vía QMP", vm_id, tap_name, mac)
 
     def delete_seed_iso(self, vm_id: str) -> None:
         """Elimina el ISO de cloud-init generado al arrancar la VM."""

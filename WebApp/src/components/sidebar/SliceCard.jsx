@@ -1,7 +1,10 @@
 import { useEffect, useState } from "react";
 import { T, btnBase } from "../../theme/tokens";
 import { Badge } from "../ui/Badge";
-import { Trash2, Zap, Clock, AlertTriangle, User, FolderOpen } from "../ui/Icon";
+import { Trash2, Zap, Clock, AlertTriangle, User, FolderOpen, ExternalLink } from "../ui/Icon";
+
+// REQ-US-15: URL del dashboard nativo de OpenStack (configurable por env)
+const HORIZON_URL = import.meta.env.VITE_HORIZON_URL ?? "http://10.20.12.158/horizon";
 
 // ─── TTL restante (REQ-US-09: columna "Tiempo Restante") ─────────────────────
 // date_deployed viene en UTC "YYYY-MM-DD HH:MM:SS"; ttl_hours en horas.
@@ -49,7 +52,7 @@ const TtlCountdown = ({ slice }) => {
     );
 };
 
-export const SliceCard = ({ slice, active, onClick, onDestroy, onDeploy, showOwner = false }) => (
+export const SliceCard = ({ slice, active, onClick, onDestroy, onDeploy, onPublish, showOwner = false }) => (
     <div
         onClick={onClick}
         style={{
@@ -80,14 +83,24 @@ export const SliceCard = ({ slice, active, onClick, onDestroy, onDeploy, showOwn
                     </div>
                 )}
             </div>
-            {slice.status !== "TERMINATED" && (
-                <button
-                    onClick={e => { e.stopPropagation(); onDestroy(slice.id); }}
-                    style={{ background: "none", border: "none", cursor: "pointer", color: T.textMuted, padding: 4, display: "flex" }}
-                    title="Eliminar slice">
-                    <Trash2 size={15} />
-                </button>
-            )}
+            <div style={{ display: "flex", gap: 2 }}>
+                {onPublish && slice.nodeCount > 0 && (
+                    <button
+                        onClick={e => { e.stopPropagation(); onPublish(slice.id); }}
+                        style={{ background: "none", border: "none", cursor: "pointer", color: T.textMuted, padding: 4, display: "flex", fontSize: 13 }}
+                        title="Publicar como Plantilla">
+                        ⭐
+                    </button>
+                )}
+                {slice.status !== "TERMINATED" && (
+                    <button
+                        onClick={e => { e.stopPropagation(); onDestroy(slice.id); }}
+                        style={{ background: "none", border: "none", cursor: "pointer", color: T.textMuted, padding: 4, display: "flex" }}
+                        title="Eliminar slice">
+                        <Trash2 size={15} />
+                    </button>
+                )}
+            </div>
         </div>
 
         {/* Stats grid */}
@@ -125,6 +138,20 @@ export const SliceCard = ({ slice, active, onClick, onDestroy, onDeploy, showOwn
                 <AlertTriangle size={12} style={{ flexShrink: 0, marginTop: 1 }} />
                 <span><b>Motivo del rechazo:</b> {slice.review.comment}</span>
             </div>
+        )}
+
+        {/* Ver en Horizon (REQ-US-15) — solo slices de la zona OpenStack */}
+        {slice.availability_zone_id === 2 && ["ACTIVE", "PROVISIONING"].includes(slice.status) && (
+            <a href={HORIZON_URL} target="_blank" rel="noopener noreferrer"
+                onClick={e => e.stopPropagation()}
+                style={{
+                    display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+                    width: "100%", marginTop: 8, padding: "6px 0", fontSize: 11, fontWeight: 700,
+                    color: "#ff8200", background: "#ff820015", border: "1px solid #ff820044",
+                    borderRadius: 8, textDecoration: "none", boxSizing: "border-box",
+                }}>
+                <ExternalLink size={11} /> Ver en Horizon
+            </a>
         )}
 
         {/* Deploy / re-solicitud (borradores y rechazados) */}

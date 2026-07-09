@@ -1,7 +1,14 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { T, inp } from "../../theme/tokens";
 import { Label } from "../ui/Label";
 import { AzureTemplate, AzureNetwork } from "../ui/AzureIcons";
+import { Trash2, Globe, Users, User } from "../ui/Icon";
+
+const SCOPE_META = {
+    global:   { label: "Globales",       icon: Globe },
+    project:  { label: "De mi Proyecto", icon: Users },
+    personal: { label: "Mis Plantillas", icon: User  },
+};
 
 const TEMPLATES = [
     { id: "linear", name: "Cadena Lineal",    desc: "Nodos en serie",         minCount: 2, maxCount: 10 },
@@ -11,12 +18,78 @@ const TEMPLATES = [
     { id: "bus",    name: "Bus (Hub)",         desc: "Hub central + clientes", minCount: 2, maxCount: 10 },
 ];
 
-export const TemplatePicker = () => {
+export const TemplatePicker = ({ apiFetch, onLoadTemplate, flash }) => {
     const [counts, setCounts]     = useState({ linear: 4, ring: 5, mesh: 4, tree: 7, bus: 4 });
     const [dragging, setDragging] = useState(null);
+    const [saved, setSaved]       = useState([]);
+
+    const loadSaved = async () => {
+        if (!apiFetch) return;
+        try {
+            const res = await apiFetch("/slices/templates/list");
+            if (res.ok) setSaved(await res.json());
+        } catch { /* silencioso */ }
+    };
+    useEffect(() => { loadSaved(); }, [apiFetch]);
+
+    const deleteTemplate = async (tpl, e) => {
+        e.stopPropagation();
+        if (!window.confirm(`¿Eliminar la plantilla "${tpl.name}"?`)) return;
+        const res = await apiFetch(`/slices/templates/${tpl.id}`, { method: "DELETE" });
+        if (res.ok) { flash?.(`Plantilla "${tpl.name}" eliminada`); loadSaved(); }
+        else flash?.("No se pudo eliminar la plantilla", "error");
+    };
+
+    // Agrupar por alcance en el orden del TDR: proyecto → globales → personales
+    const grouped = ["project", "global", "personal"]
+        .map(scope => ({ scope, items: saved.filter(t => t.scope === scope) }))
+        .filter(g => g.items.length > 0);
 
     return (
         <div style={{ padding: "12px 14px 12px", borderBottom: `1px solid ${T.border}` }}>
+            {/* ── Plantillas guardadas (REQ-US-04 / REQ-JP-03) ───────────── */}
+            {grouped.map(({ scope, items }) => {
+                const Meta = SCOPE_META[scope];
+                return (
+                    <div key={scope} style={{ marginBottom: 12 }}>
+                        <Label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                            <Meta.icon size={12} color={T.accent} /> {Meta.label}
+                        </Label>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
+                            {items.map(tpl => (
+                                <div key={tpl.id}
+                                    onClick={() => onLoadTemplate?.(tpl)}
+                                    title="Clic para cargar en el lienzo (reemplaza el contenido actual)"
+                                    style={{
+                                        border: `1px solid ${T.border}`, borderRadius: 6,
+                                        background: T.surface, padding: "7px 10px",
+                                        display: "flex", alignItems: "center", gap: 8, cursor: "pointer",
+                                        transition: "border-color 0.15s",
+                                    }}
+                                    onMouseEnter={e => e.currentTarget.style.borderColor = T.accent}
+                                    onMouseLeave={e => e.currentTarget.style.borderColor = T.border}>
+                                    <AzureTemplate size={20} />
+                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                        <div style={{ fontSize: 11, fontWeight: 700, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                            {tpl.name}
+                                        </div>
+                                        <div style={{ fontSize: 9.5, color: T.textMuted }}>
+                                            {tpl.nodeCount} nodos · {tpl.edgeCount} enlaces
+                                            {tpl.project_name ? ` · ${tpl.project_name}` : ""}
+                                        </div>
+                                    </div>
+                                    {tpl.can_delete && (
+                                        <button onClick={(e) => deleteTemplate(tpl, e)} title="Eliminar plantilla"
+                                            style={{ background: "none", border: "none", cursor: "pointer", color: T.textFaint, padding: 2, display: "flex" }}>
+                                            <Trash2 size={12} />
+                                        </button>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                );
+            })}
             <Label style={{ display: "flex", alignItems: "center", gap: 6 }}>
                 <AzureTemplate size={16} /> Plantillas de Despliegue
             </Label>

@@ -20,7 +20,7 @@ const buildIfaceMap = (edges) => {
 };
 
 // ─── Canvas ──────────────────────────────────────────────────────────────────
-export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlice, onOpenConsole, targetAz, setTargetAz, apiFetch, onCleared, isDesignMode }) => {
+export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlice, onOpenConsole, targetAz, setTargetAz, apiFetch, onCleared, isDesignMode, editMode = false }) => {
     const svgRef   = useRef();
     const groupRef = useRef();           // root <g> — updated imperatively during pan/zoom
 
@@ -350,8 +350,9 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
 
     // ── Render ────────────────────────────────────────────────────────────────
 
-    // Toolbar is only relevant when designing (new slice or DRAFT edit)
-    const showToolbar = !activeSlice || activeSlice.status === "DRAFT";
+    // Toolbar is only relevant when designing (new slice, DRAFT edit, o Modo
+    // Edición Post-Despliegue de un slice ACTIVO — REQ-US-14)
+    const showToolbar = !activeSlice || activeSlice.status === "DRAFT" || editMode;
 
     return (
         <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", position: "relative",
@@ -391,8 +392,21 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
 
                 <div style={{ flex: 1 }} />
 
+                {/* Modo Edición: fuente de arrastre de VMs (el sidebar está en modo browse) */}
+                {editMode && (
+                    <div draggable onDragStart={e => e.dataTransfer.setData("nodeType", "vm")}
+                        title="Arrastra al lienzo para agregar una VM nueva"
+                        style={{
+                            display: "flex", alignItems: "center", gap: 6, cursor: "grab",
+                            padding: "4px 10px", background: T.accentLight,
+                            border: `1.5px dashed ${T.accent}66`, borderRadius: 8, marginRight: 4,
+                        }}>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: T.accent }}>+ VM (arrastrar)</span>
+                    </div>
+                )}
+
                 {/* Target AZ Selector — se bloquea una vez hay nodos, para evitar incompatibilidades de imagen */}
-                <div style={{ display: "flex", alignItems: "center", gap: 6, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 8, padding: "2px 8px", marginRight: 4 }}
+                {!editMode && <div style={{ display: "flex", alignItems: "center", gap: 6, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 8, padding: "2px 8px", marginRight: 4 }}
                     title={nodes.length > 0 ? "Limpia el lienzo para poder cambiar la Zona Objetivo" : ""}>
                     <span style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, textTransform: "uppercase" }}>Zona Objetivo:</span>
                     <select
@@ -405,7 +419,7 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                         <option value="1">Linux Cluster</option>
                         <option value="2">OpenStack (Cloud)</option>
                     </select>
-                </div>
+                </div>}
 
                 {/* Controles de Zoom */}
                 <div style={{ display: "flex", alignItems: "center", gap: 4, marginRight: 4, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 8, padding: "2px" }}>
@@ -473,7 +487,7 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                     <Maximize2 size={12} /> Restablecer Vista
                 </button>
 
-                <button
+                {!editMode && <button
                     onClick={() => {
                         if (window.confirm("¿Estás seguro de limpiar todo el lienzo? Perderás el trabajo no guardado.")) {
                             setNodes([]); setEdges([]); setLinkFrom(null); setEditId(null);
@@ -484,7 +498,7 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                         color: T.red, border: `1px solid ${T.red}33`, background: T.redLight,
                         display: "flex", alignItems: "center", gap: 5 })}>
                     <Trash2 size={12} /> Limpiar
-                </button>
+                </button>}
             </div>}
 
             {/* ── SVG canvas ── */}

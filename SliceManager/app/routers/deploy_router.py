@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Image, Slice, Vm, Vlan, IpPool, Worker
-from app.schemas import DeployRequest, BulkDeployRequest
+from app.schemas import DeployRequest, BulkDeployRequest, DraftSaveRequest
 from app.auth import CurrentUser, get_current_user
 from app.services.placement_worker import placement_queue
 from app.nats_producer import nats_producer
@@ -430,6 +430,154 @@ async def request_destroy(
         return {"status": "ACCEPTED", "message": "Orden de destrucción enviada."}
 
     raise HTTPException(status_code=500, detail="Error enviando orden a NATS")
+
+
+# ── Modo Edición Post-Despliegue (REQ-US-14): aprovisionamiento incremental ───
+
+@router.post("/{slice_id}/modify", status_code=202)
+async def modify_active_slice(
+    slice_id: int,
+    request:  DraftSaveRequest,
+    db:       Session     = Depends(get_db),
+    user:     CurrentUser = Depends(get_current_user),
+):
+    """
+    Extiende un slice ACTIVO: acepta la topología completa editada, calcula el
+    diff (nodos y enlaces NUEVOS) y los aprovisiona incrementalmente sin tocar
+    lo ya desplegado. Los enlaces hacia VMs en ejecución se conectan en caliente
+    (QMP hot-plug en Linux Cluster / interface-attach de Nova en OpenStack).
+    No se permiten eliminaciones de nodos/enlaces (fuera del alcance de R1B).
+    """
+    db_slice = db.query(Slice).filter(Slice.id == slice_id).first()
+    if not db_slice:
+        raise HTTPException(status_code=404, detail="Slice no encontrado")
+    if db_slice.status != "ACTIVE":
+        raise HTTPException(status_code=400, detail="Solo se pueden modificar slices ACTIVOS.")
+    if not can_operate_slice(db, user, db_slice):
+        raise HTTPException(status_code=403, detail="No tienes permiso para modificar este slice.")
+
+    s_json = db_slice.slice_json or {}
+    if isinstance(s_json, str):
+        s_json = json.loads(s_json)
+    if s_json.get("pending_extension"):
+        raise HTTPException(status_code=409, detail="Ya hay una modificación en curso para este slice.")
+
+    old_nodes = {n.get("id"): n for n in s_json.get("nodes", [])}
+    old_edge_ids = {e.get("id") for e in s_json.get("edges", [])}
+
+    new_nodes_all = request.slice_json.get("nodes", [])
+    new_edges_all = request.slice_json.get("edges", [])
+    incoming_node_ids = {n.get("id") for n in new_nodes_all}
+    incoming_edge_ids = {e.get("id") for e in new_edges_all}
+
+    # ── Rechazar eliminaciones (solo se agregan recursos) ────────────────────
+    removed_nodes = set(old_nodes) - incoming_node_ids
+    removed_edges = old_edge_ids - incoming_edge_ids
+    if removed_nodes or removed_edges:
+        raise HTTPException(
+            status_code=400,
+            detail="El Modo Edición solo permite AGREGAR nodos y enlaces. "
+                   "Para quitar recursos, destruye y redespliega el slice.",
+        )
+
+    added_nodes = [n for n in new_nodes_all if n.get("id") not in old_nodes]
+    added_edges = [e for e in new_edges_all if e.get("id") not in old_edge_ids]
+    if not added_nodes and not added_edges:
+        raise HTTPException(status_code=400, detail="No hay cambios que aplicar.")
+
+    # Todo enlace nuevo debe conectar nodos válidos
+    for e in added_edges:
+        a, b = e.get("from", e.get("source")), e.get("to", e.get("target"))
+        if a not in incoming_node_ids or b not in incoming_node_ids:
+            raise HTTPException(status_code=400, detail=f"El enlace {e.get('id')} referencia nodos inexistentes.")
+
+    zone_id = db_slice.availability_zone_id or 1
+
+    # ── Validar imágenes de los nodos nuevos vs. la AZ del slice ─────────────
+    for n in added_nodes:
+        img_id = n.get("image_id")
+        if img_id is None or int(img_id) < 0:
+            continue
+        img = db.query(Image).filter(Image.id == int(img_id)).first()
+        if img and img.availability_zone_id is not None and img.availability_zone_id != zone_id:
+            raise HTTPException(
+                status_code=400,
+                detail=f"La imagen del nodo '{n.get('id')}' no es compatible con la zona del slice.",
+            )
+
+    # ── Crear filas Vm para los nodos nuevos (misma lógica que el draft) ─────
+    workers_db  = db.query(Worker).filter(Worker.availability_zones_id == zone_id).all()
+    num_workers = len(workers_db)
+    new_vm_names = []
+    for index, vm_data in enumerate(added_nodes):
+        asignado = workers_db[index % num_workers] if num_workers > 0 else None
+        ext_ip     = vm_data.get("external_ip", None)
+        int_access = 1 if ext_ip else int(vm_data.get("internet_access", 0))
+        img_id = vm_data.get("image_id")
+        if img_id is not None and int(img_id) < 0:
+            img_id = None
+
+        nueva_vm = Vm(
+            name=vm_data.get("id"),
+            vcore=int(vm_data.get("vcores", 1)),
+            ram=float(vm_data.get("ram", 512.0)),
+            disk=float(vm_data.get("disk", 5.0)),
+            state="DRAFT",
+            slice_id=slice_id,
+            image_id=img_id,
+            worker_id=asignado.id if asignado else None,
+            external_ip=ext_ip,
+            internet_access=int_access,
+        )
+        vm_data["worker"]    = asignado.name if asignado else "Unassigned"
+        vm_data["worker_id"] = asignado.id if asignado else None
+        db.add(nueva_vm)
+        db.flush()
+        new_vm_names.append(vm_data.get("id"))
+
+        if ext_ip:
+            ip_record = db.query(IpPool).filter(IpPool.ip_address == ext_ip).first()
+            if not ip_record:
+                db.rollback()
+                raise HTTPException(status_code=400, detail=f"La IP '{ext_ip}' no existe en el pool.")
+            if ip_record.is_used and ip_record.vm_id != nueva_vm.id:
+                db.rollback()
+                raise HTTPException(status_code=409, detail=f"La IP '{ext_ip}' ya está en uso.")
+            ip_record.is_used = 1
+            ip_record.vm_id   = nueva_vm.id
+
+    # ── Persistir la topología fusionada + marcar la extensión en curso ──────
+    s_json["nodes"] = new_nodes_all
+    s_json["edges"] = new_edges_all
+    s_json["pending_extension"] = {
+        "new_vm_names": new_vm_names,
+        "new_edge_ids": [e.get("id") for e in added_edges],
+        "requested_by": user.user_id,
+        "requested_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    db_slice.slice_json = dict(s_json)
+    db_slice.status = "PROVISIONING"
+    db.commit()
+
+    audit(user.user_id, user.role, "SliceManager", "slice_extend_requested",
+          f"Slice '{db_slice.name}': +{len(added_nodes)} nodo(s), +{len(added_edges)} enlace(s) (incremental).",
+          slice_id=slice_id, project_id=db_slice.project_id)
+
+    await placement_queue.put({
+        "slice_id": slice_id,
+        "zone_id":  zone_id,
+        "extend": {
+            "new_vm_names": new_vm_names,
+            "new_edge_ids": [e.get("id") for e in added_edges],
+        },
+    })
+    logger.info("[MODIFY] 🧩 Extensión encolada slice=%s: +%d VMs, +%d enlaces",
+                slice_id, len(added_nodes), len(added_edges))
+    return {
+        "status": "ACCEPTED",
+        "message": f"Aplicando cambios: {len(added_nodes)} nodo(s) y {len(added_edges)} enlace(s) nuevos.",
+        "new_vms": new_vm_names,
+    }
 
 
 # ── Kill Switch (REQ-AD-07): destrucción administrativa forzada ───────────────

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { T, btnBase } from "../../theme/tokens";
 import { ShieldCheck, ArrowLeft, Save, Key, CheckCircle, AlertTriangle, Loader, Download } from "../ui/Icon";
 
@@ -118,15 +118,36 @@ export const ProfilePage = ({ user, onBack, apiFetch }) => {
             : src.slice(0, 2).toUpperCase();
     })();
 
-    // ── Save SSH public key (demo) ────────────────────────────────────────────
+    // ── Cargar la llave guardada al abrir el perfil ──────────────────────────
+    useEffect(() => {
+        if (!apiFetch) return;
+        apiFetch("/users/me/ssh-key")
+            .then(r => r.ok ? r.json() : null)
+            .then(data => {
+                if (data?.public_key) { setSshKey(data.public_key); setKeySaved(true); }
+            })
+            .catch(() => {});
+    }, [apiFetch]);
+
+    // ── Guardar la llave pública en el backend (REQ-US-02) ───────────────────
     const handleSaveKey = async () => {
         if (!sshKey.trim()) { flash("Pega tu llave pública primero.", "error"); return; }
+        if (!apiFetch) { flash("No disponible en modo demo.", "error"); return; }
         setSaveLoading(true);
-        // TODO: POST /api/v1/auth/ssh-keys  { public_key: sshKey }
-        await new Promise(r => setTimeout(r, 700)); // demo delay
+        try {
+            const res = await apiFetch("/users/me/ssh-key", {
+                method: "POST",
+                body: JSON.stringify({ public_key: sshKey.trim() }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (res.ok) {
+                setKeySaved(true);
+                flash(data.message || "Llave SSH guardada. Se inyectará en tus próximas VMs.");
+            } else {
+                flash(data.detail || "No se pudo guardar la llave.", "error");
+            }
+        } catch { flash("Error de conexión.", "error"); }
         setSaveLoading(false);
-        setKeySaved(true);
-        flash("Llave SSH guardada correctamente.");
     };
 
     // ── Generate key pair (demo — Web Crypto API) ─────────────────────────────

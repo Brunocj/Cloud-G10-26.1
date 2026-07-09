@@ -97,13 +97,37 @@ export const RegisterPage = ({ onBack }) => {
         return e;
     };
 
-    const handleSubmit = (e) => {
+    const handleSubmit = async (e) => {
         e.preventDefault();
         const v = validate();
         if (Object.keys(v).length) { setErrors(v); return; }
         setLoading(true);
-        // Demo: simulate API delay then show success
-        setTimeout(() => { setLoading(false); setSubmitted(true); }, 800);
+        try {
+            const API_BASE = import.meta.env.VITE_API_BASE ?? "http://10.20.11.212:8085/api/v1";
+            const nameParts = form.nombre.trim().split(/\s+/);
+            const res = await fetch(`${API_BASE}/users/register`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    username:  form.username.trim(),
+                    email:     form.email.trim(),
+                    password:  form.password,
+                    fullname:  nameParts.slice(0, -1).join(" ") || nameParts[0],
+                    lastname:  nameParts.length > 1 ? nameParts[nameParts.length - 1] : "",
+                    pucp_code: form.codigo,
+                    career:    form.carrera,
+                }),
+            });
+            if (res.ok) {
+                setSubmitted(true);
+            } else {
+                const data = await res.json().catch(() => ({}));
+                setErrors({ email: data.detail || `Error ${res.status} al registrar` });
+            }
+        } catch {
+            setErrors({ email: "No se pudo conectar al servidor" });
+        }
+        setLoading(false);
     };
 
     if (submitted) return <SuccessScreen nombre={form.nombre.split(" ")[0]} onBack={onBack} />;

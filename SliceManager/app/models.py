@@ -167,6 +167,19 @@ class Vm(Base):
     slice = relationship('Slice')
     worker = relationship('Worker')
 
+class UserSshKey(Base):
+    """
+    Llave pública SSH del usuario (REQ-US-02). Se inyecta vía cloud-init en
+    ~/.ssh/authorized_keys de cada VM que el usuario despliegue.
+    Tabla separada (no columna en users) para que create_all la cree sin ALTER.
+    """
+    __tablename__ = 'user_ssh_keys'
+
+    user_id = Column(String(100), primary_key=True)     # UUID de Keycloak
+    public_key = Column(String(1000))
+    date_updated = Column(String(45))
+
+
 class AuditLog(Base):
     """
     Bitácora de eventos (REQ-JP-09 / REQ-AD-08).

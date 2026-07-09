@@ -30,4 +30,4 @@ services:
 
 networks:
   pucp_cloud_net:
-    external: true
+    external: true

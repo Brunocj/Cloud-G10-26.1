@@ -61,6 +61,11 @@ class VMSpec(BaseModel):
     # Credenciales de la VM para cloud-init
     vm_user:     Optional[str] = None   # Si None → se usa el nombre de la imagen
     vm_password: Optional[str] = None   # Si None → se usa "pucp2026"
+    owner_ssh_public_key: Optional[str] = None   # Llave pública del dueño (REQ-US-02)
+
+    # Modo Edición (REQ-US-14): VM ya desplegada que solo recibe NICs en caliente
+    already_deployed:     bool = False
+    provider_instance_id: Optional[str] = None   # UUID Nova (hot-attach OpenStack)
 
     # OpenStack: host físico asignado y puertos Neutron
     selected_host: Optional[str]  = None
@@ -116,6 +121,7 @@ class DeploySliceRequest(BaseModel):
     slice_id:             str
     request_id:           str
     availability_zone_id: int = Field(default=1, description="ID de la AZ destino (1=Linux Cluster, 2=OpenStack)")
+    mode:                 str = Field(default="deploy", description="deploy | extend (Modo Edición REQ-US-14)")
     vms:                  List[VMSpec] = Field(..., min_length=1)
     links:                List[NetworkLink] = Field(default_factory=list)
     workers:              List[dict] = Field(default_factory=list)

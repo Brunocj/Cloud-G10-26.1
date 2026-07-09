@@ -79,6 +79,26 @@ class UserRoleChangeRequest(BaseModel):
     role: str  # nuevo rol global
 
 
+class SelfRegisterRequest(BaseModel):
+    """Auto-registro público (REQ-US-01). La cuenta nace bloqueada en Keycloak."""
+    username:  str
+    email:     EmailStr
+    password:  str
+    fullname:  Optional[str] = None
+    lastname:  Optional[str] = None
+    pucp_code: Optional[str] = None
+    career:    Optional[str] = None
+
+
+class UserStateChangeRequest(BaseModel):
+    action: str                    # "approve" | "reject"
+    reason: Optional[str] = None   # motivo en caso de rechazo
+
+
+class BulkUsersRequest(BaseModel):
+    users: list[UserCreateRequest]
+
+
 class ProfileUpdateRequest(BaseModel):
     fullname: Optional[str] = None
     lastname: Optional[str] = None
@@ -132,8 +152,9 @@ async def _kc_admin_token() -> str:
     return resp.json()["access_token"]
 
 
-async def _kc_create_user(payload: UserCreateRequest) -> str:
-    """Crea usuario en Keycloak, le asigna el rol y devuelve su UUID."""
+async def _kc_create_user(payload: UserCreateRequest, enabled: bool = True) -> str:
+    """Crea usuario en Keycloak, le asigna el rol y devuelve su UUID.
+    enabled=False → cuenta bloqueada hasta aprobación del admin (auto-registro)."""
     token   = await _kc_admin_token()
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     base    = f"{KEYCLOAK_URL}/admin/realms/{KEYCLOAK_REALM}"
@@ -145,7 +166,7 @@ async def _kc_create_user(payload: UserCreateRequest) -> str:
             "email":     payload.email,
             "firstName": payload.fullname or "",
             "lastName":  payload.lastname or "",
-            "enabled":   True,
+            "enabled":   enabled,
             "emailVerified": True,
             "credentials": [{
                 "type": "password",
@@ -278,6 +299,200 @@ def sync_current_user(
     db.refresh(u)
     logger.info("Usuario sincronizado: id=%s… email=%s role=%s", user.user_id[:8], u.email, user.role)
     return _user_to_response(u, db)
+
+
+# ── Auto-registro público (REQ-US-01) ─────────────────────────────────────────
+# OJO: SIN dependencia de auth — el API Gateway lo expone como ruta pública.
+
+@router.post("/register", status_code=201)
+async def self_register(
+    payload: SelfRegisterRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Crea la cuenta en Keycloak DESHABILITADA (no puede loguear) y en el cache
+    local con estado 'Pendiente'. Un admin debe aprobarla (PATCH /{id}/state).
+    """
+    if not payload.email.endswith("@pucp.edu.pe"):
+        raise HTTPException(status_code=400, detail="El correo debe ser institucional (@pucp.edu.pe).")
+    if len(payload.password) < 8:
+        raise HTTPException(status_code=400, detail="La contraseña debe tener al menos 8 caracteres.")
+
+    kc_payload = UserCreateRequest(
+        username=payload.username, email=payload.email, password=payload.password,
+        fullname=payload.fullname, lastname=payload.lastname, role="usuario",
+    )
+    user_uuid = await _kc_create_user(kc_payload, enabled=False)
+
+    role = _get_or_create_role(db, "usuario")
+    u = User(
+        id=user_uuid,
+        username=payload.username,
+        email=payload.email,
+        fullname=payload.fullname,
+        lastname=payload.lastname,
+        pucp_code=payload.pucp_code,
+        state="Pendiente",
+        date_creation=datetime.utcnow().isoformat(timespec="seconds"),
+        role_id=role.id,
+    )
+    db.add(u)
+    db.commit()
+
+    from app.services.audit import audit
+    audit(user_uuid, "usuario", "IAM", "user_self_registered",
+          f"Auto-registro de '{payload.username}' ({payload.email}). Pendiente de aprobación.")
+    logger.info("Auto-registro: %s (%s) — Pendiente", payload.username, payload.email)
+    return {"message": "Solicitud enviada. Tu cuenta está en estado 'Pendiente' hasta que un administrador la apruebe."}
+
+
+@router.patch("/{user_id}/state", response_model=UserResponse)
+async def change_user_state(
+    user_id: str,
+    payload: UserStateChangeRequest,
+    db:      Session     = Depends(get_db),
+    user:    CurrentUser = Depends(require_roles("admin", "superAdmin")),
+):
+    """
+    Bandeja de aprobaciones de cuentas (REQ-AD-01):
+      approve → habilita la cuenta en Keycloak, estado 'Activo' y envía el
+                correo de validación (REQ-US-01).
+      reject  → elimina la cuenta de Keycloak y del cache (con correo opcional).
+    """
+    if payload.action not in ("approve", "reject"):
+        raise HTTPException(status_code=400, detail="action debe ser 'approve' o 'reject'")
+
+    u = db.query(User).filter(User.id == user_id).first()
+    if not u:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    token   = await _kc_admin_token()
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    base    = f"{KEYCLOAK_URL}/admin/realms/{KEYCLOAK_REALM}"
+
+    from app.services.audit import audit
+    from app.services.mailer import send_email, account_approved_html, account_rejected_html
+
+    fullname = " ".join(p for p in (u.fullname, u.lastname) if p) or u.username or ""
+
+    if payload.action == "approve":
+        async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
+            r = await client.put(f"{base}/users/{user_id}", headers=headers, json={"enabled": True})
+            if r.status_code not in (200, 204):
+                raise HTTPException(status_code=502, detail="No se pudo habilitar la cuenta en Keycloak")
+        u.state = "Activo"
+        db.commit()
+        db.refresh(u)
+        audit(user.user_id, user.role, "IAM", "account_approved",
+              f"Cuenta de '{u.username}' ({u.email}) aprobada.")
+        await send_email(u.email, "Tu cuenta de PUCP Cloud fue aprobada ✅",
+                         account_approved_html(fullname, u.username or ""))
+        return _user_to_response(u, db)
+
+    # reject
+    async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
+        r = await client.delete(f"{base}/users/{user_id}", headers=headers)
+        if r.status_code not in (200, 204, 404):
+            raise HTTPException(status_code=502, detail="No se pudo eliminar la cuenta de Keycloak")
+    email_to = u.email
+    resp = _user_to_response(u, db)
+    db.delete(u)
+    db.commit()
+    audit(user.user_id, user.role, "IAM", "account_rejected",
+          f"Cuenta de '{resp['username']}' rechazada." + (f" Motivo: {payload.reason}" if payload.reason else ""),
+          level="WARNING")
+    await send_email(email_to, "Solicitud de cuenta rechazada — PUCP Cloud",
+                     account_rejected_html(fullname, payload.reason or ""))
+    resp["state"] = "Rechazado"
+    return resp
+
+
+@router.post("/bulk", status_code=200)
+async def bulk_create_users(
+    payload: BulkUsersRequest,
+    db:      Session     = Depends(get_db),
+    user:    CurrentUser = Depends(require_roles("admin", "superAdmin")),
+):
+    """
+    Registro masivo por CSV (REQ-AD-01 punto 3). El frontend parsea el CSV,
+    muestra la vista previa y envía aquí la lista confirmada.
+    """
+    from app.services.audit import audit
+    results = []
+    for row in payload.users:
+        try:
+            if row.role not in VALID_KC_ROLES:
+                raise ValueError(f"Rol inválido '{row.role}'")
+            if user.role == "admin" and row.role in ("admin", "superAdmin"):
+                raise ValueError("Solo superAdmin puede crear admins")
+            user_uuid = await _kc_create_user(row, enabled=True)
+            role = _get_or_create_role(db, row.role)
+            db.add(User(
+                id=user_uuid, username=row.username, email=row.email,
+                fullname=row.fullname, lastname=row.lastname,
+                state="Activo",
+                date_creation=datetime.utcnow().isoformat(timespec="seconds"),
+                role_id=role.id,
+            ))
+            db.commit()
+            results.append({"username": row.username, "ok": True})
+        except HTTPException as he:
+            db.rollback()
+            results.append({"username": row.username, "ok": False, "error": he.detail})
+        except Exception as e:
+            db.rollback()
+            results.append({"username": row.username, "ok": False, "error": str(e)})
+
+    ok_count = sum(1 for r in results if r["ok"])
+    audit(user.user_id, user.role, "IAM", "users_bulk_created",
+          f"Registro masivo CSV: {ok_count}/{len(results)} cuentas creadas.")
+    return {"total": len(results), "created": ok_count, "results": results}
+
+
+# ── Llave SSH del usuario (REQ-US-02) ─────────────────────────────────────────
+
+class SshKeyRequest(BaseModel):
+    public_key: str
+
+
+@router.get("/me/ssh-key")
+def get_my_ssh_key(
+    db:   Session     = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    from app.models import UserSshKey
+    rec = db.query(UserSshKey).filter(UserSshKey.user_id == user.user_id).first()
+    return {"public_key": rec.public_key if rec else None,
+            "date_updated": rec.date_updated if rec else None}
+
+
+@router.post("/me/ssh-key", status_code=200)
+def save_my_ssh_key(
+    payload: SshKeyRequest,
+    db:      Session     = Depends(get_db),
+    user:    CurrentUser = Depends(get_current_user),
+):
+    """Guarda/actualiza la llave pública. Se inyectará en las VMs que despliegue."""
+    key = (payload.public_key or "").strip()
+    if not key or not any(key.startswith(p) for p in ("ssh-rsa ", "ssh-ed25519 ", "ecdsa-", "-----BEGIN")):
+        raise HTTPException(status_code=400, detail="La llave no parece una llave pública SSH válida.")
+
+    from app.models import UserSshKey
+    rec = db.query(UserSshKey).filter(UserSshKey.user_id == user.user_id).first()
+    if rec:
+        rec.public_key = key
+        rec.date_updated = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    else:
+        db.add(UserSshKey(
+            user_id=user.user_id, public_key=key,
+            date_updated=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        ))
+    db.commit()
+
+    from app.services.audit import audit
+    audit(user.user_id, user.role, "IAM", "ssh_key_saved",
+          "Llave pública SSH registrada/actualizada. Se inyectará en próximos despliegues.")
+    return {"message": "Llave SSH guardada. Se inyectará en las VMs de tus próximos despliegues."}
 
 
 # ── Autoservicio: mi perfil ───────────────────────────────────────────────────

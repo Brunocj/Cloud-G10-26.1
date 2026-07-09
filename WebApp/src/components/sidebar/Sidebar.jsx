@@ -40,6 +40,7 @@ export const Sidebar = ({
     isSuperAdmin, onInfraMonitor, onProjects, onUsersManage,
     onRequests, pendingCount = 0,
     onConsumption, onAudit, onInfraManage,
+    onLoadTemplate, onPublishTemplate,
 }) => {
     const isAdmin        = user?.role === "admin" || user?.role === "superAdmin" || user?.role === "jefeProyecto";
     const isStrictAdmin  = user?.role === "admin" || user?.role === "superAdmin";
@@ -104,7 +105,7 @@ export const Sidebar = ({
                     </div>
 
                     <div style={{ flex: 1, overflowY: "auto", borderTop: `1px solid ${T.border}` }}>
-                        <TemplatePicker />
+                        <TemplatePicker apiFetch={apiFetch} onLoadTemplate={onLoadTemplate} flash={flash} />
                     </div>
                 </>
             )}
@@ -204,6 +205,7 @@ export const Sidebar = ({
                                     onClick={() => setActiveId(sl.id)}
                                     onDestroy={onDestroySlice}
                                     onDeploy={onDeployDraft}
+                                    onPublish={isAdmin ? onPublishTemplate : undefined}
                                     showOwner={isAdmin} />
                             ))}
 

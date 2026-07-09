@@ -45,8 +45,13 @@ class NetworkProvisioner:
             })
 
         # 2. Agrupar VMs por (worker_ip, worker_port)
+        #    Modo Edición: las VMs ya desplegadas NO se reprocesan (su gateway,
+        #    TAP de gestión y NAT ya existen). Los TAPs de sus enlaces NUEVOS se
+        #    crean vía `endpoints` (request.links), de donde QMP los engancha.
         vms_by_worker = defaultdict(list)
         for vm in request.vms:
+            if getattr(vm, 'already_deployed', False):
+                continue
             key = (vm.worker_ip, getattr(vm, 'worker_port', 22))
             vms_by_worker[key].append(vm)
 

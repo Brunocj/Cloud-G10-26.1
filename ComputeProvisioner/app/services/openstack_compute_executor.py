@@ -113,8 +113,47 @@ class OpenStackComputeExecutor:
             
         raise RuntimeError(f"No se encontró un Flavor Nova adecuado para vCPUs={requested_vcpus}, RAM={requested_ram_mb} MB")
 
+    async def attach_interfaces(self, conn, vm: VMSpec, slice_id: str) -> VMResult:
+        """
+        Modo Edición (REQ-US-14): conecta en caliente los puertos Neutron de los
+        enlaces nuevos a una instancia Nova YA en ejecución (interface-attach).
+        """
+        link_ports = []
+        if vm.network_ports and isinstance(vm.network_ports, dict):
+            link_ports = vm.network_ports.get("link_ports", []) or []
+
+        instance_id = vm.provider_instance_id
+        try:
+            if not instance_id:
+                # Fallback: resolver por nombre (slice_name-vm_label)
+                safe_slice = (vm.slice_name or str(slice_id)).replace(" ", "-")[:24]
+                safe_vm    = (vm.vm_label   or vm.vm_id).replace(" ", "-")[:16]
+                server = await asyncio.to_thread(conn.compute.find_server, f"{safe_slice}-{safe_vm}")
+                if not server:
+                    raise RuntimeError(f"No se encontró la instancia Nova de la VM existente {vm.vm_id}.")
+                instance_id = server.id
+
+            for port_id in link_ports:
+                await asyncio.to_thread(
+                    conn.compute.create_server_interface,
+                    instance_id, port_id=port_id,
+                )
+                logger.info(f"[OpenStack] 🔌 Interface-attach OK: VM {vm.vm_id} ← puerto {port_id}")
+
+            return VMResult(
+                vm_id=vm.vm_id, worker_ip=vm.worker_ip,
+                vnc_port=vm.vnc_port, provider_instance_id=instance_id,
+            )
+        except Exception as exc:
+            logger.error(f"[OpenStack] ❌ Interface-attach falló para VM {vm.vm_id}: {exc}")
+            return VMResult(vm_id=vm.vm_id, worker_ip=vm.worker_ip, error=str(exc))
+
     async def deploy_vm(self, conn, vm: VMSpec, slice_id: str) -> VMResult:
         """Despliega una VM individual de forma asíncrona en OpenStack."""
+        # Modo Edición: VM existente → solo conectar interfaces nuevas
+        if getattr(vm, "already_deployed", False):
+            return await self.attach_interfaces(conn, vm, slice_id)
+
         logger.info(f"[OpenStack] Iniciando deploy de VM {vm.vm_id} (CPU: {vm.vcpus}, RAM: {vm.ram_mb} MB, Host: {vm.selected_host})")
         
         try:
@@ -158,6 +197,16 @@ class OpenStackComputeExecutor:
                 flavor_id=flavor_uuid,
                 networks=networks,
             )
+
+            # Llave pública del dueño (REQ-US-02): inyectada vía cloud-init
+            # user_data. Solo surte efecto en imágenes con soporte cloud-init
+            # (CirrOS la ignora sin romper el arranque).
+            owner_key = getattr(vm, "owner_ssh_public_key", None)
+            if owner_key:
+                import base64
+                cloud_cfg = f"#cloud-config\nssh_authorized_keys:\n  - {owner_key}\n"
+                create_kwargs["user_data"] = base64.b64encode(cloud_cfg.encode()).decode()
+                logger.info(f"[OpenStack] VM {vm.vm_id}: llave SSH del dueño inyectada vía user_data")
 
             byos_enabled = os.getenv("OS_BYOS_FORCE_HOST", "true").lower() in ("1", "true", "yes")
             if vm.selected_host and byos_enabled:

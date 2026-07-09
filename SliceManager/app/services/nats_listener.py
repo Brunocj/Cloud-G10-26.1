@@ -28,6 +28,63 @@ async def nats_result_listener():
             db_slice = db.query(Slice).filter(Slice.id == slice_id).first()
             if db_slice:
                 logger.info("[LISTENER]    Estado actual en BD: %s", db_slice.status)
+
+                # ── Resultado de una EXTENSIÓN (Modo Edición, REQ-US-14) ─────
+                _sj = db_slice.slice_json or {}
+                if isinstance(_sj, str):
+                    _sj = json.loads(_sj)
+                pending_ext = _sj.get("pending_extension")
+                if pending_ext:
+                    from app.services.notification_hub import notification_hub
+                    from app.services.placement_worker import _fail_extend
+                    if status.lower() == "success":
+                        # Persistir vnc/provider/external de las VMs nuevas
+                        result_vms = data.get("vms", [])
+                        db_vms = {v.name: v for v in db.query(Vm).filter(Vm.slice_id == slice_id).all()}
+                        deployed_vms = _sj.get("deployed_vms", [])
+                        for rv in result_vms:
+                            vid = rv.get("vm_id")
+                            dbv = db_vms.get(vid)
+                            if dbv:
+                                if rv.get("vnc_url"):              dbv.vnc_url = rv["vnc_url"]
+                                if rv.get("provider_instance_id"): dbv.provider_instance_id = rv["provider_instance_id"]
+                                if rv.get("external_ip"):          dbv.external_ip = rv["external_ip"]
+                                if rv.get("vnc_port"):             dbv.vnc_port = rv["vnc_port"]
+                            for dv in deployed_vms:
+                                if dv.get("vm_id") == vid:
+                                    for k in ("vnc_url", "provider_instance_id", "external_ip"):
+                                        if rv.get(k):
+                                            dv[k] = rv[k]
+                        db.query(Vm).filter(Vm.slice_id == slice_id).update({"state": "ACTIVE"})
+                        _sj["deployed_vms"] = deployed_vms
+                        _sj.pop("pending_extension", None)
+                        db_slice.slice_json = dict(_sj)
+                        db_slice.status = "ACTIVE"
+                        db.commit()
+                        logger.info("[LISTENER] 🧩 Extensión del slice %s aplicada — de vuelta a ACTIVE", slice_id)
+                        from app.services.audit import audit
+                        audit("system", "system", "Orchestrator", "slice_extended",
+                              f"Slice '{db_slice.name}' extendido: +{len(pending_ext.get('new_vm_names', []))} VM(s).",
+                              slice_id=slice_id, project_id=db_slice.project_id)
+                        await notification_hub.notify_user(db_slice.creator_id, {
+                            "type": "slice_extended", "slice_id": slice_id,
+                            "title": "Cambios aplicados",
+                            "message": f"Los nuevos nodos de \"{db_slice.name}\" están activos.",
+                        })
+                    else:
+                        # La saga del QM ya limpió los recursos nuevos; revertimos la BD
+                        logger.warning("[LISTENER] 🧩 Extensión del slice %s FALLÓ — revirtiendo diff", slice_id)
+                        _fail_extend(db, db_slice, pending_ext)
+                        await notification_hub.notify_user(db_slice.creator_id, {
+                            "type": "slice_failed", "slice_id": slice_id,
+                            "title": "Modificación fallida",
+                            "message": f"No se pudieron aplicar los cambios a \"{db_slice.name}\". "
+                                       "El slice original sigue activo.",
+                        })
+                    db.close()
+                    logger.info("="*70)
+                    return
+
                 # Si ya está en estado terminal (por Rollback o Destroy), IGNORAMOS los success tardíos
                 if db_slice.status in ["TERMINATED", "FAILED"]:
                     logger.info("[LISTENER] ⏭️  Ignorando resultado '%s': slice ya en estado %s",

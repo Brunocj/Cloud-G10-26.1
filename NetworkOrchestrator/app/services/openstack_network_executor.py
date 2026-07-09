@@ -44,7 +44,9 @@ class OpenStackNetworkExecutor:
         _created_link_subnets = []
 
         async def _rollback(conn):
-            """Best-effort cleanup of resources created so far."""
+            """Best-effort cleanup of resources created so far.
+            En modo extend, la red/subnet/SGs/router son PRE-EXISTENTES del
+            slice activo — solo se limpian puertos y redes de enlace nuevos."""
             logger.warning(f"[OpenStack] Iniciando rollback de recursos de red para slice {slice_id}")
             for port in reversed(_created_ports):
                 try:
@@ -64,6 +66,8 @@ class OpenStackNetworkExecutor:
                     await asyncio.to_thread(conn.network.delete_network, net_id)
                 except Exception:
                     pass
+            if is_extend:
+                return   # lo demás pertenece al slice activo — NO tocar
             if _created_router:
                 try:
                     if _created_subnet:
@@ -95,152 +99,183 @@ class OpenStackNetworkExecutor:
                 except Exception as e:
                     logger.warning(f"[OpenStack] Rollback: error al borrar security group no-internet: {e}")
 
+        is_extend = getattr(request, "mode", "deploy") == "extend"
+
         try:
             conn = await asyncio.to_thread(get_connection)
 
-            # 1. Crear Provider Network
-            network_args = {"name": network_name}
-            if os.getenv("OS_VLAN_TRANSPARENT", "").lower() in ("1", "true", "yes"):
-                network_args["vlan_transparent"] = True
-            prov_type = os.getenv("OS_PROVIDER_NETWORK_TYPE")
-            if prov_type:
-                network_args["provider_network_type"] = prov_type
-            prov_phys = os.getenv("OS_PROVIDER_PHYSICAL_NETWORK")
-            if prov_phys:
-                network_args["provider_physical_network"] = prov_phys
-            prov_seg = os.getenv("OS_PROVIDER_SEGMENTATION_ID")
-            if prov_seg:
-                network_args["provider_segmentation_id"] = int(prov_seg)
+            # ── MODO EXTEND (REQ-US-14): reutilizar la infraestructura del slice ──
+            # La red/subnet/secgroups/router YA existen; solo se crean los puertos
+            # de las VMs nuevas y las redes de los enlaces nuevos.
+            if is_extend:
+                _created_network = await asyncio.to_thread(conn.network.find_network, network_name)
+                if not _created_network:
+                    raise RuntimeError(f"Extend: la red del slice '{network_name}' no existe.")
+                _created_subnet    = await asyncio.to_thread(conn.network.find_subnet, subnet_name)
+                _created_sec_group = await asyncio.to_thread(conn.network.find_security_group, secgroup_name)
+                _created_sec_group_no_internet = await asyncio.to_thread(
+                    conn.network.find_security_group, f"secgroup-slice-{slice_id}-no-internet")
+                logger.info(f"[OpenStack][EXTEND] Reutilizando red existente {network_name} "
+                            f"({_created_network.id}) para la extensión del slice {slice_id}")
 
-            _created_network = await asyncio.to_thread(conn.network.create_network, **network_args)
-            logger.info(f"[OpenStack] Red Provider creada: {_created_network.name} (ID: {_created_network.id})")
+            if not is_extend:
+                # 1. Crear Provider Network
+                network_args = {"name": network_name}
+                if os.getenv("OS_VLAN_TRANSPARENT", "").lower() in ("1", "true", "yes"):
+                    network_args["vlan_transparent"] = True
+                prov_type = os.getenv("OS_PROVIDER_NETWORK_TYPE")
+                if prov_type:
+                    network_args["provider_network_type"] = prov_type
+                prov_phys = os.getenv("OS_PROVIDER_PHYSICAL_NETWORK")
+                if prov_phys:
+                    network_args["provider_physical_network"] = prov_phys
+                prov_seg = os.getenv("OS_PROVIDER_SEGMENTATION_ID")
+                if prov_seg:
+                    network_args["provider_segmentation_id"] = int(prov_seg)
 
-            # 2. Crear Subnet asociada con CIDR dinámico
-            if request.vms:
-                first_ip = request.vms[0].internal_ip
-                parts = first_ip.split(".")
-                cidr = f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
-                gateway_ip = f"{parts[0]}.{parts[1]}.{parts[2]}.1"
-            else:
-                cidr = "10.0.1.0/24"
-                gateway_ip = "10.0.1.1"
+                _created_network = await asyncio.to_thread(conn.network.create_network, **network_args)
+                logger.info(f"[OpenStack] Red Provider creada: {_created_network.name} (ID: {_created_network.id})")
 
-            _created_subnet = await asyncio.to_thread(
-                conn.network.create_subnet,
-                name=subnet_name,
-                network_id=_created_network.id,
-                ip_version=4,
-                cidr=cidr,
-                gateway_ip=gateway_ip
-            )
-            logger.info(f"[OpenStack] Subnet creada: {_created_subnet.name} (CIDR: {cidr}, GW: {gateway_ip})")
+                # 2. Crear Subnet asociada con CIDR dinámico
+                if request.vms:
+                    first_ip = request.vms[0].internal_ip
+                    parts = first_ip.split(".")
+                    cidr = f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
+                    gateway_ip = f"{parts[0]}.{parts[1]}.{parts[2]}.1"
+                else:
+                    cidr = "10.0.1.0/24"
+                    gateway_ip = "10.0.1.1"
 
-            # 3. Crear Security Group dedicado
-            _created_sec_group = await asyncio.to_thread(
-                conn.network.create_security_group,
-                name=secgroup_name,
-                description=f"Security group for slice {slice_id}"
-            )
-            logger.info(f"[OpenStack] Security Group creado: {_created_sec_group.name} (ID: {_created_sec_group.id})")
+                _created_subnet = await asyncio.to_thread(
+                    conn.network.create_subnet,
+                    name=subnet_name,
+                    network_id=_created_network.id,
+                    ip_version=4,
+                    cidr=cidr,
+                    gateway_ip=gateway_ip
+                )
+                logger.info(f"[OpenStack] Subnet creada: {_created_subnet.name} (CIDR: {cidr}, GW: {gateway_ip})")
 
-            await asyncio.to_thread(
-                conn.network.create_security_group_rule,
-                security_group_id=_created_sec_group.id,
-                direction="ingress", protocol="icmp", ethertype="IPv4"
-            )
-            await asyncio.to_thread(
-                conn.network.create_security_group_rule,
-                security_group_id=_created_sec_group.id,
-                direction="ingress", protocol="tcp",
-                port_range_min=22, port_range_max=22, ethertype="IPv4"
-            )
+                # 3. Crear Security Group dedicado
+                _created_sec_group = await asyncio.to_thread(
+                    conn.network.create_security_group,
+                    name=secgroup_name,
+                    description=f"Security group for slice {slice_id}"
+                )
+                logger.info(f"[OpenStack] Security Group creado: {_created_sec_group.name} (ID: {_created_sec_group.id})")
 
-            # Security Group para VMs sin acceso a internet (bloqueo egress)
-            secgroup_no_internet_name = f"secgroup-slice-{slice_id}-no-internet"
-            _created_sec_group_no_internet = await asyncio.to_thread(
-                conn.network.create_security_group,
-                name=secgroup_no_internet_name,
-                description=f"Security group for slice {slice_id} (No Internet)"
-            )
-            logger.info(f"[OpenStack] Security Group No-Internet creado: {_created_sec_group_no_internet.name} (ID: {_created_sec_group_no_internet.id})")
+                await asyncio.to_thread(
+                    conn.network.create_security_group_rule,
+                    security_group_id=_created_sec_group.id,
+                    direction="ingress", protocol="icmp", ethertype="IPv4"
+                )
+                await asyncio.to_thread(
+                    conn.network.create_security_group_rule,
+                    security_group_id=_created_sec_group.id,
+                    direction="ingress", protocol="tcp",
+                    port_range_min=22, port_range_max=22, ethertype="IPv4"
+                )
 
-            await asyncio.to_thread(
-                conn.network.create_security_group_rule,
-                security_group_id=_created_sec_group_no_internet.id,
-                direction="ingress", protocol="icmp", ethertype="IPv4"
-            )
-            await asyncio.to_thread(
-                conn.network.create_security_group_rule,
-                security_group_id=_created_sec_group_no_internet.id,
-                direction="ingress", protocol="tcp",
-                port_range_min=22, port_range_max=22, ethertype="IPv4"
-            )
+                # Security Group para VMs sin acceso a internet (bloqueo egress)
+                secgroup_no_internet_name = f"secgroup-slice-{slice_id}-no-internet"
+                _created_sec_group_no_internet = await asyncio.to_thread(
+                    conn.network.create_security_group,
+                    name=secgroup_no_internet_name,
+                    description=f"Security group for slice {slice_id} (No Internet)"
+                )
+                logger.info(f"[OpenStack] Security Group No-Internet creado: {_created_sec_group_no_internet.name} (ID: {_created_sec_group_no_internet.id})")
 
-            # Eliminar regla default egress IPv4 para restringir internet
-            try:
-                rules = list(await asyncio.to_thread(conn.network.security_group_rules, security_group_id=_created_sec_group_no_internet.id))
-                for r in rules:
-                    if r.direction == "egress" and r.ether_type == "IPv4":
-                        logger.info(f"[OpenStack] Eliminando regla default egress IPv4 de {secgroup_no_internet_name}: {r.id}")
-                        await asyncio.to_thread(conn.network.delete_security_group_rule, r.id)
-            except Exception as e:
-                logger.error(f"[OpenStack] Falló al eliminar regla default egress IPv4: {e}")
+                await asyncio.to_thread(
+                    conn.network.create_security_group_rule,
+                    security_group_id=_created_sec_group_no_internet.id,
+                    direction="ingress", protocol="icmp", ethertype="IPv4"
+                )
+                await asyncio.to_thread(
+                    conn.network.create_security_group_rule,
+                    security_group_id=_created_sec_group_no_internet.id,
+                    direction="ingress", protocol="tcp",
+                    port_range_min=22, port_range_max=22, ethertype="IPv4"
+                )
 
-            # Permitir salida únicamente a la red de gestión del slice
-            await asyncio.to_thread(
-                conn.network.create_security_group_rule,
-                security_group_id=_created_sec_group_no_internet.id,
-                direction="egress",
-                ethertype="IPv4",
-                remote_ip_prefix=cidr
-            )
-
-            # 4. Configurar Enrutamiento L3 (Router + Gateway Externo + Subnet Interface)
-            ext_net = await asyncio.to_thread(conn.network.find_network, settings.OS_EXTERNAL_NETWORK_NAME)
-            ext_subnet = None
-            if ext_net:
-                ext_subnet = await asyncio.to_thread(conn.network.find_subnet, settings.OS_EXTERNAL_SUBNET_NAME)
-                if not ext_subnet:
-                    try:
-                        ext_subnet = await asyncio.to_thread(
-                            conn.network.create_subnet,
-                            name=settings.OS_EXTERNAL_SUBNET_NAME,
-                            network_id=ext_net.id,
-                            ip_version=4,
-                            cidr=settings.OS_EXTERNAL_SUBNET_CIDR,
-                            gateway_ip=settings.OS_EXTERNAL_GATEWAY_IP,
-                            enable_dhcp=True,
-                        )
-                        logger.info(f"[OpenStack] external_subnet creada: {settings.OS_EXTERNAL_SUBNET_CIDR}")
-                    except Exception as e:
-                        logger.error(f"[OpenStack] No se pudo crear external_subnet: {e}")
-                        ext_subnet = None
-
-                # Crear Router virtual conectando la red interna con la externa
+                # Eliminar regla default egress IPv4 para restringir internet
                 try:
-                    _created_router = await asyncio.to_thread(
-                        conn.network.create_router,
-                        name=router_name,
-                        external_gateway_info={"network_id": ext_net.id}
-                    )
-                    logger.info(f"[OpenStack] Router virtual creado: {_created_router.name} (ID: {_created_router.id})")
-
-                    # Conectar subred interna del slice al router (Gateway del slice)
-                    await asyncio.to_thread(
-                        conn.network.add_interface_to_router,
-                        _created_router.id,
-                        subnet_id=_created_subnet.id
-                    )
-                    logger.info(f"[OpenStack] Subred {_created_subnet.name} conectada al router {_created_router.name}")
+                    rules = list(await asyncio.to_thread(conn.network.security_group_rules, security_group_id=_created_sec_group_no_internet.id))
+                    for r in rules:
+                        if r.direction == "egress" and r.ether_type == "IPv4":
+                            logger.info(f"[OpenStack] Eliminando regla default egress IPv4 de {secgroup_no_internet_name}: {r.id}")
+                            await asyncio.to_thread(conn.network.delete_security_group_rule, r.id)
                 except Exception as e:
-                    logger.error(f"[OpenStack] Fallo al configurar Router/Interfaz en OpenStack: {e}")
-                    raise e
+                    logger.error(f"[OpenStack] Falló al eliminar regla default egress IPv4: {e}")
+
+                # Permitir salida únicamente a la red de gestión del slice
+                await asyncio.to_thread(
+                    conn.network.create_security_group_rule,
+                    security_group_id=_created_sec_group_no_internet.id,
+                    direction="egress",
+                    ethertype="IPv4",
+                    remote_ip_prefix=cidr
+                )
+
+                # 4. Configurar Enrutamiento L3 (Router + Gateway Externo + Subnet Interface)
+                ext_net = await asyncio.to_thread(conn.network.find_network, settings.OS_EXTERNAL_NETWORK_NAME)
+                ext_subnet = None
+                if ext_net:
+                    ext_subnet = await asyncio.to_thread(conn.network.find_subnet, settings.OS_EXTERNAL_SUBNET_NAME)
+                    if not ext_subnet:
+                        try:
+                            ext_subnet = await asyncio.to_thread(
+                                conn.network.create_subnet,
+                                name=settings.OS_EXTERNAL_SUBNET_NAME,
+                                network_id=ext_net.id,
+                                ip_version=4,
+                                cidr=settings.OS_EXTERNAL_SUBNET_CIDR,
+                                gateway_ip=settings.OS_EXTERNAL_GATEWAY_IP,
+                                enable_dhcp=True,
+                            )
+                            logger.info(f"[OpenStack] external_subnet creada: {settings.OS_EXTERNAL_SUBNET_CIDR}")
+                        except Exception as e:
+                            logger.error(f"[OpenStack] No se pudo crear external_subnet: {e}")
+                            ext_subnet = None
+
+                    # Crear Router virtual conectando la red interna con la externa
+                    try:
+                        _created_router = await asyncio.to_thread(
+                            conn.network.create_router,
+                            name=router_name,
+                            external_gateway_info={"network_id": ext_net.id}
+                        )
+                        logger.info(f"[OpenStack] Router virtual creado: {_created_router.name} (ID: {_created_router.id})")
+
+                        # Conectar subred interna del slice al router (Gateway del slice)
+                        await asyncio.to_thread(
+                            conn.network.add_interface_to_router,
+                            _created_router.id,
+                            subnet_id=_created_subnet.id
+                        )
+                        logger.info(f"[OpenStack] Subred {_created_subnet.name} conectada al router {_created_router.name}")
+                    except Exception as e:
+                        logger.error(f"[OpenStack] Fallo al configurar Router/Interfaz en OpenStack: {e}")
+                        raise e
+                else:
+                    logger.warning(f"[OpenStack] Red externa '{settings.OS_EXTERNAL_NETWORK_NAME}' no encontrada. Enrutamiento L3 omitido.")
             else:
-                logger.warning(f"[OpenStack] Red externa '{settings.OS_EXTERNAL_NETWORK_NAME}' no encontrada. Enrutamiento L3 omitido.")
+                # EXTEND: la red externa solo se necesita para Floating IPs de VMs nuevas
+                ext_net = await asyncio.to_thread(conn.network.find_network, settings.OS_EXTERNAL_NETWORK_NAME)
+                ext_subnet = None
 
             # 5. Crear puerto Neutron para cada VM (red interna del slice + opcional Floating IP)
             port_map = {}
             for vm in request.vms:
+                # Modo extend: las VMs ya desplegadas no reciben puerto de gestión
+                # nuevo; solo entradas para registrar sus puertos de enlace.
+                if getattr(vm, "already_deployed", False):
+                    port_map[vm.vm_id] = {
+                        "provider_port_id": None,
+                        "external_port_id": None,
+                        "external_ip": None,
+                        "link_ports": [],
+                    }
+                    continue
                 # Si la VM no tiene acceso a internet, le asignamos el Security Group restrictivo
                 sg_id = _created_sec_group.id
                 if getattr(vm, "internet_access", 1) == 0:

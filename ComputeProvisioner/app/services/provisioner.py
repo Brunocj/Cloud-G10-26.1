@@ -94,6 +94,10 @@ class Provisioner:
         return await os_executor.get_console_token(conn, provider_instance_id)
 
     def _deploy_vm_sync(self, vm: VMSpec, slice_id: str) -> VMResult:
+        # ── Modo Edición (REQ-US-14): VM ya corriendo — solo hot-plug de NICs ──
+        if getattr(vm, "already_deployed", False):
+            return self._hotplug_vm_sync(vm, slice_id)
+
         vnc_port = vm.vnc_port
         vnc_display = vnc_port - 5900
 
@@ -135,6 +139,7 @@ class Provisioner:
                         vm_user=vm.vm_user or "ubuntu",
                         vm_password=vm.vm_password or "pucp2026",
                         priority=vm.priority,
+                        owner_ssh_key=getattr(vm, "owner_ssh_public_key", None) or "",
                     )
                     logger.info("[CP] ✅ VM %s activa en worker=%s  PID=%s  VNC=:%d (port %d)",
                                 vm.vm_id, vm.worker_ip, pid, vnc_display, vnc_port)
@@ -157,6 +162,30 @@ class Provisioner:
                         error=str(exc),
                     )
                 time.sleep(settings.SSH_RETRY_DELAY)
+
+    def _hotplug_vm_sync(self, vm: VMSpec, slice_id: str) -> VMResult:
+        """
+        Conecta en caliente las NICs nuevas (vm.tap_interfaces) a una VM QEMU
+        ya desplegada, vía QMP. Los TAPs ya existen (paso NetworkOrchestrator).
+        """
+        taps = vm.tap_interfaces or []
+        logger.info("[CP] 🔌 Hot-plug VM existente %s en worker=%s: %d NIC(s)",
+                    vm.vm_id, vm.worker_ip, len(taps))
+        if not taps:
+            return VMResult(vm_id=vm.vm_id, worker_ip=vm.worker_ip, vnc_port=vm.vnc_port)
+
+        try:
+            with SSHClient(vm.worker_ip, vm.ssh_user, vm.ssh_private_key, port=vm.worker_port) as ssh:
+                executor = QEMUExecutor(ssh)
+                for tap in taps:
+                    tap_name = getattr(tap, "tap_name", None) or tap.get("tap_name")
+                    mac      = getattr(tap, "mac", None) or tap.get("mac")
+                    executor.hotplug_nic(vm.vm_id, slice_id, tap_name, mac)
+            logger.info("[CP] ✅ Hot-plug completado para VM %s", vm.vm_id)
+            return VMResult(vm_id=vm.vm_id, worker_ip=vm.worker_ip, vnc_port=vm.vnc_port)
+        except Exception as exc:
+            logger.error("[CP] ❌ Hot-plug falló para VM %s: %s", vm.vm_id, exc)
+            return VMResult(vm_id=vm.vm_id, worker_ip=vm.worker_ip, error=str(exc))
 
     # ------------------------------------------------------------------
     # Destroy

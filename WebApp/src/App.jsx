@@ -287,6 +287,50 @@ export default function App() {
         });
     };
 
+    // Modo Edición Post-Despliegue (REQ-US-14): aplicar el diff de un slice ACTIVO
+    const modifySlice = async (id) => {
+        const sl = slices.find(s => s.id === id);
+        if (!sl) return false;
+        try {
+            const res = await apiFetch(`/slices/${id}/modify`, {
+                method: "POST",
+                body: JSON.stringify({
+                    name: sl.name,
+                    slice_json: { nodes: sl.nodes, edges: sl.edges },
+                }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (res.ok) {
+                updateSlice(id, { status: "PROVISIONING" });
+                flash(data.message || "Aplicando cambios…");
+                return true;
+            }
+            flash(data.detail || "Error al aplicar los cambios", "error");
+            return false;
+        } catch { flash("Error de conexión", "error"); return false; }
+    };
+
+    // Plantillas (REQ-US-04 / REQ-JP-03): cargar una plantilla en el diseñador
+    const loadTemplate = (tpl) => {
+        setActiveId(null);
+        setNodes(tpl.nodes.map(n => ({ ...n })));
+        setEdges(tpl.edges.map(e => ({ ...e })));
+        navigate("/slice/new");
+        flash(`Plantilla "${tpl.name}" cargada en el lienzo`);
+    };
+
+    const publishTemplate = async (sliceId, payload) => {
+        try {
+            const res = await apiFetch(`/slices/${sliceId}/publish-template`, {
+                method: "POST",
+                body: JSON.stringify(payload),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (res.ok) { setModal(null); flash(data.message || "Plantilla publicada"); }
+            else flash(data.detail || "Error al publicar la plantilla", "error");
+        } catch { flash("Error de conexión", "error"); }
+    };
+
     // Kill Switch: destrucción forzada con motivo (REQ-AD-07)
     const forceDestroySlice = async (id, reason) => {
         try {
@@ -553,6 +597,8 @@ export default function App() {
             onConsumption={() => navigate("/admin/consumption")}
             onAudit={() => navigate("/admin/audit")}
             onInfraManage={() => navigate("/admin/infra-manage")}
+            onLoadTemplate={loadTemplate}
+            onPublishTemplate={(id) => setModal({ type: "publishTemplate", id })}
         />
     );
 
@@ -578,9 +624,12 @@ export default function App() {
         saveDraft,
         doDeployDraft,
         updateDraft,
+        modifySlice,
+        fetchSlices,
         importarTopologia,
         exportarTopologia,
         modal, setModal,
+        publishTemplate,
         consoleVm, setConsoleVm,
         azModalOpen, setAzModalOpen,
         flash, apiFetch,

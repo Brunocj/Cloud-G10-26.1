@@ -104,7 +104,9 @@ class WorkflowOrchestrator:
 
         # ── Paso 2: NETWORK ───────────────────────────────────────────────────
         # La red siempre se crea ANTES que el cómputo en la nueva arquitectura.
-        if request.links:
+        # En modo extend corre aunque no haya links (las VMs nuevas necesitan
+        # sus puertos/taps de gestión).
+        if request.links or getattr(request, "mode", "deploy") == "extend":
             logger.info("[SAGA][%s] Paso 2/4 — NETWORK (network.deploy) …", slice_id)
             network_result = await self._step_network_deploy(request, host_map, az_id)
 
@@ -276,7 +278,8 @@ class WorkflowOrchestrator:
                     "ram_gb":   round(vm.ram_mb / 1024.0, 4),
                     "disco_gb": vm.disk_gb,
                 }
-                for vm in request.vms
+                # Las VMs ya desplegadas (modo extend) no pasan por el solver
+                for vm in request.vms if not getattr(vm, "already_deployed", False)
             ],
             "workers": request.workers,
         }
@@ -304,6 +307,7 @@ class WorkflowOrchestrator:
             "slice_id":             request.slice_id,
             "request_id":           request.request_id,
             "availability_zone_id": az_id,
+            "mode":                 getattr(request, "mode", "deploy"),
             "host_map":             host_map,           # vm_id → selected_host
             "links":  [link.model_dump() for link in request.links],
             "vms":    [vm.model_dump()   for vm   in request.vms],
@@ -341,6 +345,7 @@ class WorkflowOrchestrator:
             "slice_id":             request.slice_id,
             "request_id":           request.request_id,
             "availability_zone_id": az_id,
+            "mode":                 getattr(request, "mode", "deploy"),
             "vms":                  vms_payload,
         }
         logger.info("[SAGA][%s] → %s (%d VMs)",
