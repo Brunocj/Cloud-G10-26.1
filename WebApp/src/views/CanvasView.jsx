@@ -13,6 +13,7 @@ import { SaveDraftModal }  from "../components/modals/SaveDraftModal";
 import { ConfirmModal }    from "../components/modals/ConfirmModal";
 import { ConsoleModal }    from "../components/modals/ConsoleModal";
 import { SelectZoneModal } from "../components/modals/SelectZoneModal";
+import { KillSwitchModal } from "../components/modals/KillSwitchModal";
 import { Overlay }         from "../components/modals/Overlay";
 
 // ─── CanvasView ───────────────────────────────────────────────────────────────
@@ -29,7 +30,7 @@ export const CanvasView = ({
     // Image data
     imageList,
     // CRUD actions
-    destroySlice, deployDraft, deployFromDesigner, bulkDeploy, saveDraft,
+    destroySlice, forceDestroySlice, deployDraft, deployFromDesigner, bulkDeploy, saveDraft,
     doDeployDraft, updateDraft,
     // Import / Export
     importarTopologia, exportarTopologia,
@@ -162,10 +163,18 @@ export const CanvasView = ({
             {modal?.type === "deployDraft" && (() => {
                 const draft = slices.find(s => s.id === modal.id);
                 if (!draft) return null;
-                return <DeployModal userRole={user?.role} defaultName={draft.name} nodes={draft.nodes} edges={draft.edges} imageList={imageList} apiFetch={apiFetch} onDeploy={(name, azId, projectId, isDirect) => doDeployDraft(modal.id, azId, projectId, isDirect)} onClose={() => setModal(null)} targetAz={targetAz} />;
+                return <DeployModal userRole={user?.role} defaultName={draft.name} nodes={draft.nodes} edges={draft.edges} imageList={imageList} apiFetch={apiFetch} onDeploy={(name, azId, projectId, isDirect, ttlHours, motivo) => doDeployDraft(modal.id, azId, projectId, isDirect, ttlHours, motivo)} onClose={() => setModal(null)} targetAz={targetAz} />;
             })()}
             {modal === "draft" && (
                 <SaveDraftModal nodes={nodes} edges={edges} onSave={saveDraft} onClose={() => setModal(null)} />
+            )}
+            {modal?.type === "killSwitch" && (
+                <KillSwitchModal
+                    sliceName={modal.sliceName}
+                    ownerLabel={modal.ownerId ? `${modal.ownerId.slice(0, 8)}…` : null}
+                    onConfirm={(reason) => forceDestroySlice(modal.id, reason)}
+                    onClose={() => setModal(null)}
+                />
             )}
             {modal?.type === "confirm" && (
                 <ConfirmModal title={modal.title} msg={modal.msg} onOk={modal.onOk} onCancel={() => setModal(null)} />

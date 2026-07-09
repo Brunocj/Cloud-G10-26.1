@@ -4,7 +4,8 @@ import { Label }       from "../ui/Label";
 import { AzureVm }     from "../ui/AzureIcons";
 import {
     Cloud, Wrench,
-    LayoutList, Image, Plus, ArrowLeft, Activity, ChevronDown, Users, ShieldCheck,
+    LayoutList, Image, Plus, ArrowLeft, Activity, ChevronDown, Users, ShieldCheck, Inbox,
+    BarChart2, ClipboardList, Server,
 } from "../ui/Icon";
 
 import { TemplatePicker } from "./TemplatePicker";
@@ -12,7 +13,7 @@ import { SliceCard }      from "./SliceCard";
 import { ImagePanel }     from "./ImagePanel";
 
 // Statuses considered "active" — shown by default
-const ACTIVE_STATUSES = new Set(["ACTIVE", "PROVISIONING", "PENDING_APPROVAL", "DRAFT"]);
+const ACTIVE_STATUSES = new Set(["ACTIVE", "PROVISIONING", "PENDING_APPROVAL", "REJECTED", "DRAFT"]);
 
 // Secondary action button — accent-colored border/text/icon, matches the cloud icon
 const SecondaryBtn = ({ onClick, icon: Icon, label }) => (
@@ -37,6 +38,8 @@ export const Sidebar = ({
     fullImages, fetchFullImages, fetchImageList,
     apiFetch, user, flash,
     isSuperAdmin, onInfraMonitor, onProjects, onUsersManage,
+    onRequests, pendingCount = 0,
+    onConsumption, onAudit, onInfraManage,
 }) => {
     const isAdmin        = user?.role === "admin" || user?.role === "superAdmin" || user?.role === "jefeProyecto";
     const isStrictAdmin  = user?.role === "admin" || user?.role === "superAdmin";
@@ -143,6 +146,25 @@ export const Sidebar = ({
                         </button>
 
                         {/* Secondary buttons — accent-themed */}
+                        {isAdmin && (
+                            <button onClick={onRequests}
+                                style={btnBase({
+                                    width: "100%", padding: "8px 12px", fontSize: 11,
+                                    background: pendingCount > 0 ? T.yellowLight : T.accentLight,
+                                    color: pendingCount > 0 ? T.yellow : T.accent,
+                                    border: `1px solid ${(pendingCount > 0 ? T.yellow : T.accent)}44`,
+                                    boxShadow: "none",
+                                    display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+                                })}>
+                                <Inbox size={12} color={pendingCount > 0 ? T.yellow : T.accent} /> Solicitudes
+                                {pendingCount > 0 && (
+                                    <span style={{
+                                        background: T.red, color: "#fff", fontSize: 9, fontWeight: 800,
+                                        borderRadius: 20, padding: "1px 6px", marginLeft: 2,
+                                    }}>{pendingCount}</span>
+                                )}
+                            </button>
+                        )}
                         {canSeeProjects && (
                             <SecondaryBtn onClick={onProjects} icon={Users} label="Gestión de Proyectos" />
                         )}
@@ -152,8 +174,17 @@ export const Sidebar = ({
                         {isAdmin && (
                             <SecondaryBtn onClick={() => setSidebarMode("images")} icon={Image} label="Gestionar Imágenes" />
                         )}
+                        {isAdmin && (
+                            <SecondaryBtn onClick={onConsumption} icon={BarChart2} label="Consumo por Proyecto" />
+                        )}
+                        {isAdmin && (
+                            <SecondaryBtn onClick={onAudit} icon={ClipboardList} label="Bitácora de Eventos" />
+                        )}
                         {isSuperAdmin && (
                             <SecondaryBtn onClick={onInfraMonitor} icon={Activity} label="Monitoreo de Infraestructura" />
+                        )}
+                        {isSuperAdmin && (
+                            <SecondaryBtn onClick={onInfraManage} icon={Server} label="Gestión de Infraestructura" />
                         )}
                     </div>
 
@@ -172,7 +203,8 @@ export const Sidebar = ({
                                 <SliceCard key={sl.id} slice={sl} active={activeId === sl.id}
                                     onClick={() => setActiveId(sl.id)}
                                     onDestroy={onDestroySlice}
-                                    onDeploy={onDeployDraft} />
+                                    onDeploy={onDeployDraft}
+                                    showOwner={isAdmin} />
                             ))}
 
                             {/* Archived slices (FAILED, TERMINATED) */}
@@ -194,7 +226,8 @@ export const Sidebar = ({
                                         <SliceCard key={sl.id} slice={sl} active={activeId === sl.id}
                                             onClick={() => setActiveId(sl.id)}
                                             onDestroy={onDestroySlice}
-                                            onDeploy={onDeployDraft} />
+                                            onDeploy={onDeployDraft}
+                                            showOwner={isAdmin} />
                                     ))}
                                 </>
                             )}

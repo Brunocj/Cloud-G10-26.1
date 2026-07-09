@@ -6,6 +6,7 @@ from datetime import datetime
 from app.database import SessionLocal
 from app.models import Slice, Vlan, Vm, IpPool, Worker
 from app.nats_producer import nats_producer
+from app.services.notification_hub import notification_hub
 
 logger = logging.getLogger("SliceManager.Listener")
 
@@ -147,6 +148,36 @@ async def nats_result_listener():
 
                 db.commit()
                 logger.info("[LISTENER] 💾 BD actualizada correctamente")
+
+                # Bitácora del resultado del orquestador
+                from app.services.audit import audit
+                if db_slice.status == "ACTIVE":
+                    audit("system", "system", "Orchestrator", "slice_active",
+                          f"Slice '{db_slice.name}' desplegado correctamente.",
+                          slice_id=slice_id, project_id=db_slice.project_id)
+                elif db_slice.status == "FAILED":
+                    audit("system", "system", "Orchestrator", "deploy_failed",
+                          f"Despliegue del slice '{db_slice.name}' falló (status={status}).",
+                          level="ERROR", slice_id=slice_id, project_id=db_slice.project_id)
+
+                # Notificación en tiempo real al dueño del slice
+                try:
+                    if db_slice.status == "ACTIVE":
+                        await notification_hub.notify_user(db_slice.creator_id, {
+                            "type":     "slice_active",
+                            "slice_id": slice_id,
+                            "title":    "Slice desplegado",
+                            "message":  f"Tu slice \"{db_slice.name}\" está ACTIVO.",
+                        })
+                    elif db_slice.status == "FAILED":
+                        await notification_hub.notify_user(db_slice.creator_id, {
+                            "type":     "slice_failed",
+                            "slice_id": slice_id,
+                            "title":    "Despliegue fallido",
+                            "message":  f"El despliegue de \"{db_slice.name}\" falló. Revisa los recursos e intenta de nuevo.",
+                        })
+                except Exception as notify_exc:
+                    logger.warning("[LISTENER] No se pudo notificar por WS: %s", notify_exc)
             else:
                 logger.warning("[LISTENER] ⚠️  Slice %s no encontrado en BD, descartando resultado", slice_id)
         except Exception as e:

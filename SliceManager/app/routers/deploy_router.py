@@ -7,6 +7,10 @@ from app.auth import CurrentUser, get_current_user
 from app.services.placement_worker import placement_queue
 from app.nats_producer import nats_producer
 from app.routers.project_router import can_deploy_directly, user_can_choose_project
+from app.services.notification_hub import notification_hub
+from app.services.slice_destroyer import destroy_deployed_slice
+from app.services.permissions import can_operate_slice
+from app.services.audit import audit
 import os
 import uuid
 import json
@@ -105,8 +109,8 @@ async def request_deploy(
     if not db_slice:
         raise HTTPException(status_code=404, detail="Slice no encontrada")
 
-    # ── Autorización de negocio ──────────────────────────────────────
-    if not user.is_owner_or_above(db_slice.creator_id, min_role="admin"):
+    # ── Autorización de negocio (dueño / admin+ / jefe del proyecto) ─────────
+    if not can_operate_slice(db, user, db_slice):
         raise HTTPException(
             status_code=403,
             detail="No tienes permiso para desplegar el slice de otro usuario.",
@@ -157,7 +161,29 @@ async def request_deploy(
 
     db_slice.status = "PENDING_APPROVAL"
     db_slice.TTL = request.ttl_hours
+    db_slice.availability_zone_id = request.availability_zone_id
+
+    # Persistir los datos de la solicitud: la zona y el motivo se necesitan
+    # después (bandeja de aprobación / encolado diferido al aprobar).
+    s_json = db_slice.slice_json or {}
+    if isinstance(s_json, str):
+        s_json = json.loads(s_json)
+    s_json["deploy_request"] = {
+        "availability_zone_id": request.availability_zone_id,
+        "ttl_hours":            request.ttl_hours,
+        "motivo":               request.motivo,
+        "requested_by":         user.user_id,
+        "requested_at":         datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "needs_approval":       not is_direct,
+    }
+    s_json.pop("review", None)   # limpiar revisión previa si se re-solicita tras un rechazo
+    db_slice.slice_json = dict(s_json)
     db.commit()
+
+    audit(user.user_id, user.role, "SliceManager",
+          "deploy_direct" if is_direct else "deploy_requested",
+          f"Slice '{db_slice.name}' — zona={request.availability_zone_id} ttl={request.ttl_hours}h. Motivo: {request.motivo}",
+          slice_id=slice_id, project_id=project_id)
 
     if is_direct:
         logger.info("[DEPLOY] 🟢 Despliegue directo — encolando en placement_queue")
@@ -171,6 +197,26 @@ async def request_deploy(
         }
     else:
         logger.info("[DEPLOY] 🟡 Requiere aprobación humana — NO se encola. Queda en PENDING_APPROVAL.")
+
+        # Notificar en tiempo real a los aprobadores: admins/superAdmins
+        # conectados + jefes del proyecto (si hay proyecto).
+        event = {
+            "type":     "new_request",
+            "slice_id": slice_id,
+            "title":    "Nueva solicitud de despliegue",
+            "message":  f"El slice \"{db_slice.name}\" espera tu aprobación.",
+        }
+        await notification_hub.notify_roles(["admin", "superAdmin"], event)
+        if project_id is not None:
+            from app.models import Role, UserProject
+            jefe_role = db.query(Role).filter(Role.role_name == "jefeProyecto").first()
+            if jefe_role:
+                jefes = db.query(UserProject).filter(
+                    UserProject.project_id == project_id,
+                    UserProject.project_role_id == jefe_role.id,
+                ).all()
+                await notification_hub.notify_users([j.user_id for j in jefes], event)
+
         logger.info("="*70)
         return {
             "status":  "PENDING_APPROVAL",
@@ -339,16 +385,16 @@ async def request_destroy(
         raise HTTPException(status_code=400, detail="El slice ya está destruido.")
 
     # ── Autorización de negocio ──────────────────────────────────────
-    # Un usuario solo puede destruir sus propios slices.
-    # admin y superAdmin pueden destruir cualquier slice.
-    if not user.is_owner_or_above(db_slice.creator_id, min_role="admin"):
+    # Dueño, admin/superAdmin, o jefeProyecto del proyecto del slice
+    # (REQ-JP-07: el jefe puede apagar la red de un alumno de su curso).
+    if not can_operate_slice(db, user, db_slice):
         raise HTTPException(
             status_code=403,
             detail="No tienes permiso para destruir el slice de otro usuario.",
         )
 
-    # Si es un borrador, solo borramos de la BD
-    if db_slice.status == "DRAFT":
+    # Si es un borrador o una solicitud rechazada, solo borramos de la BD
+    if db_slice.status in ("DRAFT", "REJECTED"):
         _release_external_ips(db, slice_id)
         db.query(Vm).filter(Vm.slice_id == slice_id).delete()
         db.delete(db_slice)
@@ -374,39 +420,93 @@ async def request_destroy(
             logger.info("[DESTROY] Solicitud pendiente slice_id=%s eliminada por user=%s…", slice_id, user.user_id[:8])
             return {"status": "DELETED", "message": "Solicitud pendiente eliminada."}
 
-    db.query(Vlan).filter(Vlan.slice_id == slice_id).delete()
-
-    s_json = db_slice.slice_json
-    if isinstance(s_json, str):
-        s_json = json.loads(s_json)
-    if not s_json:
-        s_json = {}
-
-    # Re-inyectar claves SSH desde BD (pueden estar vacías en el JSON guardado
-    # si al momento del deploy el key_path era incorrecto)
-    all_workers = db.query(Worker).all()
-    workers_by_ip = {w.ip: w for w in all_workers}
-
-    deployed_vms   = _enrich_vms_with_ssh_keys(s_json.get("deployed_vms", []),   workers_by_ip)
-    deployed_links = _enrich_links_with_ssh_keys(s_json.get("deployed_links", []), workers_by_ip)
-
-    payload = {
-        "slice_id":             str(slice_id),
-        "request_id":           f"req-destroy-{uuid.uuid4().hex[:8]}",
-        "availability_zone_id": db_slice.availability_zone_id or 1,
-        "vms":                  deployed_vms,
-        "links":                deployed_links,
-    }
-
-    published = await nats_producer.publish_destroy(payload)
-
+    # Slice desplegado: lógica compartida con el TTL scheduler
+    published = await destroy_deployed_slice(db, db_slice)
     if published:
-        db_slice.status = "TERMINATED"
-        db_slice.date_destruction = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-        db.query(Vm).filter(Vm.slice_id == slice_id).update({"state": "TERMINATED"})
-        _release_external_ips(db, slice_id)
-        db.commit()
         logger.info("[DESTROY] slice_id=%s terminado por user=%s…", slice_id, user.user_id[:8])
+        audit(user.user_id, user.role, "SliceManager", "slice_destroyed",
+              f"Slice '{db_slice.name}' destruido manualmente.",
+              slice_id=slice_id, project_id=db_slice.project_id)
         return {"status": "ACCEPTED", "message": "Orden de destrucción enviada."}
 
     raise HTTPException(status_code=500, detail="Error enviando orden a NATS")
+
+
+# ── Kill Switch (REQ-AD-07): destrucción administrativa forzada ───────────────
+
+from pydantic import BaseModel as _BaseModel
+
+class ForceDestroyRequest(_BaseModel):
+    reason: str
+
+
+@router.post("/{slice_id}/force-destroy", status_code=202)
+async def force_destroy(
+    slice_id: int,
+    request:  ForceDestroyRequest,
+    db:       Session     = Depends(get_db),
+    user:     CurrentUser = Depends(get_current_user),
+):
+    """
+    Kill Switch: destrucción forzada de cualquier slice por un administrador
+    (o jefeProyecto sobre slices de sus proyectos). El motivo es OBLIGATORIO,
+    queda registrado en el slice y en los logs, y se notifica al dueño en
+    tiempo real explicando por qué su laboratorio fue apagado.
+    """
+    if not request.reason or not request.reason.strip():
+        raise HTTPException(status_code=400, detail="El motivo de la destrucción es obligatorio.")
+
+    db_slice = db.query(Slice).filter(Slice.id == slice_id).first()
+    if not db_slice:
+        raise HTTPException(status_code=404, detail="Slice no encontrado")
+    if db_slice.status == "TERMINATED":
+        raise HTTPException(status_code=400, detail="El slice ya está destruido.")
+
+    # Solo roles con poder de intervención sobre slices ajenos
+    if user.role not in ("admin", "superAdmin"):
+        if not (user.role == "jefeProyecto" and can_operate_slice(db, user, db_slice)):
+            raise HTTPException(status_code=403, detail="Solo admin, superAdmin o el jefe del proyecto pueden forzar la destrucción.")
+
+    reason = request.reason.strip()
+    owner_id = db_slice.creator_id
+    slice_name = db_slice.name
+
+    # Registrar el motivo ANTES de destruir (trazabilidad)
+    s_json = db_slice.slice_json or {}
+    if isinstance(s_json, str):
+        s_json = json.loads(s_json)
+    s_json["kill_switch"] = {
+        "reason":       reason,
+        "destroyed_by": user.user_id,
+        "destroyed_role": user.role,
+        "destroyed_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    db_slice.slice_json = dict(s_json)
+    db.commit()
+
+    logger.warning("[KILL-SWITCH] ⚠ Slice %s ('%s') destruido forzosamente por %s… (rol=%s). Motivo: %s",
+                   slice_id, slice_name, user.user_id[:8], user.role, reason)
+    audit(user.user_id, user.role, "KillSwitch", "force_destroy",
+          f"Slice '{slice_name}' (dueño {owner_id[:8]}…) destruido forzosamente. Motivo: {reason}",
+          level="WARNING", slice_id=slice_id, project_id=db_slice.project_id)
+
+    # Sin recursos desplegados → eliminar directo; desplegado → orden NATS
+    if db_slice.status in ("DRAFT", "REJECTED", "PENDING_APPROVAL"):
+        _release_external_ips(db, slice_id)
+        db.query(Vm).filter(Vm.slice_id == slice_id).delete()
+        db.delete(db_slice)
+        db.commit()
+        result = {"status": "DELETED", "message": "Slice eliminado forzosamente."}
+    else:
+        published = await destroy_deployed_slice(db, db_slice)
+        if not published:
+            raise HTTPException(status_code=500, detail="Error enviando orden a NATS")
+        result = {"status": "ACCEPTED", "message": "Destrucción forzada enviada."}
+
+    await notification_hub.notify_user(owner_id, {
+        "type":     "slice_killed",
+        "slice_id": slice_id,
+        "title":    "Slice destruido por un administrador",
+        "message":  f"Tu slice \"{slice_name}\" fue destruido forzosamente. Motivo: {reason}",
+    })
+    return result

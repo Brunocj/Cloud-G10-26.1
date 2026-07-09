@@ -72,6 +72,8 @@ export {
     Package,
 
     // Status / Feedback
+    Check,
+    Inbox,
     CheckCircle,
     XCircle,
     AlertTriangle,

@@ -42,4 +42,5 @@ class BulkDeployRequest(BaseModel):
     slice_json: Dict[str, Any]        # Topología del lienzo (nodes + edges)
     project_id: int
     availability_zone_id: int
-    ttl_hours: int = 4
+    ttl_hours: int = 4                # 0 = persistente (sin expiración)
+    motivo: Optional[str] = None

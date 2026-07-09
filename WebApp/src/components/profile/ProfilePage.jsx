@@ -51,6 +51,7 @@ const Section = ({ title, IconComp, children }) => (
     <div style={{
         background: T.surface, border: `1px solid ${T.border}`,
         borderRadius: 16, padding: "22px 24px", boxShadow: T.shadow,
+        flexShrink: 0,   // hijos de columna flex: sin esto se comprimen en vez de hacer scroll
     }}>
         <div style={{ fontSize: 13, fontWeight: 800, color: T.text, marginBottom: 18,
             display: "flex", alignItems: "center", gap: 8,
@@ -69,13 +70,40 @@ const StatChip = ({ label, value, accent }) => (
 );
 
 // ─── ProfilePage ──────────────────────────────────────────────────────────────
-export const ProfilePage = ({ user, onBack }) => {
+export const ProfilePage = ({ user, onBack, apiFetch }) => {
     const [sshKey,      setSshKey]      = useState("");
     const [keySaved,    setKeySaved]    = useState(false);
     const [generating,  setGenerating]  = useState(false);
     const [genSuccess,  setGenSuccess]  = useState(false);
     const [saveLoading, setSaveLoading] = useState(false);
     const [flashMsg,    setFlashMsg]    = useState(null);
+
+    // Cambio de contraseña (autoservicio via Keycloak)
+    const [pwCurrent, setPwCurrent] = useState("");
+    const [pwNew,     setPwNew]     = useState("");
+    const [pwConfirm, setPwConfirm] = useState("");
+    const [pwBusy,    setPwBusy]    = useState(false);
+
+    const handleChangePassword = async () => {
+        if (!apiFetch) { flash("No disponible en modo demo.", "error"); return; }
+        if (pwNew.length < 6) { flash("La nueva contraseña debe tener al menos 6 caracteres.", "error"); return; }
+        if (pwNew !== pwConfirm) { flash("Las contraseñas nuevas no coinciden.", "error"); return; }
+        setPwBusy(true);
+        try {
+            const res = await apiFetch("/users/me/password", {
+                method: "POST",
+                body: JSON.stringify({ current_password: pwCurrent, new_password: pwNew }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (res.ok) {
+                flash("Contraseña actualizada correctamente.");
+                setPwCurrent(""); setPwNew(""); setPwConfirm("");
+            } else {
+                flash(data.detail || "No se pudo cambiar la contraseña.", "error");
+            }
+        } catch { flash("Error de conexión.", "error"); }
+        setPwBusy(false);
+    };
 
     const flash = (msg, type = "success") => {
         setFlashMsg({ msg, type });
@@ -144,6 +172,7 @@ export const ProfilePage = ({ user, onBack }) => {
                 display: "flex", alignItems: "flex-start", gap: 22,
                 boxShadow: T.shadowMd,
                 position: "relative", overflow: "hidden",
+                flexShrink: 0,
             }}>
                 {/* Green stripe accent */}
                 <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 5, background: `linear-gradient(90deg, ${T.accent}, #66bb6a)` }} />
@@ -174,6 +203,43 @@ export const ProfilePage = ({ user, onBack }) => {
                     </div>
                 </div>
             </div>
+
+            {/* ── Change password section ── */}
+            <Section title="Cambiar Contraseña" IconComp={ShieldCheck}>
+                <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 14, lineHeight: 1.6 }}>
+                    Actualiza la contraseña con la que inicias sesión. Necesitas tu contraseña actual para confirmar el cambio.
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+                    {[
+                        ["Contraseña actual",    pwCurrent, setPwCurrent],
+                        ["Nueva contraseña",     pwNew,     setPwNew],
+                        ["Confirmar nueva",      pwConfirm, setPwConfirm],
+                    ].map(([label, value, setter]) => (
+                        <div key={label}>
+                            <div style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 5 }}>{label}</div>
+                            <input type="password" value={value} onChange={e => setter(e.target.value)}
+                                style={{
+                                    width: "100%", padding: "9px 12px", borderRadius: 8, fontSize: 13,
+                                    border: `1.5px solid ${T.border}`, background: T.surfaceElevated,
+                                    color: T.text, fontFamily: "inherit", outline: "none", boxSizing: "border-box",
+                                }} />
+                        </div>
+                    ))}
+                </div>
+                <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 14 }}>
+                    <button onClick={handleChangePassword}
+                        disabled={pwBusy || !pwCurrent || !pwNew || !pwConfirm}
+                        style={btnBase({
+                            fontSize: 13, padding: "8px 20px",
+                            background: (pwCurrent && pwNew && pwConfirm) ? T.accent : T.border,
+                            color: (pwCurrent && pwNew && pwConfirm) ? "#fff" : T.textMuted,
+                            border: "none",
+                            opacity: pwBusy ? 0.7 : 1,
+                        })}>
+                        {pwBusy ? "Guardando…" : "Cambiar Contraseña"}
+                    </button>
+                </div>
+            </Section>
 
             {/* ── Security section ── */}
             <Section title="Seguridad y Acceso" IconComp={ShieldCheck}>

@@ -167,6 +167,27 @@ class Vm(Base):
     slice = relationship('Slice')
     worker = relationship('Worker')
 
+class AuditLog(Base):
+    """
+    Bitácora de eventos (REQ-JP-09 / REQ-AD-08).
+    Registra el ciclo de vida transaccional: solicitudes, aprobaciones,
+    despliegues, destrucciones (manuales, TTL y kill switch) y acciones
+    administrativas (usuarios, roles, proyectos, infraestructura).
+    """
+    __tablename__ = 'audit_logs'
+
+    id = Column(Integer, primary_key=True)
+    timestamp = Column(String(45), index=True)          # UTC "YYYY-MM-DD HH:MM:SS"
+    level = Column(String(10), default="INFO")          # INFO | WARNING | ERROR
+    actor_id = Column(String(100), index=True)          # UUID Keycloak o "system"
+    actor_role = Column(String(45))
+    module = Column(String(60))                         # SliceManager, TTL, KillSwitch, IAM…
+    action = Column(String(60), index=True)             # deploy_requested, approved, destroyed…
+    detail = Column(String(500))
+    slice_id = Column(Integer, nullable=True, index=True)
+    project_id = Column(Integer, nullable=True, index=True)
+
+
 class IpPool(Base):
     __tablename__ = 'ip_pool'
 

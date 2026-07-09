@@ -6,7 +6,7 @@ import { ProfilePage }   from "../components/profile/ProfilePage";
 
 // ─── ProfileView ──────────────────────────────────────────────────────────────
 // Full-screen view (no sidebar) with a slim topbar + ProfilePage.
-export const ProfileView = ({ user, logout, reTheme, themeRev, onBack }) => (
+export const ProfileView = ({ user, logout, reTheme, themeRev, onBack, apiFetch }) => (
     <div style={{
         display: "flex", height: "100vh",
         background: T.bg,
@@ -29,7 +29,7 @@ export const ProfileView = ({ user, logout, reTheme, themeRev, onBack }) => (
                 <ThemePicker onThemeChange={reTheme} />
                 <UserAvatar user={user} onLogout={logout} onProfile={() => {}} />
             </div>
-            <ProfilePage user={user} onBack={onBack} />
+            <ProfilePage user={user} onBack={onBack} apiFetch={apiFetch} />
         </div>
         <style key={themeRev}>{getGlobalCss()}</style>
     </div>

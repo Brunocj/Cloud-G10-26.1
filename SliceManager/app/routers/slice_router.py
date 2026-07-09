@@ -21,7 +21,7 @@ router = APIRouter(prefix="/api/v1/slices", tags=["Slices / Topologies"])
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def _serialize_slice(t: Slice) -> dict:
+def _serialize_slice(t: Slice, users_map: dict = None, projects_map: dict = None) -> dict:
     """Serializa un objeto Slice a dict para la respuesta de la API."""
     s_json = t.slice_json if t.slice_json else {}
     if isinstance(s_json, str):
@@ -42,31 +42,47 @@ def _serialize_slice(t: Slice) -> dict:
                     node["vnc_url"]     = d_vm.get("vnc_url")       # token VNC de OpenStack (None en Linux Cluster)
                     node["external_ip"] = d_vm.get("external_ip")   # IP externa asignada (Linux Cluster o puerto provider de OpenStack)
 
+    review = s_json.get("review")
+
     return {
         "id":        t.id,
         "name":      t.name if t.name else f"Slice {t.id}",
         "status":    t.status,
         "availability_zone_id": t.availability_zone_id,
         "owner_id":  t.creator_id,
+        "owner_name":   (users_map or {}).get(t.creator_id),
+        "project_id":   t.project_id,
+        "project_name": (projects_map or {}).get(t.project_id),
         "nodeCount": len(nodes),
         "edgeCount": len(edges),
         "vcpus":     sum(int(n.get("vcores", 0)) for n in nodes),
         "ramLabel":  f"{sum(float(n.get('ram', 0)) for n in nodes)} MB",
+        "ttl_hours":        float(t.TTL) if t.TTL else None,
+        "date_deployed":    t.date_deployed,
+        "date_destruction": t.date_destruction,
+        "review":        {"action": review.get("action"), "comment": review.get("comment"),
+                          "reviewed_at": review.get("reviewed_at")} if review else None,
         "nodes":     nodes,
         "edges":     edges,
     }
 
 
-def _assert_owner_or_admin(db_slice: Slice, user: CurrentUser) -> None:
+def _assert_owner_or_admin(db_slice: Slice, user: CurrentUser, db: Session = None) -> None:
     """
-    Lanza 403 si el usuario no es el dueño del slice ni tiene rol admin/superAdmin.
-    Regla de negocio: un 'usuario' o 'jefeProyecto' solo puede operar sus propios slices.
+    Lanza 403 si el usuario no puede operar el slice.
+    Permitido: dueño, admin/superAdmin, o jefeProyecto líder del proyecto
+    del slice (REQ-JP-07 — intervención directa "Modo Dios").
     """
-    if not user.is_owner_or_above(db_slice.creator_id, min_role="admin"):
-        raise HTTPException(
-            status_code=403,
-            detail="No tienes permiso para operar sobre el slice de otro usuario.",
-        )
+    from app.services.permissions import can_operate_slice
+    if db is not None:
+        if can_operate_slice(db, user, db_slice):
+            return
+    elif user.is_owner_or_above(db_slice.creator_id, min_role="admin"):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail="No tienes permiso para operar sobre el slice de otro usuario.",
+    )
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -107,7 +123,24 @@ def list_slices(
         query = query.filter(Slice.creator_id == user.user_id)
 
     slices = query.order_by(Slice.id.desc()).all()
-    return [_serialize_slice(t) for t in slices]
+
+    # Resolver nombres de dueños y proyectos en 2 queries (evita N+1)
+    from app.models import Project, User
+    creator_ids = {s.creator_id for s in slices if s.creator_id}
+    project_ids = {s.project_id for s in slices if s.project_id}
+
+    users_map = {}
+    if creator_ids:
+        for u in db.query(User).filter(User.id.in_(creator_ids)).all():
+            parts = [p for p in (u.fullname, u.lastname) if p and p.strip() and p.lower() != "none"]
+            users_map[u.id] = " ".join(parts) or u.username or u.email
+
+    projects_map = {}
+    if project_ids:
+        for p in db.query(Project).filter(Project.id.in_(project_ids)).all():
+            projects_map[p.id] = p.name
+
+    return [_serialize_slice(t, users_map, projects_map) for t in slices]
 
 
 @router.post("/draft")
@@ -207,7 +240,7 @@ def update_draft(
         raise HTTPException(status_code=400, detail="Solo se pueden editar borradores")
 
     # ── Autorización de negocio ────────────────────────────────────
-    _assert_owner_or_admin(db_slice, user)
+    _assert_owner_or_admin(db_slice, user, db)
 
     # Liberar IPs antes de destruir VMs viejas
     vms_antiguas = db.query(Vm).filter(Vm.slice_id == slice_id).all()
@@ -326,8 +359,8 @@ async def get_vm_console(
     db_slice = db.query(Slice).filter(Slice.id == slice_id).first()
     if not db_slice:
         raise HTTPException(status_code=404, detail="Slice no encontrado")
-    if not user.is_owner_or_above(db_slice.creator_id, min_role="admin"):
-        raise HTTPException(status_code=403, detail="No tienes permiso para acceder a este slice.")
+    # Dueño, admin+, o jefeProyecto del proyecto (REQ-JP-07: consola de alumnos)
+    _assert_owner_or_admin(db_slice, user, db)
 
     db_vm = db.query(Vm).filter(Vm.slice_id == slice_id, Vm.name == vm_id).first()
     if not db_vm or not db_vm.provider_instance_id:

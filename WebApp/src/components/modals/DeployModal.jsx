@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { T, btnBase, inp } from "../../theme/tokens";
 import { Label } from "../ui/Label";
 import { Overlay } from "./Overlay";
-import { Zap, AlertTriangle, CheckCircle, Send, Users } from "../ui/Icon";
+import { Zap, AlertTriangle, CheckCircle, Send, Users, Clock } from "../ui/Icon";
 
 const DEFAULT_AZS = [
     { id: 1, name: "Linux Cluster" },
@@ -11,11 +11,21 @@ const DEFAULT_AZS = [
 
 const NO_PROJECT = "__NONE__";
 
+// Opciones de TTL en horas (REQ-US-08)
+const TTL_OPTIONS = [1, 2, 4, 8, 12, 24, 48, 72, 168];
+
 export const DeployModal = ({ defaultName, nodes, edges, onDeploy, onBulkDeploy, onClose, imageList = [], apiFetch, targetAz, userRole }) => {
     const [name, setName] = useState(defaultName || `slice-${Math.random().toString(36).slice(2, 6)}`);
     const [selectedAzId, setSelectedAzId] = useState(targetAz ? Number(targetAz) : 1);
     const [azList, setAzList] = useState(DEFAULT_AZS);
     const [azConflict, setAzConflict] = useState(null);
+
+    // TTL + motivo (REQ-US-08): roles elevados arrancan con TTL ilimitado,
+    // usuarios normales con 4h. Ambos pueden cambiarlo; el motivo es obligatorio.
+    const isElevated = ["jefeProyecto", "admin", "superAdmin"].includes(userRole);
+    const [unlimited, setUnlimited] = useState(isElevated);
+    const [ttlHours,  setTtlHours]  = useState(4);
+    const [motivo,    setMotivo]    = useState("");
 
     // Project selection
     const [eligibleProjects, setEligibleProjects] = useState([]);
@@ -79,16 +89,17 @@ export const DeployModal = ({ defaultName, nodes, edges, onDeploy, onBulkDeploy,
     // Reset bulk mode when project changes
     useEffect(() => { if (!canBulk) setBulkMode(false); }, [selectedProject]);
 
-    const canDeploy = !azConflict && nodes.length > 0 && name.trim() && projectsLoaded && !bulkDeploying;
+    const canDeploy = !azConflict && nodes.length > 0 && name.trim() && motivo.trim() && projectsLoaded && !bulkDeploying;
 
     const handleSubmit = async () => {
         const projectId = selectedProject === NO_PROJECT ? null : Number(selectedProject);
+        const effectiveTtl = unlimited ? 0 : ttlHours;   // 0 = persistente (sin expiración)
         if (bulkMode && onBulkDeploy) {
             setBulkDeploying(true);
-            await onBulkDeploy(name, selectedAzId, projectId);
+            await onBulkDeploy(name, selectedAzId, projectId, effectiveTtl, motivo.trim());
             setBulkDeploying(false);
         } else {
-            onDeploy(name, selectedAzId, projectId, isDirect);
+            onDeploy(name, selectedAzId, projectId, isDirect, effectiveTtl, motivo.trim());
         }
     };
 
@@ -146,6 +157,52 @@ export const DeployModal = ({ defaultName, nodes, edges, onDeploy, onBulkDeploy,
                         </option>
                     ))}
                 </select>
+
+                {/* TTL (REQ-US-08) */}
+                <Label>Tiempo de Vida (TTL)</Label>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+                    <select value={ttlHours} disabled={unlimited}
+                        onChange={e => setTtlHours(Number(e.target.value))}
+                        style={{ ...selectStyle, marginBottom: 0, flex: 1, opacity: unlimited ? 0.45 : 1, cursor: unlimited ? "not-allowed" : "pointer" }}>
+                        {TTL_OPTIONS.map(h => (
+                            <option key={h} value={h}>
+                                {h < 24 ? `${h} hora${h > 1 ? "s" : ""}` : `${h / 24} día${h > 24 ? "s" : ""} (${h}h)`}
+                            </option>
+                        ))}
+                    </select>
+                    <label style={{
+                        display: "flex", alignItems: "center", gap: 6, fontSize: 11, fontWeight: 700,
+                        color: unlimited ? T.accent : T.textMuted, cursor: "pointer", whiteSpace: "nowrap",
+                        padding: "8px 10px", borderRadius: 8,
+                        background: unlimited ? T.accentLight : T.surfaceElevated,
+                        border: `1px solid ${unlimited ? T.accent + "66" : T.border}`,
+                    }}>
+                        <input type="checkbox" checked={unlimited} onChange={e => setUnlimited(e.target.checked)}
+                            style={{ accentColor: T.accent, cursor: "pointer" }} />
+                        TTL Ilimitado
+                    </label>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 10, color: T.textFaint, marginBottom: 12 }}>
+                    <Clock size={11} />
+                    {unlimited
+                        ? "El slice será persistente: no se destruirá automáticamente."
+                        : `El slice se destruirá automáticamente ${ttlHours}h después de activarse.`}
+                </div>
+
+                {/* Motivo (obligatorio) */}
+                <Label>Motivo de la solicitud</Label>
+                <textarea value={motivo} onChange={e => setMotivo(e.target.value)}
+                    rows={2}
+                    placeholder='Ej. "Laboratorio 3 de Redes" o "Para mi Tesis"'
+                    style={{
+                        ...inp, marginBottom: motivo.trim() ? 12 : 4,
+                        resize: "vertical", minHeight: 44, fontFamily: "inherit",
+                    }} />
+                {!motivo.trim() && (
+                    <div style={{ fontSize: 10, color: T.textFaint, marginBottom: 12 }}>
+                        Campo obligatorio — visible para quien apruebe la solicitud.
+                    </div>
+                )}
 
                 {/* Bulk toggle — only when direct-deploy project selected */}
                 {canBulk && (

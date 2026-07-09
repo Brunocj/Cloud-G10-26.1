@@ -5,7 +5,9 @@ import { UserAvatar }  from "../components/ui/UserAvatar";
 import {
     ArrowLeft, Plus, Users, Trash2, Edit3, X,
     Crown, User as UserIcon, Search, AlertTriangle, Save, CheckCircle,
+    LayoutList,
 } from "../components/ui/Icon";
+import { Badge } from "../components/ui/Badge";
 
 // ─── Display helper for fullnames ─────────────────────────────────────────────
 const displayName = (m) => {
@@ -393,13 +395,15 @@ const MembersPanel = ({ project, apiFetch, currentUser, onClose, flash }) => {
 };
 
 // ─── ProjectsView ─────────────────────────────────────────────────────────────
-export const ProjectsView = ({ user, logout, reTheme, themeRev, onBack, onProfile, apiFetch, flash }) => {
+export const ProjectsView = ({ user, logout, reTheme, themeRev, onBack, onProfile, apiFetch, flash, onOpenSlice }) => {
     const [projects, setProjects] = useState([]);
     const [loading,  setLoading]  = useState(true);
     const [error,    setError]    = useState(null);
     const [editing,  setEditing]  = useState(null);
     const [openedProject, setOpenedProject] = useState(null);
     const [confirming, setConfirming] = useState(null);
+    const [slices, setSlices] = useState([]);
+    const [sliceFilter, setSliceFilter] = useState("all");   // "all" | project_id | "none"
 
     const isAdmin = user?.role === "admin" || user?.role === "superAdmin";
 
@@ -413,7 +417,22 @@ export const ProjectsView = ({ user, logout, reTheme, themeRev, onBack, onProfil
         } finally { setLoading(false); }
     };
 
-    useEffect(() => { load(); }, []);
+    // Slices con dueño/proyecto (el backend ya filtra por rol: admin ve todo,
+    // jefe ve los suyos + los de sus proyectos)
+    const loadSlices = async () => {
+        try {
+            const res = await apiFetch("/slices");
+            if (res.ok) setSlices(await res.json());
+        } catch { /* silencioso */ }
+    };
+
+    useEffect(() => { load(); loadSlices(); }, []);
+
+    const filteredSlices = slices.filter(s => {
+        if (sliceFilter === "all")  return true;
+        if (sliceFilter === "none") return !s.project_id;
+        return String(s.project_id) === String(sliceFilter);
+    });
 
     const saveProject = async (payload) => {
         const isNew = !editing?.id;
@@ -481,6 +500,72 @@ export const ProjectsView = ({ user, logout, reTheme, themeRev, onBack, onProfil
                                 onEdit={setEditing}
                                 onDelete={setConfirming} />
                         ))}
+                    </div>
+                )}
+
+                {/* ── Slices por proyecto ─────────────────────────────────── */}
+                {!loading && !error && (
+                    <div style={{ marginTop: 28 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+                            <LayoutList size={15} color={T.accent} />
+                            <span style={{ fontSize: 13, fontWeight: 800 }}>Slices ({filteredSlices.length})</span>
+                            <select value={sliceFilter} onChange={e => setSliceFilter(e.target.value)}
+                                style={{
+                                    padding: "5px 10px", fontSize: 11, background: T.surfaceElevated,
+                                    border: `1px solid ${T.border}`, borderRadius: 8, color: T.text,
+                                    fontFamily: "inherit", outline: "none",
+                                }}>
+                                <option value="all">Todos los proyectos</option>
+                                {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                                <option value="none">Sin proyecto (personales)</option>
+                            </select>
+                        </div>
+
+                        <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, overflow: "hidden", boxShadow: T.shadow }}>
+                            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                                <thead>
+                                    <tr style={{ background: T.surfaceElevated }}>
+                                        {["Slice", "Solicitante", "Proyecto", "Estado", "VMs", "vCPU", "RAM", "TTL", "Desplegado", "Destruido"].map(h => (
+                                            <th key={h} style={{ padding: "9px 12px", textAlign: "left", fontSize: 10, fontWeight: 800, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.04em", borderBottom: `1px solid ${T.border}` }}>{h}</th>
+                                        ))}
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {filteredSlices.map(s => (
+                                        <tr key={s.id}
+                                            onClick={() => onOpenSlice && onOpenSlice(s.id)}
+                                            title="Abrir lienzo del slice"
+                                            style={{ borderBottom: `1px solid ${T.border}`, cursor: onOpenSlice ? "pointer" : "default", transition: "background 0.12s" }}
+                                            onMouseEnter={e => e.currentTarget.style.background = T.accentLight}
+                                            onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+                                            <td style={{ padding: "9px 12px", fontWeight: 700, color: T.accent, textDecoration: "underline", textUnderlineOffset: 3 }}>{s.name}</td>
+                                            <td style={{ padding: "9px 12px" }}>
+                                                <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: T.text }}>
+                                                    <UserIcon size={11} color={T.textMuted} /> {s.owner_name ?? `${(s.owner_id || "").slice(0, 8)}…`}
+                                                </span>
+                                            </td>
+                                            <td style={{ padding: "9px 12px", color: T.textMuted }}>{s.project_name ?? "—"}</td>
+                                            <td style={{ padding: "9px 12px" }}><Badge status={s.status} /></td>
+                                            <td style={{ padding: "9px 12px" }}>{s.nodeCount}</td>
+                                            <td style={{ padding: "9px 12px" }}>{s.vcpus}</td>
+                                            <td style={{ padding: "9px 12px" }}>{s.ramLabel}</td>
+                                            <td style={{ padding: "9px 12px", color: T.textMuted }}>
+                                                {s.ttl_hours ? `${s.ttl_hours}h` : "∞"}
+                                            </td>
+                                            <td style={{ padding: "9px 12px", color: T.textMuted, fontFamily: "monospace", fontSize: 10.5, whiteSpace: "nowrap" }}>
+                                                {s.date_deployed ?? "—"}
+                                            </td>
+                                            <td style={{ padding: "9px 12px", color: T.textMuted, fontFamily: "monospace", fontSize: 10.5, whiteSpace: "nowrap" }}>
+                                                {s.date_destruction ?? "—"}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                    {filteredSlices.length === 0 && (
+                                        <tr><td colSpan={10} style={{ padding: 26, textAlign: "center", color: T.textMuted }}>No hay slices para este filtro.</td></tr>
+                                    )}
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
                 )}
             </div>

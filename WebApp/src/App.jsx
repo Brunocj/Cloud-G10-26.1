@@ -17,6 +17,13 @@ import { ProfileView }      from "./views/ProfileView";
 import { InfraMonitorView } from "./views/InfraMonitorView";
 import { ProjectsView }     from "./views/ProjectsView";
 import { UsersView }        from "./views/UsersView";
+import { RequestsView }     from "./views/RequestsView";
+import { ConsumptionView }  from "./views/ConsumptionView";
+import { AuditView }        from "./views/AuditView";
+import { InfraManageView }  from "./views/InfraManageView";
+
+// Realtime notifications
+import { useNotifications } from "./hooks/useNotifications";
 
 // Sidebar
 import { Sidebar } from "./components/sidebar/Sidebar";
@@ -70,6 +77,7 @@ export default function App() {
     const [toast,      setToast]      = useState(null);
     const [consoleVm,  setConsoleVm]  = useState(null);
     const [azModalOpen, setAzModalOpen] = useState(false);
+    const [pendingCount, setPendingCount] = useState(0);
 
     // ── Helpers ───────────────────────────────────────────────────────────────
     const flash = (msg, type = "success") => {
@@ -190,11 +198,33 @@ export default function App() {
         } catch (e) { console.error("fetchFullImages:", e); }
     };
 
+    // Contador de solicitudes pendientes (solo roles con bandeja)
+    const fetchPendingCount = async () => {
+        if (!["admin", "superAdmin", "jefeProyecto"].includes(user?.role)) return;
+        try {
+            const res = await apiFetch("/requests/pending");
+            if (res.ok) setPendingCount((await res.json()).length);
+        } catch { /* silencioso */ }
+    };
+
+    // ── Notificaciones en tiempo real (WebSocket via ApiGW) ──────────────────
+    useNotifications(isAuthenticated ? token : null, (event) => {
+        // Toast instantáneo con el mensaje del evento
+        if (event.message) {
+            const errorTypes = new Set(["request_rejected", "slice_failed", "slice_expired", "slice_killed"]);
+            flash(event.message, errorTypes.has(event.type) ? "error" : "success");
+        }
+        // Refrescar datos afectados
+        fetchSlices();
+        if (event.type === "new_request") fetchPendingCount();
+    });
+
     useEffect(() => {
         if (!isAuthenticated) return;
         fetchSlices();
         fetchImageList();
         fetchFullImages();
+        fetchPendingCount();
         // Sync current user to local cache (needed for project membership)
         apiFetch("/users/sync", {
             method: "POST",
@@ -225,6 +255,16 @@ export default function App() {
 
     const destroySlice = (id) => {
         const sl = slices.find(s => s.id === id);
+
+        // Kill Switch (REQ-AD-07): si el slice NO es del usuario actual y su rol
+        // le permite intervenir (admin/superAdmin/jefe del proyecto), se exige
+        // un motivo que queda en logs y se notifica al dueño.
+        const canIntervene = ["admin", "superAdmin", "jefeProyecto"].includes(user?.role);
+        if (sl && canIntervene && sl.owner_id && sl.owner_id !== user?.id) {
+            setModal({ type: "killSwitch", id, sliceName: sl.name, ownerId: sl.owner_id });
+            return;
+        }
+
         setModal({
             type: "confirm",
             title: "Eliminar Slice",
@@ -247,7 +287,27 @@ export default function App() {
         });
     };
 
-    const deployFromDesigner = async (name, azId = 1, projectId = null, isDirect = false) => {
+    // Kill Switch: destrucción forzada con motivo (REQ-AD-07)
+    const forceDestroySlice = async (id, reason) => {
+        try {
+            const res = await apiFetch(`/slices/${id}/force-destroy`, {
+                method: "POST",
+                body: JSON.stringify({ reason }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) { flash(data.detail || "Error en la destrucción forzada", "error"); return; }
+            if (data.status === "DELETED") {
+                setSlices(prev => prev.filter(s => s.id !== id));
+                if (activeId === id) { setActiveId(null); navigate("/"); }
+            } else {
+                updateSlice(id, { status: "TERMINATED" });
+            }
+            setModal(null);
+            flash(data.message || "Destrucción forzada enviada");
+        } catch { flash("Error de conexión", "error"); }
+    };
+
+    const deployFromDesigner = async (name, azId = 1, projectId = null, isDirect = false, ttlHours = 4, motivo = "") => {
         try {
             const azImageList = imageList.filter(img => img.availability_zone_id == azId || img.availability_zone_id == null);
             const defaultImg = azImageList[0] ?? imageList[0] ?? { id: 1, name: "Cirros" };
@@ -268,8 +328,8 @@ export default function App() {
                 method: "POST",
                 body: JSON.stringify({
                     availability_zone_id: azId,
-                    ttl_hours: 4,
-                    motivo: "Despliegue directo desde Canvas",
+                    ttl_hours: ttlHours,
+                    motivo: motivo || "Despliegue desde Canvas",
                     project_id: projectId,
                 }),
             });
@@ -291,7 +351,7 @@ export default function App() {
         } catch { flash("Error de conexión con el servidor", "error"); }
     };
 
-    const bulkDeploy = async (namePrefix, azId, projectId) => {
+    const bulkDeploy = async (namePrefix, azId, projectId, ttlHours = 4, motivo = "") => {
         try {
             const defaultImg = imageList.filter(img => img.availability_zone_id == azId || img.availability_zone_id == null)[0]
                 ?? imageList[0] ?? { id: 1, name: "Cirros" };
@@ -308,7 +368,8 @@ export default function App() {
                     slice_json: { nodes: processedNodes, edges },
                     project_id: projectId,
                     availability_zone_id: azId,
-                    ttl_hours: 4,
+                    ttl_hours: ttlHours,
+                    motivo: motivo || null,
                 }),
             });
 
@@ -354,14 +415,14 @@ export default function App() {
         setModal({ type: "deployDraft", id });
     };
 
-    const doDeployDraft = async (id, azId, projectId = null, isDirect = false) => {
+    const doDeployDraft = async (id, azId, projectId = null, isDirect = false, ttlHours = 4, motivo = "") => {
         try {
             const res = await apiFetch(`/slices/${id}/deploy`, {
                 method: "POST",
                 body: JSON.stringify({
                     availability_zone_id: azId,
-                    ttl_hours: 4,
-                    motivo: "Despliegue desde la UI",
+                    ttl_hours: ttlHours,
+                    motivo: motivo || "Despliegue desde la UI",
                     project_id: projectId,
                 }),
             });
@@ -487,6 +548,11 @@ export default function App() {
             onInfraMonitor={() => navigate("/admin/infra")}
             onProjects={() => navigate("/projects")}
             onUsersManage={() => navigate("/admin/users")}
+            onRequests={() => navigate("/requests")}
+            pendingCount={pendingCount}
+            onConsumption={() => navigate("/admin/consumption")}
+            onAudit={() => navigate("/admin/audit")}
+            onInfraManage={() => navigate("/admin/infra-manage")}
         />
     );
 
@@ -505,6 +571,7 @@ export default function App() {
         setSliceNodes, setSliceEdges,
         imageList,
         destroySlice,
+        forceDestroySlice,
         deployDraft,
         deployFromDesigner,
         bulkDeploy,
@@ -530,6 +597,7 @@ export default function App() {
                 <ProfileView
                     user={user} logout={logout} reTheme={reTheme}
                     themeRev={themeRev} onBack={() => navigate("/")}
+                    apiFetch={apiFetch}
                 />
             } />
 
@@ -553,6 +621,44 @@ export default function App() {
                           themeRev={themeRev} onBack={() => navigate("/")}
                           onProfile={() => navigate("/profile")}
                           apiFetch={apiFetch} flash={flash}
+                          onOpenSlice={handleSliceClick}
+                      />
+                    : <Navigate to="/" replace />
+            } />
+
+            {/* Consumption per project — admin/superAdmin/jefeProyecto */}
+            <Route path="/admin/consumption" element={
+                isAdmin
+                    ? <ConsumptionView user={user} onBack={() => navigate("/")}
+                          onProfile={() => navigate("/profile")} apiFetch={apiFetch} />
+                    : <Navigate to="/" replace />
+            } />
+
+            {/* Audit log — admin/superAdmin/jefeProyecto */}
+            <Route path="/admin/audit" element={
+                isAdmin
+                    ? <AuditView user={user} onBack={() => navigate("/")}
+                          onProfile={() => navigate("/profile")} apiFetch={apiFetch} />
+                    : <Navigate to="/" replace />
+            } />
+
+            {/* Infrastructure management — superAdmin only */}
+            <Route path="/admin/infra-manage" element={
+                isSuperAdmin
+                    ? <InfraManageView user={user} onBack={() => navigate("/")}
+                          onProfile={() => navigate("/profile")} apiFetch={apiFetch} flash={flash} />
+                    : <Navigate to="/" replace />
+            } />
+
+            {/* Deploy requests inbox — admin/superAdmin/jefeProyecto, full screen */}
+            <Route path="/requests" element={
+                isAdmin
+                    ? <RequestsView
+                          user={user}
+                          onBack={() => navigate("/")}
+                          onProfile={() => navigate("/profile")}
+                          apiFetch={apiFetch} flash={flash}
+                          onChanged={() => { fetchSlices(); fetchPendingCount(); }}
                       />
                     : <Navigate to="/" replace />
             } />

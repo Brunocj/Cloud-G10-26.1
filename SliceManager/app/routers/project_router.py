@@ -197,6 +197,83 @@ def eligible_for_deploy(
     return result
 
 
+@router.get("/consumption")
+def projects_consumption(
+    db:   Session     = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """
+    Consumo agregado de recursos por proyecto (REQ-JP-10 / métricas para admin).
+    Suma vCPU, RAM y disco de las VMs ACTIVE de los slices de cada proyecto.
+      - admin/superAdmin → todos los proyectos (+ fila "Sin proyecto")
+      - jefeProyecto     → solo sus proyectos
+      - usuario          → 403
+    """
+    from app.models import Slice, Vm
+
+    if user.role == "usuario":
+        raise HTTPException(status_code=403, detail="No autorizado")
+
+    if user.can_manage_all():
+        projects = db.query(Project).order_by(Project.name).all()
+        include_no_project = True
+    else:
+        jefe_role = db.query(Role).filter(Role.role_name == "jefeProyecto").first()
+        led_ids = [
+            m.project_id for m in db.query(UserProject).filter(
+                UserProject.user_id == user.user_id,
+                UserProject.project_role_id == (jefe_role.id if jefe_role else -1),
+            ).all()
+        ]
+        projects = db.query(Project).filter(Project.id.in_(led_ids)).order_by(Project.name).all() if led_ids else []
+        include_no_project = False
+
+    def _aggregate(slices: list) -> dict:
+        slice_ids = [s.id for s in slices]
+        active    = [s for s in slices if s.status == "ACTIVE"]
+        vcpu = ram = disk = vms = 0
+        if slice_ids:
+            rows = db.query(Vm).filter(
+                Vm.slice_id.in_(slice_ids),
+                Vm.state == "ACTIVE",
+            ).all()
+            vms  = len(rows)
+            vcpu = sum(int(v.vcore or 0) for v in rows)
+            ram  = sum(float(v.ram or 0) for v in rows)
+            disk = sum(float(v.disk or 0) for v in rows)
+        return {
+            "total_slices":  len(slices),
+            "active_slices": len(active),
+            "active_vms":    vms,
+            "vcpus":         vcpu,
+            "ram_mb":        ram,
+            "disk_gb":       disk,
+        }
+
+    result = []
+    for p in projects:
+        slices = db.query(Slice).filter(Slice.project_id == p.id).all()
+        members = db.query(UserProject).filter(UserProject.project_id == p.id).count()
+        result.append({
+            "project_id":   p.id,
+            "project_name": p.name,
+            "member_count": members,
+            **_aggregate(slices),
+        })
+
+    if include_no_project:
+        orphans = db.query(Slice).filter(Slice.project_id.is_(None)).all()
+        if orphans:
+            result.append({
+                "project_id":   None,
+                "project_name": "— Sin proyecto (personales) —",
+                "member_count": 0,
+                **_aggregate(orphans),
+            })
+
+    return result
+
+
 # ── Helper reutilizable por el endpoint de deploy ─────────────────────────────
 
 def can_deploy_directly(db: Session, user_id: str, user_role: str, project_id: Optional[int]) -> bool:
@@ -287,6 +364,9 @@ def create_project(
     db.commit()
     db.refresh(p)
     logger.info("Proyecto creado: id=%s name=%s por user=%s…", p.id, p.name, user.user_id[:8])
+    from app.services.audit import audit
+    audit(user.user_id, user.role, "Projects", "project_created",
+          f"Proyecto '{p.name}' creado.", project_id=p.id)
     return _serialize_project(db, p)
 
 
@@ -354,6 +434,9 @@ def delete_project(
     db.delete(p)
     db.commit()
     logger.info("Proyecto eliminado: id=%s por user=%s…", project_id, user.user_id[:8])
+    from app.services.audit import audit
+    audit(user.user_id, user.role, "Projects", "project_deleted",
+          f"Proyecto '{p.name}' eliminado.", level="WARNING", project_id=project_id)
     return {"message": f"Proyecto '{p.name}' eliminado"}
 
 

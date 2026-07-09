@@ -37,6 +37,9 @@ KEYCLOAK_REALM        = os.getenv("KEYCLOAK_REALM", "pucp-cloud")
 KEYCLOAK_ADMIN_USER   = os.getenv("KEYCLOAK_ADMIN_USER", "admin")
 KEYCLOAK_ADMIN_PASS   = os.getenv("KEYCLOAK_ADMIN_PASS", "admin")
 KEYCLOAK_ADMIN_CLIENT = os.getenv("KEYCLOAK_ADMIN_CLIENT", "admin-cli")
+# Client público del WebApp (permite direct grant) — usado para verificar la
+# contraseña actual del usuario antes de cambiarla.
+KEYCLOAK_WEBAPP_CLIENT = os.getenv("KEYCLOAK_WEBAPP_CLIENT", "pucp-cloud-webapp")
 
 VALID_KC_ROLES = {"usuario", "jefeProyecto", "admin", "superAdmin"}
 
@@ -74,6 +77,16 @@ class UserCreateRequest(BaseModel):
 
 class UserRoleChangeRequest(BaseModel):
     role: str  # nuevo rol global
+
+
+class ProfileUpdateRequest(BaseModel):
+    fullname: Optional[str] = None
+    lastname: Optional[str] = None
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str
+    new_password: str
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -267,6 +280,92 @@ def sync_current_user(
     return _user_to_response(u, db)
 
 
+# ── Autoservicio: mi perfil ───────────────────────────────────────────────────
+
+@router.patch("/me", response_model=UserResponse)
+async def update_my_profile(
+    payload: ProfileUpdateRequest,
+    db:      Session     = Depends(get_db),
+    user:    CurrentUser = Depends(get_current_user),
+):
+    """Edita nombre/apellido del propio usuario (Keycloak + cache local)."""
+    u = db.query(User).filter(User.id == user.user_id).first()
+    if not u:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado. Inicia sesión de nuevo.")
+
+    # 1. Actualizar Keycloak (firstName / lastName)
+    kc_update = {}
+    if payload.fullname is not None: kc_update["firstName"] = payload.fullname
+    if payload.lastname is not None: kc_update["lastName"]  = payload.lastname
+    if kc_update:
+        token   = await _kc_admin_token()
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        base    = f"{KEYCLOAK_URL}/admin/realms/{KEYCLOAK_REALM}"
+        async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
+            r = await client.put(f"{base}/users/{user.user_id}", headers=headers, json=kc_update)
+            if r.status_code not in (200, 204):
+                logger.warning("KC profile update failed: %s %s", r.status_code, r.text[:200])
+                raise HTTPException(status_code=502, detail="No se pudo actualizar el perfil en Keycloak")
+
+    # 2. Cache local
+    if payload.fullname is not None: u.fullname = payload.fullname
+    if payload.lastname is not None: u.lastname = payload.lastname
+    db.commit()
+    db.refresh(u)
+    return _user_to_response(u, db)
+
+
+@router.post("/me/password", status_code=200)
+async def change_my_password(
+    payload: PasswordChangeRequest,
+    db:      Session     = Depends(get_db),
+    user:    CurrentUser = Depends(get_current_user),
+):
+    """
+    Cambio de contraseña del propio usuario (REQ 'Cambiar contraseña' del TDR).
+    1. Verifica la contraseña ACTUAL con un password-grant contra Keycloak.
+    2. Si es válida, aplica la nueva vía la Admin API (reset-password).
+    """
+    if len(payload.new_password or "") < 6:
+        raise HTTPException(status_code=400, detail="La nueva contraseña debe tener al menos 6 caracteres.")
+
+    u = db.query(User).filter(User.id == user.user_id).first()
+    if not u or not u.username:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado. Inicia sesión de nuevo.")
+
+    # 1. Verificar contraseña actual (direct grant con el client del WebApp)
+    token_url = f"{KEYCLOAK_URL}/realms/{KEYCLOAK_REALM}/protocol/openid-connect/token"
+    async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
+        r = await client.post(token_url, data={
+            "grant_type": "password",
+            "client_id":  KEYCLOAK_WEBAPP_CLIENT,
+            "username":   u.username,
+            "password":   payload.current_password,
+        })
+    if r.status_code != 200:
+        raise HTTPException(status_code=403, detail="La contraseña actual es incorrecta.")
+
+    # 2. Aplicar la nueva contraseña
+    token   = await _kc_admin_token()
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    base    = f"{KEYCLOAK_URL}/admin/realms/{KEYCLOAK_REALM}"
+    async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
+        r = await client.put(
+            f"{base}/users/{user.user_id}/reset-password",
+            headers=headers,
+            json={"type": "password", "value": payload.new_password, "temporary": False},
+        )
+        if r.status_code not in (200, 204):
+            logger.error("KC reset-password failed: %s %s", r.status_code, r.text[:200])
+            raise HTTPException(status_code=502, detail="No se pudo cambiar la contraseña en Keycloak")
+
+    from app.services.audit import audit
+    audit(user.user_id, user.role, "IAM", "password_changed",
+          f"El usuario '{u.username}' cambió su propia contraseña.")
+    logger.info("Contraseña cambiada por el propio usuario %s…", user.user_id[:8])
+    return {"message": "Contraseña actualizada correctamente."}
+
+
 @router.get("/search", response_model=List[UserResponse])
 def search_users(
     q:     str          = "",
@@ -353,6 +452,9 @@ async def create_user(
     db.commit()
     db.refresh(u)
     logger.info("Usuario creado en KC+local: %s (%s) por %s…", payload.username, payload.role, user.user_id[:8])
+    from app.services.audit import audit
+    audit(user.user_id, user.role, "IAM", "user_created",
+          f"Usuario '{payload.username}' ({payload.email}) creado con rol {payload.role}.")
     return _user_to_response(u, db)
 
 
@@ -380,4 +482,7 @@ async def change_user_role(
     db.commit()
     db.refresh(u)
     logger.info("Rol cambiado: user=%s… nuevo=%s por %s…", user_id[:8], payload.role, user.user_id[:8])
+    from app.services.audit import audit
+    audit(user.user_id, user.role, "IAM", "role_changed",
+          f"Rol de '{u.username or user_id[:8]}' cambiado a {payload.role}.", level="WARNING")
     return _user_to_response(u, db)

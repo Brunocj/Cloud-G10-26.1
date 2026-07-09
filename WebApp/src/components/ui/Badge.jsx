@@ -6,6 +6,7 @@ export const Badge = ({ status }) => {
         DRAFT:            [T.textMuted, T.surfaceElevated],
         PROVISIONING:     ["#1976d2",   "#e3f2fd"],
         PENDING_APPROVAL: [T.yellow,    T.yellowLight],
+        REJECTED:         ["#e65100",   "#fff3e0"],
         FAILED:           [T.red,       T.redLight],
         TERMINATED:       ["#616161",   "#eeeeee"],
     };
@@ -15,6 +16,7 @@ export const Badge = ({ status }) => {
         DRAFT:            "BORRADOR",
         PROVISIONING:     "PROVISIONANDO",
         PENDING_APPROVAL: "PENDIENTE",
+        REJECTED:         "RECHAZADO",
         FAILED:           "FALLIDO",
         TERMINATED:       "TERMINADO",
     };
