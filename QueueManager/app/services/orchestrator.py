@@ -409,6 +409,8 @@ class WorkflowOrchestrator:
             "slice_id":             request.slice_id,
             "request_id":           request.request_id,
             "availability_zone_id": az_id,
+            "mode":                 getattr(request, "mode", "full"),
+            "unplugs":              getattr(request, "unplugs", []),
             "vms":   [vm.model_dump()   for vm   in request.vms],
         }
         logger.debug("[SAGA][%s] → %s", request.slice_id, settings.SUBJECT_COMPUTE_DESTROY)
@@ -426,6 +428,7 @@ class WorkflowOrchestrator:
             "slice_id":             request.slice_id,
             "request_id":           request.request_id,
             "availability_zone_id": az_id,
+            "mode":                 getattr(request, "mode", "full"),
             "links": [link.model_dump() for link in request.links],
             "vms":   [vm.model_dump()   for vm   in request.vms],
         }

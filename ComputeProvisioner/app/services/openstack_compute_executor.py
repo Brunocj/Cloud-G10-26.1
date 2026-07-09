@@ -255,6 +255,31 @@ class OpenStackComputeExecutor:
                 error=str(exc)
             )
 
+    async def detach_interface(self, conn, unplug: dict, slice_id: str) -> None:
+        """
+        Modo Edición eliminación (REQ-US-14): desconecta en caliente el puerto
+        de un enlace eliminado de una instancia Nova sobreviviente. El puerto se
+        localiza por nombre (port-link-{vlan}-{vm_id}); Neutron lo detach-ea y
+        luego se elimina. Best-effort.
+        """
+        vm_id      = unplug.get("vm_id")
+        vlan_id    = unplug.get("vlan_id")
+        instance_id = unplug.get("provider_instance_id")
+        port_name  = f"port-link-{vlan_id}-{vm_id}"
+        try:
+            port = await asyncio.to_thread(conn.network.find_port, port_name)
+            if not port:
+                logger.info(f"[OpenStack] detach: puerto {port_name} no existe (ya limpio)")
+                return
+            if instance_id:
+                try:
+                    await asyncio.to_thread(conn.compute.delete_server_interface, port.id, instance_id)
+                    logger.info(f"[OpenStack] ✂ Interface-detach: VM {vm_id} ⊘ puerto {port.id}")
+                except Exception as e:
+                    logger.warning(f"[OpenStack] detach del puerto {port.id} en {instance_id} falló: {e}")
+        except Exception as exc:
+            logger.warning(f"[OpenStack] detach_interface error para VM {vm_id}: {exc}")
+
     async def destroy_vm(self, conn, vm_record: dict, slice_id: str) -> Optional[str]:
         """Destruye una VM individual en OpenStack."""
         vm_id = vm_record.get("vm_id")

@@ -207,12 +207,19 @@ class Provisioner:
                 status=DeployStatus.SUCCESS,
             )
 
+        unplugs = getattr(request, "unplugs", []) or []
+        is_shrink = getattr(request, "mode", "full") == "shrink"
+
         if request.availability_zone_id == 2:
             # Estrategia: OpenStack Nova API
             logger.info(f"[CP] Strategy: OpenStack (slice_id={request.slice_id})")
             try:
                 conn = await asyncio.to_thread(get_connection)
                 os_executor = OpenStackComputeExecutor()
+                # Shrink: primero desconectar interfaces de las VMs sobrevivientes
+                if is_shrink and unplugs:
+                    for up in unplugs:
+                        await os_executor.detach_interface(conn, up, request.slice_id)
                 tasks = [os_executor.destroy_vm(conn, record, request.slice_id) for record in vm_records]
                 errors = await asyncio.gather(*tasks)
             except Exception as e:
@@ -221,6 +228,13 @@ class Provisioner:
         else:
             # Estrategia: Linux Cluster (SSH/QEMU)
             logger.info(f"[CP] Strategy: Linux Cluster (slice_id={request.slice_id})")
+            # Shrink: hot-unplug de las NICs en las VMs sobrevivientes
+            if is_shrink and unplugs:
+                for up in unplugs:
+                    try:
+                        await asyncio.to_thread(self._unplug_sync, up, request.slice_id)
+                    except Exception as exc:
+                        logger.error(f"[CP] Unplug falló para VM {up.get('vm_id')}: {exc}")
             tasks = [asyncio.to_thread(self._destroy_vm_sync, record, request.slice_id) for record in vm_records]
             errors = await asyncio.gather(*tasks)
 
@@ -239,6 +253,16 @@ class Provisioner:
             request_id=request.request_id,
             status=DeployStatus.SUCCESS,
         )
+
+    def _unplug_sync(self, up: dict, slice_id: str) -> None:
+        """Hot-unplug de una NIC en una VM sobreviviente (Linux Cluster)."""
+        vm_id     = up.get("vm_id")
+        tap_name  = up.get("tap_name")
+        if not vm_id or not tap_name:
+            return
+        with SSHClient(up.get("worker_ip"), up.get("ssh_user"),
+                       up.get("ssh_private_key") or "", port=int(up.get("worker_port") or 22)) as ssh:
+            QEMUExecutor(ssh).unplug_nic(vm_id, slice_id, tap_name)
 
     def _destroy_vm_sync(self, record: dict, slice_id: str) -> Optional[str]:
         vm_id      = record["vm_id"]

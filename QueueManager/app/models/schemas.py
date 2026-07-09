@@ -134,8 +134,11 @@ class DestroySliceRequest(BaseModel):
     slice_id:             str = Field(...)
     request_id:           str = Field(...)
     availability_zone_id: int = Field(default=1, description="1=Linux Cluster, 2=OpenStack")
+    mode:       str = Field(default="full", description="full | shrink (eliminación parcial, REQ-US-14)")
     vms:        List[VMSpec]      = Field(default_factory=list)
     links:      List[NetworkLink] = Field(default_factory=list)
+    # Shrink: NICs a desconectar en caliente de VMs sobrevivientes
+    unplugs:    List[dict]        = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

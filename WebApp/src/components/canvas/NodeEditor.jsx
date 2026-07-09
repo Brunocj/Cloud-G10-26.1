@@ -23,7 +23,7 @@ const Tab = ({ label, icon: Icon, active, onClick }) => (
     </button>
 );
 
-export const NodeEditor = ({ node, availableImages, sliceStatus, sliceId, zoneId, onSave, onDelete, onClose, onOpenConsole, apiFetch }) => {
+export const NodeEditor = ({ node, availableImages, sliceStatus, editMode = false, sliceId, zoneId, onSave, onDelete, onClose, onOpenConsole, apiFetch }) => {
     const defaultImg = availableImages?.[0];
 
     const initForm = (n) => ({
@@ -39,7 +39,13 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, sliceId, zoneId
     const [f, setF]                 = useState(() => initForm(node));
     const [availableIps, setIps]    = useState([]);
     const u = (k, v) => setF(p => ({ ...p, [k]: v }));
-    const isReadOnly = sliceStatus && sliceStatus !== "DRAFT";
+
+    // Una VM está "desplegada" si trae campos que solo el servidor inyecta.
+    // En Modo Edición, las VMs NUEVAS (aún no desplegadas) son totalmente
+    // editables; las ya desplegadas permanecen de solo lectura (REQ-US-14).
+    const isDeployed = !!(node.worker_ip || node.vnc_port || node.provider_instance_id || node.vnc_url);
+    const isNewInEdit = editMode && !isDeployed;
+    const isReadOnly = sliceStatus && sliceStatus !== "DRAFT" && !isNewInEdit;
     const selectedImage = availableImages?.find(i => i.id === f.image_id);
     const zoneIdNum = zoneId ? Number(zoneId) : null;
 
@@ -206,6 +212,12 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, sliceId, zoneId
                                     </div>
                                 ))}
                             </div>
+                            {isDeployed && editMode && (
+                                <div style={{ fontSize: 9, color: T.textFaint, marginTop: 7, lineHeight: 1.5, display: "flex", gap: 5 }}>
+                                    <Info size={10} style={{ flexShrink: 0, marginTop: 1 }} />
+                                    Los recursos de una VM ya desplegada no se pueden redimensionar en caliente. Para cambiarlos, destruye y vuelve a desplegar el slice.
+                                </div>
+                            )}
                         </div>
                         <div style={{ height: 2 }} />
                     </div>
@@ -365,6 +377,14 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, sliceId, zoneId
                             display: "flex", alignItems: "center", justifyContent: "center", gap: 6 })}>
                             <BarChart2 size={14} /> Ver Telemetría
                         </button>
+                        {/* En Modo Edición: permitir eliminar esta VM ya desplegada (REQ-US-14) */}
+                        {editMode && (
+                            <button onClick={() => { onDelete(node.id); onClose(); }}
+                                style={btnBase({ width: "100%", background: T.redLight, color: T.red, border: `1px solid ${T.red}44`, boxShadow: "none",
+                                    display: "flex", alignItems: "center", justifyContent: "center", gap: 6 })}>
+                                <Trash2 size={14} /> Eliminar del Slice
+                            </button>
+                        )}
                     </div>
                 ) : (
                     <div style={{ display: "flex", gap: 8 }}>

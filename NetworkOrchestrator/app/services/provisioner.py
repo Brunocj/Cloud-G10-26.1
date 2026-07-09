@@ -145,9 +145,61 @@ class NetworkProvisioner:
         return ok_eps, fail_eps
 
 
+    # ── SHRINK: limpieza quirúrgica de TAPs (sin tocar el gateway) ─────────────
+
+    def _destroy_shrink(self, request: DestroyNetworkRequest) -> DestroyNetworkResponse:
+        logger.info(f"[slice={request.slice_id}] SHRINK de red: limpiando TAPs de lo eliminado...")
+
+        # TAPs a borrar, agrupados por worker: (ip, port, user, key) → [tap,...]
+        taps_by_worker = defaultdict(lambda: {"creds": None, "taps": set()})
+
+        # TAPs de gestión de las VMs eliminadas
+        for vm in (request.vms or []):
+            key = (vm.worker_ip, getattr(vm, "worker_port", 22))
+            entry = taps_by_worker[key]
+            entry["creds"] = (vm.ssh_user, vm.ssh_private_key, getattr(vm, "worker_port", 22))
+            for t in (vm.tap_interfaces or []):
+                tap = getattr(t, "tap_name", None) or (t.get("tap_name") if isinstance(t, dict) else None)
+                if tap:
+                    entry["taps"].add(tap)
+
+        # TAPs de las VMs eliminadas en los enlaces borrados (la sobreviviente la
+        # limpia el CP vía QMP, así que aquí solo agregamos la del lado eliminado)
+        removed_ips = {vm.worker_ip for vm in (request.vms or [])}
+        for link in (request.links or []):
+            for ip, port, user, key, tap in (
+                (link.vm1_worker_ip, link.vm1_worker_port, link.vm1_ssh_user, link.vm1_ssh_private_key, link.vm1_tap),
+                (link.vm2_worker_ip, link.vm2_worker_port, link.vm2_ssh_user, link.vm2_ssh_private_key, link.vm2_tap),
+            ):
+                k = (ip, port)
+                entry = taps_by_worker[k]
+                if entry["creds"] is None:
+                    entry["creds"] = (user, key, port)
+                entry["taps"].add(tap)
+
+        for (worker_ip, worker_port), entry in taps_by_worker.items():
+            user, key, port = entry["creds"]
+            try:
+                with SSHClient(worker_ip, user, key, port=port or 22) as ssh:
+                    for tap in entry["taps"]:
+                        ssh.exec(f"sudo ovs-vsctl --if-exists del-port br-int {tap}")
+                        ssh.exec(f"sudo ip link del {tap} 2>/dev/null || true")
+                        logger.info(f"[SHRINK][{worker_ip}] TAP {tap} eliminado")
+            except Exception as exc:
+                logger.warning(f"[SHRINK][{worker_ip}] Error limpiando TAPs: {exc}")
+
+        return DestroyNetworkResponse(slice_id=request.slice_id, request_id=request.request_id,
+                                      status=ProvisioningStatus.SUCCESS)
+
     # ── DESTROY (Completamente Real y sin Zombies) ─────────────────────────────────────────
 
     def destroy(self, request: DestroyNetworkRequest) -> DestroyNetworkResponse:
+        # ── SHRINK (Modo Edición): borrar SOLO los TAPs de lo eliminado, sin
+        # tocar el gateway/DHCP/NAT (compartido por slice+worker con las VMs
+        # sobrevivientes). Las NICs de las sobrevivientes las quita el CP (QMP). ──
+        if getattr(request, "mode", "full") == "shrink":
+            return self._destroy_shrink(request)
+
         logger.info(f"[slice={request.slice_id}] Iniciando destrucción REAL de red...")
 
         endpoints_by_worker = defaultdict(list)

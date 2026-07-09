@@ -283,7 +283,16 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
             return;
         }
         if (e.dataTransfer.getData("nodeType")) {
-            setNodes(prev => [...prev, mkNode(world.x, world.y, undefined, imageList[0])]);
+            setNodes(prev => {
+                // Etiqueta única: continúa la numeración VM-N por encima de las
+                // que ya existen en el lienzo (evita nombres repetidos al editar).
+                let max = 0;
+                for (const n of prev) {
+                    const m = /^VM-(\d+)$/.exec(n.label || "");
+                    if (m) max = Math.max(max, Number(m[1]));
+                }
+                return [...prev, mkNode(world.x, world.y, `VM-${max + 1}`, imageList[0])];
+            });
         }
     };
 
@@ -672,6 +681,7 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                         node={editingNode}
                         availableImages={availableImages}
                         sliceStatus={activeSlice ? activeSlice.status : "DRAFT"}
+                        editMode={editMode}
                         sliceId={activeSlice ? activeSlice.id : null}
                         zoneId={effectiveZoneId}
                         apiFetch={apiFetch}

@@ -406,11 +406,62 @@ class OpenStackNetworkExecutor:
 
     async def destroy(self, request: DestroyNetworkRequest) -> DestroyNetworkResponse:
         slice_id = request.slice_id
-        logger.info(f"[OpenStack] Iniciando destrucción de red para slice {slice_id}")
-        
+        is_shrink = getattr(request, "mode", "full") == "shrink"
+        logger.info(f"[OpenStack] Iniciando {'SHRINK' if is_shrink else 'destrucción'} de red para slice {slice_id}")
+
+        # ── SHRINK: solo limpiar las redes de enlace eliminadas y los puertos
+        # de las VMs borradas. NO tocar net-slice / router / SGs (siguen vivos). ──
+        if is_shrink:
+            try:
+                conn = await asyncio.to_thread(get_connection)
+                # 1. Redes de enlace eliminadas (net-link-{vlan}) + sus puertos/subnets
+                for link in (request.links or []):
+                    vlan_id = link.vlan_id
+                    net = await asyncio.to_thread(conn.network.find_network, f"net-link-{vlan_id}")
+                    if not net:
+                        continue
+                    for port in list(await asyncio.to_thread(conn.network.ports, network_id=net.id)):
+                        try:
+                            await asyncio.to_thread(conn.network.delete_port, port.id)
+                        except Exception as e:
+                            logger.warning(f"[OpenStack][SHRINK] puerto de enlace {port.id}: {e}")
+                    sub = await asyncio.to_thread(conn.network.find_subnet, f"subnet-link-{vlan_id}")
+                    if sub:
+                        try:
+                            await asyncio.to_thread(conn.network.delete_subnet, sub.id)
+                        except Exception as e:
+                            logger.warning(f"[OpenStack][SHRINK] subnet de enlace {sub.id}: {e}")
+                    try:
+                        await asyncio.to_thread(conn.network.delete_network, net.id)
+                        logger.info(f"[OpenStack][SHRINK] red de enlace net-link-{vlan_id} eliminada")
+                    except Exception as e:
+                        logger.warning(f"[OpenStack][SHRINK] red de enlace {net.id}: {e}")
+                # 2. Puertos de gestión + floating IPs de las VMs eliminadas
+                for vm in (request.vms or []):
+                    pname = f"port-{slice_id}-{vm.vm_id}"
+                    port = await asyncio.to_thread(conn.network.find_port, pname)
+                    if not port:
+                        continue
+                    for fip in list(await asyncio.to_thread(conn.network.ips, port_id=port.id)):
+                        try:
+                            await asyncio.to_thread(conn.network.delete_ip, fip.id)
+                        except Exception:
+                            pass
+                    # el puerto lo libera Nova al borrar la instancia; intento best-effort
+                    try:
+                        await asyncio.to_thread(conn.network.delete_port, port.id)
+                    except Exception as e:
+                        logger.warning(f"[OpenStack][SHRINK] puerto de gestión {pname}: {e}")
+                return DestroyNetworkResponse(slice_id=slice_id, request_id=request.request_id,
+                                              status=ProvisioningStatus.SUCCESS)
+            except Exception as exc:
+                logger.error(f"[OpenStack][SHRINK] Error: {exc}", exc_info=True)
+                return DestroyNetworkResponse(slice_id=slice_id, request_id=request.request_id,
+                                              status=ProvisioningStatus.ERROR, error=str(exc))
+
         try:
             conn = await asyncio.to_thread(get_connection)
-            
+
             network_name = f"net-slice-{slice_id}"
             subnet_name = f"subnet-slice-{slice_id}"
             secgroup_name = f"secgroup-slice-{slice_id}"

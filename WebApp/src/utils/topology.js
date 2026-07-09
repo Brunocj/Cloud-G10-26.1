@@ -2,13 +2,22 @@
 
 let _nid = 200;
 
-export const mkNode = (x, y, label, defaultImg) => ({
-    id: `n${_nid++}`, x, y,
-    label: label || `VM-${_nid - 200}`,
-    vcores: 1, ram: 256, disk: 1,
-    image:    defaultImg?.name || "Cirros",
-    image_id: defaultImg?.id   || null,
-});
+// Base temporal única por carga de página: garantiza que los IDs de nodos NUEVOS
+// nunca colisionen con los de un slice ya guardado (que también usan n200, n201…)
+// al editar en caliente (Modo Edición) ni entre recargas del navegador.
+const _idBase = Date.now().toString(36);
+let _nodeSeq = 0;
+
+export const mkNode = (x, y, label, defaultImg) => {
+    _nodeSeq++;
+    return {
+        id: `n${_idBase}${_nodeSeq}`, x, y,
+        label: label || `VM-${_nodeSeq}`,
+        vcores: 1, ram: 256, disk: 1,
+        image:    defaultImg?.name || "Cirros",
+        image_id: defaultImg?.id   || null,
+    };
+};
 
 // ── Linear ────────────────────────────────────────────────────────────────────
 export const buildLinear = (count, cx, cy) => {

@@ -432,6 +432,117 @@ async def request_destroy(
     raise HTTPException(status_code=500, detail="Error enviando orden a NATS")
 
 
+# ── Modo Edición: ELIMINACIÓN incremental (shrink) ────────────────────────────
+
+async def _shrink_slice(db, user, db_slice, zone_id, s_json,
+                        removed_nodes, removed_edges, old_edges,
+                        new_nodes_all, new_edges_all):
+    """
+    Destruye las VMs y enlaces eliminados de un slice ACTIVO sin tocar el resto:
+      · VMs eliminadas → destroy de la instancia (Nova) / kill del proceso (QEMU).
+      · Enlaces eliminados / incidentes → limpieza de su red + HOT-UNPLUG de la NIC
+        en las VMs sobrevivientes (QMP device_del en Linux / detach en OpenStack).
+    """
+    from app.services.slice_destroyer import _read_ssh_key
+
+    slice_id = db_slice.id
+    deployed_vms   = s_json.get("deployed_vms", [])
+    deployed_links = s_json.get("deployed_links", [])
+
+    any_worker = db.query(Worker).first()
+    fresh_key  = _read_ssh_key(any_worker.ssh_key_path) if any_worker else ""
+
+    # Pares (from,to) de los enlaces eliminados explícitamente
+    removed_edge_pairs = set()
+    for e in old_edges:
+        if e.get("id") in removed_edges:
+            a = e.get("from", e.get("source")); b = e.get("to", e.get("target"))
+            removed_edge_pairs.add(frozenset((a, b)))
+
+    # Enlaces desplegados a limpiar + unplugs de sobrevivientes
+    links_to_remove, unplugs, removed_link_ids = [], [], []
+    for dl in deployed_links:
+        pair = frozenset((dl.get("vm1_id"), dl.get("vm2_id")))
+        touches_removed = bool(pair & removed_nodes)
+        is_removed_edge = pair in removed_edge_pairs
+        if not (touches_removed or is_removed_edge):
+            continue
+        dlc = dict(dl)
+        if fresh_key:
+            dlc["vm1_ssh_private_key"] = fresh_key
+            dlc["vm2_ssh_private_key"] = fresh_key
+        links_to_remove.append(dlc)
+        removed_link_ids.append(dl.get("connection_id"))
+        # Extremos sobrevivientes → hot-unplug de su NIC en este enlace
+        for side in ("vm1", "vm2"):
+            vid = dl.get(f"{side}_id")
+            if vid in removed_nodes:
+                continue
+            dv = next((d for d in deployed_vms if d.get("vm_id") == vid), {})
+            unplugs.append({
+                "vm_id":                vid,
+                "tap_name":             dl.get(f"{side}_tap"),
+                "vlan_id":              dl.get("vlan_id"),
+                "worker_ip":            dv.get("worker_ip"),
+                "worker_port":          dv.get("worker_port", 22),
+                "ssh_user":             dv.get("ssh_user"),
+                "ssh_private_key":      fresh_key,
+                "provider_instance_id": dv.get("provider_instance_id"),
+            })
+
+    # VMs a destruir (registros desplegados con su clave SSH)
+    vms_to_destroy = []
+    for dv in deployed_vms:
+        if dv.get("vm_id") in removed_nodes:
+            d = dict(dv)
+            d["ssh_private_key"] = fresh_key
+            vms_to_destroy.append(d)
+
+    # Publicar la orden shrink (reusa slice.destroy con mode=shrink)
+    import uuid as _uuid
+    payload = {
+        "slice_id":             str(slice_id),
+        "request_id":           f"req-shrink-{_uuid.uuid4().hex[:8]}",
+        "availability_zone_id": zone_id,
+        "mode":                 "shrink",
+        "vms":                  vms_to_destroy,
+        "links":                links_to_remove,
+        "unplugs":              unplugs,
+    }
+
+    s_json["pending_shrink"] = {
+        "removed_vm_names": list(removed_nodes),
+        "removed_edge_ids": list(removed_edges),
+        "removed_link_ids": removed_link_ids,
+        "new_nodes":        new_nodes_all,
+        "new_edges":        new_edges_all,
+        "external_ips":     [d.get("external_ip") for d in vms_to_destroy if d.get("external_ip")],
+    }
+    db_slice.slice_json = dict(s_json)
+    db_slice.status = "PROVISIONING"
+    db.commit()
+
+    audit(user.user_id, user.role, "SliceManager", "slice_shrink_requested",
+          f"Slice '{db_slice.name}': −{len(removed_nodes)} VM(s), −{len(removed_edges)} enlace(s).",
+          slice_id=slice_id, project_id=db_slice.project_id)
+
+    published = await nats_producer.publish_destroy(payload)
+    if not published:
+        # Revertir el estado si NATS no aceptó la orden
+        s_json.pop("pending_shrink", None)
+        db_slice.slice_json = dict(s_json)
+        db_slice.status = "ACTIVE"
+        db.commit()
+        raise HTTPException(status_code=500, detail="Error enviando la orden de eliminación a NATS")
+
+    logger.info("[MODIFY] ✂️  Shrink encolado slice=%s: −%d VMs, −%d enlaces",
+                slice_id, len(vms_to_destroy), len(links_to_remove))
+    return {
+        "status": "ACCEPTED",
+        "message": f"Eliminando {len(vms_to_destroy)} VM(s) y {len(links_to_remove)} enlace(s)…",
+    }
+
+
 # ── Modo Edición Post-Despliegue (REQ-US-14): aprovisionamiento incremental ───
 
 @router.post("/{slice_id}/modify", status_code=202)
@@ -459,39 +570,47 @@ async def modify_active_slice(
     s_json = db_slice.slice_json or {}
     if isinstance(s_json, str):
         s_json = json.loads(s_json)
-    if s_json.get("pending_extension"):
+    if s_json.get("pending_extension") or s_json.get("pending_shrink"):
         raise HTTPException(status_code=409, detail="Ya hay una modificación en curso para este slice.")
 
     old_nodes = {n.get("id"): n for n in s_json.get("nodes", [])}
-    old_edge_ids = {e.get("id") for e in s_json.get("edges", [])}
+    old_edges = s_json.get("edges", [])
+    old_edge_ids = {e.get("id") for e in old_edges}
 
     new_nodes_all = request.slice_json.get("nodes", [])
     new_edges_all = request.slice_json.get("edges", [])
     incoming_node_ids = {n.get("id") for n in new_nodes_all}
     incoming_edge_ids = {e.get("id") for e in new_edges_all}
 
-    # ── Rechazar eliminaciones (solo se agregan recursos) ────────────────────
     removed_nodes = set(old_nodes) - incoming_node_ids
     removed_edges = old_edge_ids - incoming_edge_ids
-    if removed_nodes or removed_edges:
-        raise HTTPException(
-            status_code=400,
-            detail="El Modo Edición solo permite AGREGAR nodos y enlaces. "
-                   "Para quitar recursos, destruye y redespliega el slice.",
-        )
-
     added_nodes = [n for n in new_nodes_all if n.get("id") not in old_nodes]
     added_edges = [e for e in new_edges_all if e.get("id") not in old_edge_ids]
-    if not added_nodes and not added_edges:
+
+    zone_id = db_slice.availability_zone_id or 1
+
+    # No mezclar altas y bajas en una sola aplicación (dos sagas distintas)
+    if (added_nodes or added_edges) and (removed_nodes or removed_edges):
+        raise HTTPException(
+            status_code=400,
+            detail="Aplica los cambios por separado: primero agrega, luego elimina (o al revés).",
+        )
+
+    if not added_nodes and not added_edges and not removed_nodes and not removed_edges:
         raise HTTPException(status_code=400, detail="No hay cambios que aplicar.")
+
+    # ── ELIMINACIÓN (shrink): destruir VMs/enlaces sin tocar el resto ────────
+    if removed_nodes or removed_edges:
+        return await _shrink_slice(
+            db, user, db_slice, zone_id, s_json,
+            removed_nodes, removed_edges, old_edges, new_nodes_all, new_edges_all,
+        )
 
     # Todo enlace nuevo debe conectar nodos válidos
     for e in added_edges:
         a, b = e.get("from", e.get("source")), e.get("to", e.get("target"))
         if a not in incoming_node_ids or b not in incoming_node_ids:
             raise HTTPException(status_code=400, detail=f"El enlace {e.get('id')} referencia nodos inexistentes.")
-
-    zone_id = db_slice.availability_zone_id or 1
 
     # ── Validar imágenes de los nodos nuevos vs. la AZ del slice ─────────────
     for n in added_nodes:

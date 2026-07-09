@@ -76,27 +76,35 @@ async def handle_destroy(msg: Msg) -> None:
         logger.info(f"[destroy] Mensaje recibido: slice={payload.get('slice_id')} reply={msg.reply}")
 
         request = DestroyRequest(**payload)
+        is_shrink = getattr(request, "mode", "full") == "shrink"
 
         # 1. Intentamos sacar las VMs del payload directamente (La hoja de ruta del SliceManager)
         vms_to_destroy = payload.get("vms", [])
-        
-        # 2. Si el payload viene vacío (por retrocompatibilidad), buscamos en KV
-        if not vms_to_destroy:
-            vm_records = await queue_client.get_slice_vms(request.slice_id) or []
-            logger.info(f"[destroy] VMs en KV (Fallback): {len(vm_records)}")
-            vms_to_destroy = vm_records
-        else:
-            logger.info(f"[destroy] VMs leídas desde el request JSON: {len(vms_to_destroy)}")
 
-        # 3. Validamos si hay algo que borrar
-        if not vms_to_destroy:
-             logger.warning("No hay VMs especificadas en el request ni en KV para borrar.")
-             # Continuamos para que el provisioner responda SUCCESS y no tranque el pipeline
+        if is_shrink:
+            # Shrink: SOLO se borran las VMs explícitas del request. NUNCA se cae
+            # al KV (eso destruiría todo el slice), y pueden ser 0 (solo unplug).
+            logger.info(f"[destroy] MODO SHRINK: {len(vms_to_destroy)} VM(s) a borrar, "
+                        f"{len(request.unplugs)} unplug(s)")
+        else:
+            # 2. Si el payload viene vacío (por retrocompatibilidad), buscamos en KV
+            if not vms_to_destroy:
+                vm_records = await queue_client.get_slice_vms(request.slice_id) or []
+                logger.info(f"[destroy] VMs en KV (Fallback): {len(vm_records)}")
+                vms_to_destroy = vm_records
+            else:
+                logger.info(f"[destroy] VMs leídas desde el request JSON: {len(vms_to_destroy)}")
+
+            # 3. Validamos si hay algo que borrar
+            if not vms_to_destroy:
+                logger.warning("No hay VMs especificadas en el request ni en KV para borrar.")
 
         response = await _provisioner.destroy(request, vms_to_destroy)
         logger.info(f"[destroy] Provisioner terminó: status={response.status}")
 
-        await queue_client.delete_slice_vms(request.slice_id)
+        # En shrink NO se borra el estado KV del slice (siguen vivas las demás VMs)
+        if not is_shrink:
+            await queue_client.delete_slice_vms(request.slice_id)
 
         if msg.reply:
             await queue_client.reply(msg.reply, response.model_dump())

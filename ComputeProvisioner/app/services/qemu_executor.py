@@ -297,6 +297,43 @@ chpasswd:
             )
         logger.info("Hot-plug OK: VM %s ← NIC %s (MAC %s) vía QMP", vm_id, tap_name, mac)
 
+    def unplug_nic(self, vm_id: str, slice_id: str, tap_name: str) -> None:
+        """
+        Desconecta en caliente la NIC asociada a `tap_name` de una VM QEMU en
+        ejecución (inverso de hotplug_nic — Modo Edición eliminación, REQ-US-14):
+        QMP device_del + netdev_del, y luego elimina el TAP del kernel/OVS.
+        Best-effort: no lanza si la VM/tap ya no existen.
+        """
+        qmp_path  = f"/tmp/qmp-{vm_id}-{slice_id}.sock"
+        netdev_id = f"hp-{tap_name[-12:]}"
+        dev_id    = f"nic-{tap_name[-12:]}"
+
+        qmp_script = (
+            "import socket,json,sys\n"
+            "try:\n"
+            "    s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)\n"
+            f"    s.connect({qmp_path!r})\n"
+            "except Exception as e:\n"
+            "    print('NOSOCK:'+str(e)); sys.exit(0)\n"
+            "f=s.makefile('rw'); f.readline()\n"
+            "def cmd(c):\n"
+            "    f.write(json.dumps(c)+'\\n'); f.flush()\n"
+            "    while True:\n"
+            "        r=json.loads(f.readline())\n"
+            "        if 'return' in r or 'error' in r: return r\n"
+            "cmd({'execute':'qmp_capabilities'})\n"
+            f"cmd({{'execute':'device_del','arguments':{{'id':{dev_id!r}}}}})\n"
+            "import time; time.sleep(1)\n"
+            f"cmd({{'execute':'netdev_del','arguments':{{'id':{netdev_id!r}}}}})\n"
+            "print('UNPLUG_OK')\n"
+        )
+        script_b64 = __import__("base64").b64encode(qmp_script.encode()).decode()
+        self._ssh.exec(f"echo {script_b64} | base64 -d | sudo python3 -")
+        # Limpiar el TAP del OVS y del kernel (ya sin peer)
+        self._ssh.exec(f"sudo ovs-vsctl --if-exists del-port br-int {tap_name}")
+        self._ssh.exec(f"sudo ip link del {tap_name} 2>/dev/null || true")
+        logger.info("Unplug OK: VM %s ✂ NIC %s", vm_id, tap_name)
+
     def delete_seed_iso(self, vm_id: str) -> None:
         """Elimina el ISO de cloud-init generado al arrancar la VM."""
         iso_path = f"/vms/{vm_id}_seed.iso"

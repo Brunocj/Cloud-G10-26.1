@@ -80,6 +80,7 @@ class DestroyNetworkRequest(BaseModel):
     slice_id:             str
     request_id:           str
     availability_zone_id: int = Field(default=1)
+    mode:                 str = Field(default="full", description="full | shrink (eliminación parcial)")
     links:                Optional[List[NetworkLink]] = None
     vms:                  Optional[List[VMNetworkSpec]] = None
     # Para OpenStack destroy: UUIDs de puertos Neutron a borrar

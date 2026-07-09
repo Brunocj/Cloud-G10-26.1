@@ -33,7 +33,7 @@ export const CanvasView = ({
     imageList,
     // CRUD actions
     destroySlice, forceDestroySlice, deployDraft, deployFromDesigner, bulkDeploy, saveDraft,
-    doDeployDraft, updateDraft, publishTemplate, modifySlice, fetchSlices,
+    doDeployDraft, updateDraft, publishTemplate, modifySlice, fetchSlices, editingSliceIdRef,
     // Import / Export
     importarTopologia, exportarTopologia,
     // Modal & UI state
@@ -54,14 +54,21 @@ export const CanvasView = ({
     const [applying, setApplying] = useState(false);
     useEffect(() => { setEditMode(false); }, [activeId]);
 
+    // Mientras se edita, congelar el polling para este slice (evita el revert)
+    useEffect(() => {
+        if (editingSliceIdRef) editingSliceIdRef.current = editMode ? activeSlice?.id : null;
+        return () => { if (editingSliceIdRef) editingSliceIdRef.current = null; };
+    }, [editMode, activeSlice?.id]);
+
     const applyChanges = async () => {
         setApplying(true);
         const ok = await modifySlice(activeSlice.id);
         setApplying(false);
-        if (ok) setEditMode(false);
+        if (ok) { if (editingSliceIdRef) editingSliceIdRef.current = null; setEditMode(false); }
     };
 
     const cancelEdit = () => {
+        if (editingSliceIdRef) editingSliceIdRef.current = null;
         setEditMode(false);
         fetchSlices?.();   // descarta los cambios locales recargando del servidor
     };

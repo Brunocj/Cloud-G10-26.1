@@ -85,6 +85,55 @@ async def nats_result_listener():
                     logger.info("="*70)
                     return
 
+                # ── Resultado de una ELIMINACIÓN incremental (shrink) ────────
+                pending_shr = _sj.get("pending_shrink")
+                if pending_shr:
+                    from app.services.notification_hub import notification_hub
+                    if status.lower() == "success":
+                        removed_names = set(pending_shr.get("removed_vm_names", []))
+                        removed_lids  = set(pending_shr.get("removed_link_ids", []))
+                        # Liberar IPs y borrar filas Vm de las VMs eliminadas
+                        for ip in pending_shr.get("external_ips", []):
+                            rec = db.query(IpPool).filter(IpPool.ip_address == ip).first()
+                            if rec:
+                                rec.is_used = 0; rec.vm_id = None
+                        if removed_names:
+                            db.query(Vm).filter(Vm.slice_id == slice_id, Vm.name.in_(removed_names)).delete(synchronize_session=False)
+                        # Podar deployed_vms/deployed_links y aplicar la topología nueva
+                        _sj["deployed_vms"] = [d for d in _sj.get("deployed_vms", []) if d.get("vm_id") not in removed_names]
+                        _sj["deployed_links"] = [d for d in _sj.get("deployed_links", []) if d.get("connection_id") not in removed_lids]
+                        _sj["nodes"] = pending_shr.get("new_nodes", _sj.get("nodes", []))
+                        _sj["edges"] = pending_shr.get("new_edges", _sj.get("edges", []))
+                        _sj.pop("pending_shrink", None)
+                        db_slice.slice_json = dict(_sj)
+                        db_slice.status = "ACTIVE"
+                        db.commit()
+                        logger.info("[LISTENER] ✂️  Shrink del slice %s aplicado — de vuelta a ACTIVE", slice_id)
+                        from app.services.audit import audit
+                        audit("system", "system", "Orchestrator", "slice_shrunk",
+                              f"Slice '{db_slice.name}': {len(removed_names)} VM(s) eliminadas.",
+                              slice_id=slice_id, project_id=db_slice.project_id)
+                        await notification_hub.notify_user(db_slice.creator_id, {
+                            "type": "slice_shrunk", "slice_id": slice_id,
+                            "title": "Cambios aplicados",
+                            "message": f"Se eliminaron los recursos de \"{db_slice.name}\".",
+                        })
+                    else:
+                        # Falló la eliminación: el slice queda como estaba (VMs vivas)
+                        logger.warning("[LISTENER] ✂️  Shrink del slice %s FALLÓ — sin cambios", slice_id)
+                        _sj.pop("pending_shrink", None)
+                        db_slice.slice_json = dict(_sj)
+                        db_slice.status = "ACTIVE"
+                        db.commit()
+                        await notification_hub.notify_user(db_slice.creator_id, {
+                            "type": "slice_failed", "slice_id": slice_id,
+                            "title": "Eliminación fallida",
+                            "message": f"No se pudieron eliminar los recursos de \"{db_slice.name}\". El slice sigue activo.",
+                        })
+                    db.close()
+                    logger.info("="*70)
+                    return
+
                 # Si ya está en estado terminal (por Rollback o Destroy), IGNORAMOS los success tardíos
                 if db_slice.status in ["TERMINATED", "FAILED"]:
                     logger.info("[LISTENER] ⏭️  Ignorando resultado '%s': slice ya en estado %s",

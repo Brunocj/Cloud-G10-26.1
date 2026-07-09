@@ -96,6 +96,9 @@ class DestroyRequest(BaseModel):
     slice_id:             str = Field(...)
     request_id:           str = Field(...)
     availability_zone_id: int = Field(default=1, description="1=Linux Cluster, 2=OpenStack")
+    mode:                 str = Field(default="full", description="full | shrink (REQ-US-14)")
+    # Shrink: NICs a desconectar en caliente de VMs sobrevivientes
+    unplugs:              List[dict] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

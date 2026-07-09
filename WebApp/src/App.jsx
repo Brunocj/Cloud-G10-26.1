@@ -58,6 +58,9 @@ export default function App() {
     const [activeId,   setActiveId]   = useState(null);
     const activeIdRef = useRef(null);
     useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
+    // ID del slice ACTIVO que se está editando (Modo Edición) — el polling no
+    // debe sobrescribir sus cambios locales del lienzo mientras se edita.
+    const editingSliceIdRef = useRef(null);
 
     // Sync activeId from URL on initial load / page refresh
     useEffect(() => {
@@ -175,7 +178,11 @@ export default function App() {
             if (res.ok) {
                 const fresh = await res.json();
                 setSlices(prev => fresh.map(srv => {
-                    if (srv.id === activeIdRef.current && srv.status === "DRAFT") {
+                    // Preservar el estado local mientras se edita: borradores
+                    // activos o el slice en Modo Edición (evita que el polling
+                    // revierta los nodos/enlaces que el usuario está agregando).
+                    const isEditing = srv.id === editingSliceIdRef.current;
+                    if (srv.id === activeIdRef.current && (srv.status === "DRAFT" || isEditing)) {
                         return prev.find(s => s.id === srv.id) ?? srv;
                     }
                     return srv;
@@ -626,6 +633,7 @@ export default function App() {
         updateDraft,
         modifySlice,
         fetchSlices,
+        editingSliceIdRef,
         importarTopologia,
         exportarTopologia,
         modal, setModal,
