@@ -1,0 +1,79 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Grafana Alloy — recolector de logs de contenedores Docker → Loki
+// Reemplaza a Promtail (EOL marzo 2026). Lee logs vía el socket de Docker;
+// NO modifica ningún contenedor de la aplicación.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 1) Descubre todos los contenedores del host por el socket de Docker.
+discovery.docker "containers" {
+  host             = "unix:///var/run/docker.sock"
+  refresh_interval = "5s"
+}
+
+// 2) Reetiquetado: construye labels limpias a partir de los metadatos de Docker.
+//    Aquí es donde se logra la separación por instancia que pediste.
+discovery.relabel "containers" {
+  targets = []
+
+  // Nombre del contenedor (Docker antepone "/", lo quitamos).
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+
+  // ID corto del contenedor (identificador único de la instancia).
+  rule {
+    source_labels = ["__meta_docker_container_id"]
+    regex         = "(.{12}).*"
+    target_label  = "container_id"
+  }
+
+  // Nombre del SERVICIO de docker-compose (común a las réplicas del mismo servicio).
+  // Ej.: 2 réplicas de "slice-manager" comparten service="slice-manager".
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+
+  // Número de RÉPLICA de compose (1, 2, ...) → separa instancias del mismo servicio.
+  // Se usa cuando levantas con:  docker compose up --scale slice-manager=2
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_container_number"]
+    target_label  = "instance"
+  }
+
+  // Fallback: si un contenedor NO viene de compose (sin número de réplica),
+  // usamos el nombre del contenedor como "instance" para que igual quede separado.
+  rule {
+    source_labels = ["instance", "__meta_docker_container_name"]
+    separator     = ";"
+    regex         = ";/(.*)"
+    target_label  = "instance"
+  }
+}
+
+// 3) Lee los logs de los contenedores descubiertos.
+loki.source.docker "containers" {
+  host          = "unix:///var/run/docker.sock"
+  targets       = discovery.docker.containers.targets
+  relabel_rules = discovery.relabel.containers.rules
+  labels        = {
+    platform = "docker",
+    host     = constants.hostname,   // identifica el host físico (clave para multi-host)
+  }
+  refresh_interval = "5s"
+  forward_to       = [loki.write.central.receiver]
+}
+
+// 4) Empuja los logs a Loki.
+loki.write "central" {
+  endpoint {
+    // ── SINGLE-HOST (actual): Loki corre en la misma red pucp_cloud_net ──
+    url = "http://loki:3100/loki/api/v1/push"
+
+    // ── MULTI-HOST: en los hosts que NO tienen a Loki, apunta al Loki central,
+    //    y publica el puerto 3100 de Loki en la red interna. Ejemplo:
+    // url = "http://10.20.11.212:3100/loki/api/v1/push"
+  }
+}

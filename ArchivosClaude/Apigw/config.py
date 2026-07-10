@@ -5,9 +5,6 @@ class Settings(BaseSettings):
     # URL interna del Slice Manager (nombre de servicio Docker)
     SLICE_MANAGER_URL: str = "http://slice-manager:8000"
 
-    # URL interna de Loki (nombre de servicio Docker en pucp_cloud_net)
-    LOKI_URL: str = "http://loki:3100"
-
     # Timeout en segundos para el reenvío de requests
     FORWARD_TIMEOUT: float = 30.0
 

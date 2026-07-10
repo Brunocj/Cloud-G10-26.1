@@ -1,0 +1,82 @@
+services:
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - pucp_cloud_net
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+      - "--web.listen-address=:9090"
+      - "--web.enable-lifecycle"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  observability:
+    build: .
+    container_name: observability
+    ports:
+      - "8006:8000"
+    networks:
+      - pucp_cloud_net
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    volumes:
+      - ./config/targets.yml:/app/config/targets.yml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      # Prometheus — dentro de la misma red Docker
+      - PROMETHEUS_URL=http://prometheus:9090
+
+      # MySQL — en el host
+      - DB_HOST=host.docker.internal
+      - DB_USER=mandarina
+      - DB_PASSWORD=sandia
+      - DB_NAME=cloud
+
+      # Sliding window
+      - WINDOW_DAYS=15
+      - OC_UPDATE_INTERVAL=300
+
+      # OC safety factors
+      - K_CPU=1.0
+      - K_RAM=2.0
+      - OC_CPU_DEFAULT=2.0
+      - OC_RAM_DEFAULT=1.54
+      - OC_RAM_MAX=10.0
+      - OC_CPU_MAX=20.0
+
+      # VM activation threshold
+      - VM_ACTIVATION_HOURS=36
+
+      # Dashboard
+      - ENABLE_DASHBOARD=true
+
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  prometheus_data:
+
+networks:
+  pucp_cloud_net:
+    external: true

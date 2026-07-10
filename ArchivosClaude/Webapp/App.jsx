@@ -32,9 +32,6 @@ import { Sidebar } from "./components/sidebar/Sidebar";
 import { mkSlice, refreshMeta } from "./utils/topology";
 import { createApiFetch }       from "./utils/api";
 
-//Logs
-import { LogsView } from "./views/LogsView"; 
-
 // ─── ROOT ─────────────────────────────────────────────────────────────────────
 export default function App() {
 
@@ -609,7 +606,6 @@ export default function App() {
             onInfraManage={() => navigate("/admin/infra-manage")}
             onLoadTemplate={loadTemplate}
             onPublishTemplate={(id) => setModal({ type: "publishTemplate", id })}
-            onLogs={() => navigate("/admin/logs")}
         />
     );
 
@@ -671,14 +667,6 @@ export default function App() {
                           onProfile={() => navigate("/profile")}
                           apiFetch={apiFetch}
                       />
-                    : <Navigate to="/" replace />
-            } />
-
-            {/* Container's log monitor — superAdmin only, full screen */}
-            <Route path="/admin/logs" element={
-                isSuperAdmin
-                    ? <LogsView user={user} onBack={() => navigate("/")}
-                        onProfile={() => navigate("/profile")} apiFetch={apiFetch} />
                     : <Navigate to="/" replace />
             } />
 

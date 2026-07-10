@@ -74,8 +74,61 @@ services:
       timeout: 5s
       retries: 3
 
+  # ───────────────────────────────────────────────────────────────────────────
+  # Loki — almacén e índice de logs. Uso interno (sin puerto al host).
+  # El acceso desde la WebApp pasa por el API Gateway (solo superAdmin).
+  # ───────────────────────────────────────────────────────────────────────────
+  loki:
+    image: grafana/loki:3.3.2
+    container_name: loki
+    networks:
+      - pucp_cloud_net
+    volumes:
+      - ./config/loki-config.yaml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3100/ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    # MULTI-HOST: para que otros hosts empujen a este Loki, publica el puerto:
+    # ports:
+    #   - "3100:3100"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Alloy — recolector. Descubre y lee los logs de TODOS los contenedores del
+  # host vía el socket de Docker. NO toca ni recrea ningún contenedor.
+  # En multi-host, corre UNA instancia de Alloy por host.
+  # ───────────────────────────────────────────────────────────────────────────
+  alloy:
+    image: grafana/alloy:v1.11.0
+    container_name: alloy
+    user: root                         # necesario para leer /var/run/docker.sock
+    networks:
+      - pucp_cloud_net
+    volumes:
+      - ./config/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy_data:/var/lib/alloy/data
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    depends_on:
+      loki:
+        condition: service_healthy
+    restart: unless-stopped
+    # UI de diagnóstico de Alloy (opcional, solo para depurar el pipeline):
+    # ports:
+    #   - "12345:12345"
+
 volumes:
   prometheus_data:
+  loki_data:
+  alloy_data:
 
 networks:
   pucp_cloud_net:
