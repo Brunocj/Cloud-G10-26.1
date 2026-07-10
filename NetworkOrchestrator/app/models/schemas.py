@@ -26,7 +26,8 @@ class SecurityRule(BaseModel):
 class NetworkLink(BaseModel):
     """Representa un 'cable' (Capa 2) entre dos VMs en la infraestructura."""
     connection_id: str = Field(..., description="ID único del enlace en la BD")
-    vlan_id:       int = Field(..., description="VLAN única asignada a este enlace (ej. 100)")
+    vlan_id:       int = Field(..., description="C-VID (tag interno/cliente) del enlace (ej. 100)")
+    s_vlan_id:     int = Field(default=0, description="S-VID (tag externo/servicio) del slice; 0 = sin Q-in-Q")
     
     # Datos del Extremo A (VM 1)
     vm1_id:              str = Field(..., description="ID de la VM 1")

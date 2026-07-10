@@ -1,10 +1,7 @@
 import { useEffect, useState } from "react";
 import { T, btnBase } from "../../theme/tokens";
 import { Badge } from "../ui/Badge";
-import { Trash2, Zap, Clock, AlertTriangle, User, FolderOpen, ExternalLink } from "../ui/Icon";
-
-// REQ-US-15: URL del dashboard nativo de OpenStack (configurable por env)
-const HORIZON_URL = import.meta.env.VITE_HORIZON_URL ?? "http://10.20.12.158/horizon";
+import { Trash2, Zap, Clock, AlertTriangle, User, FolderOpen } from "../ui/Icon";
 
 // ─── TTL restante (REQ-US-09: columna "Tiempo Restante") ─────────────────────
 // date_deployed viene en UTC "YYYY-MM-DD HH:MM:SS"; ttl_hours en horas.
@@ -138,20 +135,6 @@ export const SliceCard = ({ slice, active, onClick, onDestroy, onDeploy, onPubli
                 <AlertTriangle size={12} style={{ flexShrink: 0, marginTop: 1 }} />
                 <span><b>Motivo del rechazo:</b> {slice.review.comment}</span>
             </div>
-        )}
-
-        {/* Ver en Horizon (REQ-US-15) — solo slices de la zona OpenStack */}
-        {slice.availability_zone_id === 2 && ["ACTIVE", "PROVISIONING"].includes(slice.status) && (
-            <a href={HORIZON_URL} target="_blank" rel="noopener noreferrer"
-                onClick={e => e.stopPropagation()}
-                style={{
-                    display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-                    width: "100%", marginTop: 8, padding: "6px 0", fontSize: 11, fontWeight: 700,
-                    color: "#ff8200", background: "#ff820015", border: "1px solid #ff820044",
-                    borderRadius: 8, textDecoration: "none", boxSizing: "border-box",
-                }}>
-                <ExternalLink size={11} /> Ver en Horizon
-            </a>
         )}
 
         {/* Deploy / re-solicitud (borradores y rechazados) */}

@@ -654,7 +654,7 @@ async def modify_active_slice(
         db.flush()
         new_vm_names.append(vm_data.get("id"))
 
-        if ext_ip:
+        if ext_ip and ext_ip != "random":   # "random" se resuelve en placement_worker
             ip_record = db.query(IpPool).filter(IpPool.ip_address == ext_ip).first()
             if not ip_record:
                 db.rollback()

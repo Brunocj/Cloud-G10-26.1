@@ -337,7 +337,7 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, editMode = fals
                                         onChange={e => u("external_ip", e.target.value)}
                                         style={{ ...inp, fontSize: 12, cursor: "pointer" }}>
                                         <option value="">— Sin IP VPN (solo NAT saliente) —</option>
-                                        {zoneIdNum === 2 && <option value="random">— IP aleatoria (asignada automáticamente) —</option>}
+                                        <option value="random">— IP aleatoria (el sistema elige del pool) —</option>
                                         {availableIps.map(ip => <option key={ip} value={ip}>{ip}</option>)}
                                     </select>
                                     {f.external_ip && (

@@ -129,6 +129,28 @@ async def process_placement_worker():
                 db.commit()
                 continue
 
+            # ── 1.5 RESOLUCIÓN DE IPs "random" (agnóstico Linux/OpenStack) ────
+            # Ahora que la zona es conocida, cada VM con external_ip="random"
+            # recibe una IP libre del pool de ESA zona, reservada atómicamente.
+            from app.models import IpPool as _IpPool
+            for vm in vms_de_bd:
+                if vm.external_ip == "random":
+                    libre = db.query(_IpPool).filter(
+                        _IpPool.availability_zone_id == zone_id,
+                        _IpPool.is_used == 0,
+                    ).first()
+                    if not libre:
+                        logger.error("[PLACEMENT] ❌ Sin IPs libres en el pool de la zona %s para 'random'", zone_id)
+                        vm.external_ip = None
+                        vm.internet_access = 1  # queda con NAT saliente, sin IP entrante
+                    else:
+                        libre.is_used = 1
+                        libre.vm_id = vm.id
+                        vm.external_ip = libre.ip_address
+                        logger.info("[PLACEMENT] 🎲 IP aleatoria asignada a VM %s (zona %s): %s",
+                                    vm.name, zone_id, libre.ip_address)
+            db.commit()
+
             # ── 2. CONSTRUCCIÓN DEL SERVERS' STATE MULTIDIMENSIONAL ───────────
             # Para cada worker de la zona:
             #   C_efectivo_r[j] = C_nominal_r[j] × OC_r[j]

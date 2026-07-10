@@ -98,7 +98,8 @@ class SecurityRule(BaseModel):
 
 class NetworkLink(BaseModel):
     connection_id: str
-    vlan_id: int
+    vlan_id: int                       # C-VID (tag interno/cliente) por enlace
+    s_vlan_id: int = 0                  # S-VID (tag externo/servicio) por slice; 0 = sin Q-in-Q
     # Datos del extremo 1
     vm1_id: str
     vm1_worker_ip: str

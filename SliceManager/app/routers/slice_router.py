@@ -191,7 +191,9 @@ def create_draft(
             db.add(nueva_vm)
             db.flush()
 
-            if ext_ip:
+            # "random" es un centinela: se resuelve a una IP libre del pool de la
+            # zona en el momento del despliegue (agnóstico Linux/OpenStack).
+            if ext_ip and ext_ip != "random":
                 ip_record = db.query(IpPool).filter(IpPool.ip_address == ext_ip).first()
                 if not ip_record:
                     db.rollback()
@@ -278,7 +280,8 @@ def update_draft(
         db.add(nueva_vm)
         db.flush()
 
-        if ext_ip:
+        # "random" se resuelve al desplegar (ver placement_worker) — agnóstico
+        if ext_ip and ext_ip != "random":
             ip_record = db.query(IpPool).filter(IpPool.ip_address == ext_ip).first()
             if not ip_record:
                 db.rollback()
