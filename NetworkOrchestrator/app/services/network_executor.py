@@ -39,6 +39,12 @@ class NetworkExecutor:
 
         # 2. OVS: crear br-int + add-port + set tag para TODOS los TAPs en una sola llamada
         ovs_parts = ["--may-exist add-br br-int"]
+        # Trunk de datos inter-worker: re-colgar ens4 a br-int (idempotente). Sin
+        # esto, los enlaces p2p entre VMs de workers distintos NO cruzan (el trunk
+        # se pierde al reiniciar/migrar la infra). ens4 no tiene IP → seguro.
+        trunk = getattr(settings, "DATA_TRUNK_IFACE", "") or ""
+        if trunk:
+            ovs_parts.append(f"--may-exist add-port br-int {trunk}")
         for tap, vlan in tap_vlan_pairs:
             ovs_parts.append(f"--may-exist add-port br-int {tap}")
             ovs_parts.append(f"set port {tap} tag={vlan}")
@@ -48,6 +54,47 @@ class NetworkExecutor:
 
         for tap, vlan in tap_vlan_pairs:
             logger.info(f"[{self.worker_ip}] Enlace configurado: {tap} -> VLAN {vlan}")
+
+    def setup_qinq_trunk(self, ssh: SSHClient, s_vlan: int, c_vlans: list[int], trunk_iface: str = "ens4") -> None:
+        """
+        Configura Q-in-Q (802.1ad) para un slice sobre el trunk inter-worker.
+
+        Modelo (probado en el cluster):
+          tap (access C-VID) → br-int → [patch] → br-qinq (dot1q-tunnel +S-VID) → ens4
+        - `vlan-limit=2`: OVS debe parsear 2 tags o el ingress no desencapsula.
+        - `br-qinq` es el bridge provider; `ens4` se mueve ahí (sale de br-int).
+        - Un patch por slice: en br-int troncaliza los C-VIDs del slice; en
+          br-qinq es dot1q-tunnel que empuja el S-VID (0x88a8) sobre ellos.
+        Idempotente: usa --may-exist y `add` (append) para soportar Modo Edición.
+        """
+        cvlans_sp = " ".join(str(v) for v in sorted(set(c_vlans)))
+        pi = f"pi-{s_vlan}"   # patch en br-int
+        pq = f"pq-{s_vlan}"   # patch en br-qinq
+        cmds = [
+            "ovs-vsctl set Open_vSwitch . other_config:vlan-limit=2",
+            "ovs-vsctl --may-exist add-br br-qinq",
+            f"ovs-vsctl --if-exists del-port br-int {trunk_iface}",
+            f"ovs-vsctl --may-exist add-port br-qinq {trunk_iface}",
+            f"ovs-vsctl --may-exist add-port br-int {pi} -- set interface {pi} type=patch options:peer={pq}",
+            f"ovs-vsctl --may-exist add-port br-qinq {pq} -- set interface {pq} type=patch options:peer={pi}",
+            f"ovs-vsctl set port {pq} vlan_mode=dot1q-tunnel tag={s_vlan} other_config:qinq-ethtype=802.1ad",
+        ]
+        if cvlans_sp:
+            cmds.append(f"ovs-vsctl add port {pi} trunks {cvlans_sp}")
+            cmds.append(f"ovs-vsctl add port {pq} cvlans {cvlans_sp}")
+        full = " && ".join(f"sudo {c}" for c in cmds)
+        exit_code, _, err = ssh.exec(full)
+        if exit_code != 0:
+            raise RuntimeError(f"Fallo Q-in-Q en {self.worker_ip}: {err}")
+        logger.info(f"[{self.worker_ip}] 🏷️  Q-in-Q OK: S-VID {s_vlan} sobre C-VIDs [{cvlans_sp}]")
+
+    def teardown_qinq_slice(self, ssh: SSHClient, s_vlan: int) -> None:
+        """Elimina el patch dot1q-tunnel de un slice (destroy). No toca br-qinq
+        ni ens4 (infra compartida entre slices Q-in-Q)."""
+        pi = f"pi-{s_vlan}"; pq = f"pq-{s_vlan}"
+        ssh.exec(f"sudo ovs-vsctl --if-exists del-port br-int {pi}; "
+                 f"sudo ovs-vsctl --if-exists del-port br-qinq {pq}")
+        logger.info(f"[{self.worker_ip}] Q-in-Q: patch del slice S-VID {s_vlan} eliminado")
 
     def ensure_br_int(self, ssh: SSHClient) -> None:
         """Legado — el batch ya incluye add-br. Se mantiene por compatibilidad."""

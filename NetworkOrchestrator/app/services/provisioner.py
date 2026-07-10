@@ -31,14 +31,16 @@ class NetworkProvisioner:
         for link in request.links:
             key1 = (link.vm1_worker_ip, link.vm1_worker_port)
             endpoints_by_worker[key1].append({
-                "link_id": link.connection_id, "vlan": link.vlan_id, 
+                "link_id": link.connection_id, "vlan": link.vlan_id,
+                "s_vlan": getattr(link, "s_vlan_id", 0),
                 "tap": link.vm1_tap, "rules": link.vm1_security_rules,
                 "user": link.vm1_ssh_user, "key": link.vm1_ssh_private_key,
                 "port": link.vm1_worker_port,
             })
             key2 = (link.vm2_worker_ip, link.vm2_worker_port)
             endpoints_by_worker[key2].append({
-                "link_id": link.connection_id, "vlan": link.vlan_id, 
+                "link_id": link.connection_id, "vlan": link.vlan_id,
+                "s_vlan": getattr(link, "s_vlan_id", 0),
                 "tap": link.vm2_tap, "rules": link.vm2_security_rules,
                 "user": link.vm2_ssh_user, "key": link.vm2_ssh_private_key,
                 "port": link.vm2_worker_port,
@@ -139,6 +141,19 @@ class NetworkProvisioner:
                 if vms_list:
                     executor.configure_gateway_and_nat(ssh, slice_id, vms_list, mgmt_vlan)
 
+                # C. Q-in-Q (802.1ad): si el slice trae S-VID, montar el túnel
+                #    dot1q-tunnel para los C-VIDs de sus ENLACES (no la gestión).
+                s_vlan = next((ep.get("s_vlan", 0) for ep in endpoints if ep.get("s_vlan")), 0)
+                if s_vlan:
+                    link_cvlans = [ep["vlan"] for ep in endpoints]
+                    try:
+                        executor.setup_qinq_trunk(
+                            ssh, s_vlan, link_cvlans,
+                            getattr(settings, "DATA_TRUNK_IFACE", "ens4"),
+                        )
+                    except Exception as exc:
+                        logger.error(f"[worker={worker_ip}] Q-in-Q setup falló: {exc}")
+
         except Exception as exc:
             for ep in endpoints: fail_eps.append((ep, f"SSH Fail: {exc}"))
 
@@ -205,10 +220,11 @@ class NetworkProvisioner:
         endpoints_by_worker = defaultdict(list)
         if hasattr(request, 'links') and request.links:
             for link in request.links:
+                sv = getattr(link, "s_vlan_id", 0)
                 key1 = (link.vm1_worker_ip, link.vm1_worker_port)
-                endpoints_by_worker[key1].append({"tap": link.vm1_tap, "user": link.vm1_ssh_user, "key": link.vm1_ssh_private_key, "port": link.vm1_worker_port})
+                endpoints_by_worker[key1].append({"tap": link.vm1_tap, "user": link.vm1_ssh_user, "key": link.vm1_ssh_private_key, "port": link.vm1_worker_port, "s_vlan": sv})
                 key2 = (link.vm2_worker_ip, link.vm2_worker_port)
-                endpoints_by_worker[key2].append({"tap": link.vm2_tap, "user": link.vm2_ssh_user, "key": link.vm2_ssh_private_key, "port": link.vm2_worker_port})
+                endpoints_by_worker[key2].append({"tap": link.vm2_tap, "user": link.vm2_ssh_user, "key": link.vm2_ssh_private_key, "port": link.vm2_worker_port, "s_vlan": sv})
 
         vms_by_worker = defaultdict(list)
         if hasattr(request, 'vms') and request.vms:
@@ -272,6 +288,14 @@ class NetworkProvisioner:
                         executor.destroy_gateway(ssh, slice_id, vms_list)
                     except Exception as exc:
                         logger.error(f"Fallo al borrar Gateway/NAT en worker {worker_ip}: {exc}")
+
+                # 4. Q-in-Q: quitar el patch dot1q-tunnel del slice (si aplica)
+                s_vlan = next((ep.get("s_vlan", 0) for ep in endpoints if ep.get("s_vlan")), 0)
+                if s_vlan:
+                    try:
+                        executor.teardown_qinq_slice(ssh, s_vlan)
+                    except Exception as exc:
+                        logger.error(f"Fallo al limpiar Q-in-Q (S-VID {s_vlan}) en {worker_ip}: {exc}")
                         
         except Exception as exc:
             logger.error(f"SSH Fail en worker {worker_ip} durante destroy: {exc}")

@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     EXTERNAL_INTERFACE: str = "br-int"  # Interfaz de datos para acceso exterior (DNAT)
     EXTERNAL_POOL_CIDR: str = "10.60.15.0/24"  # Pool de acceso exterior asignado (Linux Cluster)
 
+    # Interfaz de datos (trunk L2) que conecta br-int entre workers. Se re-cuelga
+    # a br-int en cada deploy (idempotente) para que la conectividad inter-worker
+    # sobreviva reinicios/migraciones. Vacío = no gestionar el trunk.
+    DATA_TRUNK_IFACE: str = "ens4"
+
     # ── OpenStack: red provider compartida para salida a Internet ──────────
     OS_EXTERNAL_NETWORK_NAME: str = "external"          # Red provider flat ya creada en OpenStack
     OS_EXTERNAL_SUBNET_NAME:  str = "external_subnet"

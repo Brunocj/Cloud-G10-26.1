@@ -140,6 +140,10 @@ class Vlan(Base):
     id = Column(Integer, primary_key=True)
     slice_id = Column(ForeignKey('slices.id'), index=True)
     type = Column(String(45))
+    # Número de VLAN real. Separado de la PK para permitir REUTILIZAR C-VIDs
+    # entre slices bajo Q-in-Q (aislados por el S-VID). type: 'C'=cliente/enlace,
+    # 'S'=servicio/slice, 'p2p'=legado (single-tag, número guardado en id).
+    vlan_number = Column(Integer, index=True, nullable=True)
 
     slice = relationship('Slice')
 

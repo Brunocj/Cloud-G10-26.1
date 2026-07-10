@@ -361,8 +361,44 @@ async def process_placement_worker():
 
                 # El dict incluye TODAS las VMs (los enlaces nuevos pueden tocar existentes)
                 vms_dict          = {vm.name: vm for vm in all_vms_de_bd}
-                vlans_ocupadas_db = db.query(Vlan.id).all()
-                vlans_ocupadas    = [v[0] for v in vlans_ocupadas_db]
+
+                slice_hash         = hashlib.sha256(str(slice_id).encode()).hexdigest()
+                mac_prefix         = f"52:54:00:{slice_hash[:2]}:{slice_hash[2:4]}"
+                network_links      = []
+
+                # ── Q-in-Q (802.1ad): S-VID por slice + C-VID reutilizable ────
+                # El C-VID de cada enlace es el tag interno; el S-VID aísla el
+                # slice. Con Q-in-Q los C-VIDs se REUTILIZAN entre slices (únicos
+                # solo DENTRO del slice); el S-VID es único global. Sin Q-in-Q,
+                # los C-VIDs siguen siendo únicos globales (single-tag, legado).
+                qinq_enabled = os.getenv("QINQ_ENABLED", "false").lower() in ("1", "true", "yes")
+                s_vlan_id = 0
+                if qinq_enabled:
+                    # S-VID: reusar el del slice si ya existe (Modo Edición), o
+                    # asignar uno nuevo único global.
+                    existing_s = db.query(Vlan.vlan_number).filter(
+                        Vlan.slice_id == slice_id, Vlan.type == "S",
+                        Vlan.vlan_number.isnot(None),
+                    ).first()
+                    if existing_s:
+                        s_vlan_id = existing_s[0]
+                    else:
+                        s_base  = int(os.getenv("QINQ_SVID_BASE", "2"))
+                        s_range = int(os.getenv("QINQ_SVID_RANGE", "4000"))
+                        used_s  = {r[0] for r in db.query(Vlan.vlan_number).filter(
+                            Vlan.type == "S", Vlan.vlan_number.isnot(None)).all()}
+                        s_vlan_id = next((v for v in range(s_base, s_base + s_range) if v not in used_s), s_base)
+                        db.add(Vlan(vlan_number=s_vlan_id, slice_id=slice_id, type="S"))
+                        db.flush()
+                    logger.info("[PLACEMENT] 🏷️  Q-in-Q ACTIVO — S-VID del slice %s = %d", slice_id, s_vlan_id)
+
+                # C-VIDs ocupados: por-slice si Q-in-Q (reutilizables), global si no.
+                if qinq_enabled:
+                    vlans_ocupadas = [r[0] for r in db.query(Vlan.vlan_number).filter(
+                        Vlan.slice_id == slice_id, Vlan.type == "C",
+                        Vlan.vlan_number.isnot(None)).all()]
+                else:
+                    vlans_ocupadas = [v[0] for v in db.query(Vlan.id).all()]
 
                 def obtener_vlan_libre():
                     while True:
@@ -371,9 +407,6 @@ async def process_placement_worker():
                             vlans_ocupadas.append(vid)
                             return vid
 
-                slice_hash         = hashlib.sha256(str(slice_id).encode()).hexdigest()
-                mac_prefix         = f"52:54:00:{slice_hash[:2]}:{slice_hash[2:4]}"
-                network_links      = []
                 vms_payload_data   = {vm.name: {"tap_interfaces": []} for vm in vms_de_bd}
 
                 # Hot-plug: taps nuevos destinados a VMs YA desplegadas (modo extend)
@@ -383,9 +416,13 @@ async def process_placement_worker():
                 # El contador de MACs continúa después de las ya usadas por el slice
                 global_mac_counter = sum(len(dv.get("tap_interfaces", [])) for dv in existing_deployed)
 
-                # TAP de gestión para cada VM
+                # TAP de gestión para cada VM.
+                # OJO: el nombre debe ser ÚNICO y ≤15 chars (IFNAMSIZ). Usamos el
+                # id de BD de la VM (único global), NO el prefijo del vm_id — que
+                # ya no es distintivo (todos los nodos de una sesión comparten
+                # prefijo). Antes se usaba vm_id[:4] y colisionaba → "Device busy".
                 for vm in vms_de_bd:
-                    tap_mgmt = f"t-{str(slice_id)[-3:]}-{vm.name[:4]}-m"
+                    tap_mgmt = f"t-{vm.id}-m"
                     mac_mgmt = f"{mac_prefix}:{global_mac_counter:02x}".upper()
                     global_mac_counter += 1
                     vms_payload_data[vm.name]["tap_interfaces"].append(
@@ -409,13 +446,15 @@ async def process_placement_worker():
                     worker1    = server_inventory.get(worker1_id, {})
                     worker2    = server_inventory.get(worker2_id, {})
 
-                    tap1 = f"t-{str(slice_id)[-3:]}-{vm1_id[:4]}-{vm2_id[:4]}"
-                    tap2 = f"t-{str(slice_id)[-3:]}-{vm2_id[:4]}-{vm1_id[:4]}"
+                    # El VLAN es único por enlace (global) → base perfecta para el
+                    # nombre del TAP. '-a'/'-b' distinguen los dos extremos. Único
+                    # y ≤15 chars sin depender del prefijo del vm_id.
+                    vlan_actual = obtener_vlan_libre()
+                    tap1 = f"t-{vlan_actual}-a"
+                    tap2 = f"t-{vlan_actual}-b"
 
                     mac1 = f"{mac_prefix}:{global_mac_counter:02x}".upper(); global_mac_counter += 1
                     mac2 = f"{mac_prefix}:{global_mac_counter:02x}".upper(); global_mac_counter += 1
-
-                    vlan_actual = obtener_vlan_libre()
 
                     # VM nueva → tap al arranque; VM existente → hot-plug vía QMP/Nova
                     for _vid, _tap in ((vm1_id, {"tap_name": tap1, "mac": mac1}),
@@ -427,7 +466,8 @@ async def process_placement_worker():
 
                     network_links.append({
                         "connection_id":       f"{vm1_id}-{vm2_id}-{vlan_actual}",
-                        "vlan_id":             vlan_actual,
+                        "vlan_id":             vlan_actual,     # C-VID (tag interno)
+                        "s_vlan_id":           s_vlan_id,       # S-VID del slice (tag externo)
                         "vm1_id":              vm1_id,
                         "vm1_worker_ip":       worker1.get("ip", "0.0.0.0"),
                         "vm1_worker_port":     worker1.get("port", 22),
@@ -442,7 +482,12 @@ async def process_placement_worker():
                         "vm2_ssh_private_key": get_ssh_key(worker2.get("key_path", ""))
                     })
 
-                    db.add(Vlan(id=vlan_actual, slice_id=slice_id, type="p2p"))
+                    # Q-in-Q: guardar como C-VID con id auto-incremental (permite
+                    # reuso del número entre slices). Legado: número en la PK.
+                    if qinq_enabled:
+                        db.add(Vlan(vlan_number=vlan_actual, slice_id=slice_id, type="C"))
+                    else:
+                        db.add(Vlan(id=vlan_actual, slice_id=slice_id, type="p2p"))
                     logger.info(
                         "[PLACEMENT] 🔗 Enlace %-20s → %-20s | VLAN: %-4d | "
                         "TAP1: %-28s MAC1: %s | TAP2: %-28s MAC2: %s",
