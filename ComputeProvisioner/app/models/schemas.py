@@ -89,6 +89,8 @@ class DeployRequest(BaseModel):
     request_id:           str          = Field(...)
     availability_zone_id: int          = Field(default=1, description="1=Linux Cluster, 2=OpenStack")
     vms:                  List[VMSpec] = Field(..., min_length=1)
+    # Q-in-Q OpenStack: {s_vlan_id, compute_ssh_map:{host:{ip,port,user,key}}}
+    qinq:                 Optional[dict] = Field(default=None)
 
 
 class DestroyRequest(BaseModel):
@@ -99,6 +101,8 @@ class DestroyRequest(BaseModel):
     mode:                 str = Field(default="full", description="full | shrink (REQ-US-14)")
     # Shrink: NICs a desconectar en caliente de VMs sobrevivientes
     unplugs:              List[dict] = Field(default_factory=list)
+    # Q-in-Q OpenStack: {s_vlan_id, compute_ssh_map} para limpiar el patch al destruir
+    qinq:                 Optional[dict] = Field(default=None)
 
 
 # ---------------------------------------------------------------------------

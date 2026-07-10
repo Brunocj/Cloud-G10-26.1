@@ -148,6 +148,37 @@ class Vlan(Base):
     slice = relationship('Slice')
 
 
+class Flavor(Base):
+    """
+    Plantilla de recursos (vCPU/RAM/disco) reutilizable al desplegar VMs.
+    En OpenStack se materializa como un flavor Nova real (lazy-create) cuyo
+    UUID se guarda en provider_flavor_id. En Linux Cluster solo aporta los
+    números. Al instanciar una VM se COPIAN vcpu/ram/disk a la fila vms para
+    que el borrado (soft-delete) del flavor no afecte a las VMs existentes.
+
+    Visibilidad:
+      - 'global'  → todos pueden elegirlo; solo admin/superAdmin lo crean.
+      - 'private' → solo su creador (owner_user_id) puede elegirlo.
+      - 'project' → miembros de project_id; lo crean jefeProyecto/admin.
+    """
+    __tablename__ = 'flavors'
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100), nullable=False)
+    vcpus = Column(Integer, nullable=False)
+    ram_mb = Column(Float(asdecimal=True), nullable=False)
+    disk_gb = Column(Float(asdecimal=True), nullable=False)
+    visibility = Column(String(20), default='private')       # global | private | project
+    owner_user_id = Column(String(100), index=True)          # UUID Keycloak del creador
+    project_id = Column(ForeignKey('projects.id'), index=True, nullable=True)
+    # UUID del flavor real en Nova (lazy-create la 1ª vez que se usa en OpenStack)
+    provider_flavor_id = Column(String(100), nullable=True)
+    is_deleted = Column(TINYINT, default=0)                  # soft-delete
+    date_creation = Column(String(45))
+
+    project = relationship('Project')
+
+
 class Vm(Base):
     __tablename__ = 'vms'
 
@@ -156,6 +187,9 @@ class Vm(Base):
     vcore = Column(Integer)
     ram = Column(Float(asdecimal=True))
     disk = Column(Float(asdecimal=True))
+    # Snapshot del flavor usado al instanciar (nullable: borrar el flavor no rompe la VM)
+    flavor_id = Column(Integer, nullable=True, index=True)
+    flavor_name = Column(String(100), nullable=True)
     state = Column(String(45))
     external_ip = Column(String(45))        # Reutilizado también como IP flotante de OpenStack
     internet_access = Column(TINYINT, default=0)

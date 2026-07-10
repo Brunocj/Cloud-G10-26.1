@@ -309,6 +309,7 @@ class WorkflowOrchestrator:
             "availability_zone_id": az_id,
             "mode":                 getattr(request, "mode", "deploy"),
             "host_map":             host_map,           # vm_id → selected_host
+            "compute_ssh_map":      getattr(request, "compute_ssh_map", None),  # Q-in-Q OpenStack
             "links":  [link.model_dump() for link in request.links],
             "vms":    [vm.model_dump()   for vm   in request.vms],
         }
@@ -429,6 +430,7 @@ class WorkflowOrchestrator:
             "request_id":           request.request_id,
             "availability_zone_id": az_id,
             "mode":                 getattr(request, "mode", "full"),
+            "compute_ssh_map":      getattr(request, "compute_ssh_map", None),  # Q-in-Q teardown
             "links": [link.model_dump() for link in request.links],
             "vms":   [vm.model_dump()   for vm   in request.vms],
         }

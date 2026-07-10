@@ -80,6 +80,17 @@ async def destroy_deployed_slice(db: Session, db_slice: Slice) -> bool:
         "links":                deployed_links,
     }
 
+    # Q-in-Q OpenStack: mapa SSH de computes para que Network limpie el patch
+    # dot1q-tunnel (el S-VID lo lee Network de los deployed_links[].s_vlan_id).
+    if (db_slice.availability_zone_id or 1) == 2:
+        os_workers = db.query(Worker).filter(Worker.availability_zones_id == 2).all()
+        payload["compute_ssh_map"] = {
+            w.name: {"ip": w.ip, "port": getattr(w, "ssh_port", 22),
+                     "user": getattr(w, "ssh_user", None),
+                     "key": _read_ssh_key(getattr(w, "ssh_key_path", ""))}
+            for w in os_workers if w.name
+        }
+
     published = await nats_producer.publish_destroy(payload)
     if not published:
         return False

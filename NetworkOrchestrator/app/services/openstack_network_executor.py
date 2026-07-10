@@ -3,6 +3,7 @@ import logging
 import asyncio
 import openstack
 from app.core.config import settings
+from app.services.ssh_client import SSHClient
 from app.models.schemas import (
     DeployNetworkRequest, DeployNetworkResponse, DestroyNetworkRequest, DestroyNetworkResponse,
     LinkResult, ProvisioningStatus
@@ -20,6 +21,87 @@ def get_connection():
         user_domain_name=os.getenv("OS_USER_DOMAIN_NAME", "Default"),
         project_domain_name=os.getenv("OS_PROJECT_DOMAIN_NAME", "Default"),
     )
+
+
+# ── Q-in-Q (802.1ad) para OpenStack ────────────────────────────────────────────
+# Se interpone un br-qinq con un puerto dot1q-tunnel que empuja el S-VID del
+# slice sobre los C-VIDs (segmentation_ids que Neutron asigna a cada red de
+# enlace). Se aplica en el paso de RED (pre-compute), en cada compute donde el
+# placement (host_map) colocará una VM del slice — igual que en Linux Cluster.
+
+def _qinq_apply_cmd(s_vlan: int, cvlans_sp: str) -> str:
+    """Secuencia OVS (validada a mano) para interponer Q-in-Q en un compute."""
+    pi, pq = f"pi-{s_vlan}", f"pq-{s_vlan}"
+    cmds = [
+        "ovs-vsctl set Open_vSwitch . other_config:vlan-limit=2",
+        "ovs-vsctl --may-exist add-br br-qinq",
+        "ovs-vsctl set-fail-mode br-qinq standalone",
+        "ovs-vsctl --if-exists del-port br-vlan ens4",
+        "ovs-vsctl --may-exist add-port br-qinq ens4",
+        f"ovs-vsctl --may-exist add-port br-vlan {pi} -- set interface {pi} type=patch options:peer={pq}",
+        f"ovs-vsctl --may-exist add-port br-qinq {pq} -- set interface {pq} type=patch options:peer={pi}",
+        f"ovs-vsctl set port {pq} vlan_mode=dot1q-tunnel tag={s_vlan} other_config:qinq-ethtype=802.1ad",
+    ]
+    if cvlans_sp:
+        cmds.append(f"ovs-vsctl add port {pq} cvlans {cvlans_sp}")
+    return " && ".join(f"sudo {c}" for c in cmds)
+
+
+def _qinq_teardown_cmd(s_vlan: int) -> str:
+    """
+    Quita el patch dot1q-tunnel de ESTE slice. Si era el último slice con
+    Q-in-Q en el compute (no quedan patches pq-*), devuelve ens4 a br-vlan y
+    elimina br-qinq para restaurar el estado normal del compute.
+    """
+    pi, pq = f"pi-{s_vlan}", f"pq-{s_vlan}"
+    return (
+        f"sudo ovs-vsctl --if-exists del-port br-vlan {pi}; "
+        f"sudo ovs-vsctl --if-exists del-port br-qinq {pq}; "
+        f"if [ \"$(sudo ovs-vsctl list-ports br-qinq 2>/dev/null | grep -c '^pq-')\" = \"0\" ]; then "
+        f"sudo ovs-vsctl --if-exists del-port br-qinq ens4; "
+        f"sudo ovs-vsctl --may-exist add-port br-vlan ens4; "
+        f"sudo ovs-vsctl --if-exists del-br br-qinq; fi"
+    )
+
+
+def _ssh_run(creds: dict, cmd: str):
+    with SSHClient(creds["ip"], creds["user"], creds.get("key", ""),
+                   port=int(creds.get("port", 22))) as ssh:
+        return ssh.exec(cmd)
+
+
+async def _qinq_apply(s_vlan: int, host_cvlans: dict, compute_ssh_map: dict) -> None:
+    """host_cvlans: {host_de_nova: set(C-VIDs)}. SSHea a cada compute y aplica el tunnel."""
+    if not s_vlan or not host_cvlans or not compute_ssh_map:
+        return
+    for host, cvlans in host_cvlans.items():
+        creds = compute_ssh_map.get(host)
+        if not creds:
+            logger.error(f"[OpenStack][QinQ] Sin SSH para compute '{host}' — omitido "
+                         f"(¿Worker.name == host de Nova?)")
+            continue
+        cvlans_sp = " ".join(str(v) for v in sorted(cvlans))
+        cmd = _qinq_apply_cmd(s_vlan, cvlans_sp)
+        try:
+            ec, _, err = await asyncio.to_thread(_ssh_run, creds, cmd)
+            if ec != 0:
+                logger.error(f"[OpenStack][QinQ] Fallo en compute '{host}': {err}")
+            else:
+                logger.info(f"[OpenStack][QinQ] ✅ compute '{host}': S-VID {s_vlan} sobre C-VIDs [{cvlans_sp}]")
+        except Exception as exc:
+            logger.error(f"[OpenStack][QinQ] Error SSH a '{host}': {exc}")
+
+
+async def _qinq_teardown(s_vlan: int, compute_ssh_map: dict) -> None:
+    if not s_vlan or not compute_ssh_map:
+        return
+    cmd = _qinq_teardown_cmd(s_vlan)
+    for host, creds in compute_ssh_map.items():
+        try:
+            await asyncio.to_thread(_ssh_run, creds, cmd)
+            logger.info(f"[OpenStack][QinQ] teardown en compute '{host}' (S-VID {s_vlan})")
+        except Exception as exc:
+            logger.warning(f"[OpenStack][QinQ] teardown en '{host}' falló: {exc}")
 
 class OpenStackNetworkExecutor:
     """Implementa el aprovisionamiento de red para la zona OpenStack (Strategy Pattern)."""
@@ -320,6 +402,11 @@ class OpenStackNetworkExecutor:
                 }
 
             # 6. Crear Redes, Subredes y Puertos para cada enlace (link) del slice
+            # Q-in-Q: acumular, por compute (host_map), los C-VIDs reales que
+            # Neutron asigna a cada net-link, para tunelizarlos bajo el S-VID.
+            host_map = request.host_map or {}
+            qinq_s_vlan = 0
+            qinq_host_cvlans: dict = {}
             for link in request.links:
                 vlan_id = link.vlan_id
                 vm1_id = link.vm1_id
@@ -373,10 +460,29 @@ class OpenStackNetworkExecutor:
                     if vm2_id in port_map:
                         port_map[vm2_id]["link_ports"].append(port2.id)
 
+                    # Q-in-Q: el C-VID real es el segmentation_id que Neutron
+                    # asignó a la red del enlace (no el vlan_id lógico). Se
+                    # relee la red para obtener el atributo provider.
+                    if getattr(link, "s_vlan_id", 0):
+                        qinq_s_vlan = link.s_vlan_id
+                        net_full = await asyncio.to_thread(conn.network.get_network, net_link.id)
+                        seg = getattr(net_full, "provider_segmentation_id", None)
+                        if seg:
+                            for vid in (vm1_id, vm2_id):
+                                host = host_map.get(vid)
+                                if host:
+                                    qinq_host_cvlans.setdefault(host, set()).add(int(seg))
+
                     logger.info(f"[OpenStack] Enlace creado exitosamente: {net_link.name}")
                 except Exception as e:
                     logger.error(f"[OpenStack] Error creando enlace {link.connection_id}: {e}")
                     raise e
+
+            # 6.b Q-in-Q (802.1ad): interponer el dot1q-tunnel en cada compute
+            # del slice ANTES de que Compute cree las VMs (pre-compute, como Linux).
+            if qinq_s_vlan and qinq_host_cvlans:
+                logger.info(f"[OpenStack][QinQ] Aplicando S-VID {qinq_s_vlan} en {len(qinq_host_cvlans)} compute(s)")
+                await _qinq_apply(qinq_s_vlan, qinq_host_cvlans, request.compute_ssh_map or {})
 
             links_ok = [LinkResult(connection_id=link.connection_id) for link in request.links]
             return DeployNetworkResponse(
@@ -466,6 +572,12 @@ class OpenStackNetworkExecutor:
             subnet_name = f"subnet-slice-{slice_id}"
             secgroup_name = f"secgroup-slice-{slice_id}"
             router_name = f"router-slice-{slice_id}"
+
+            # 0.a Q-in-Q: quitar el dot1q-tunnel del slice en los computes
+            # (S-VID leído de los links; independiente de la limpieza Neutron).
+            _s_vlan = next((l.s_vlan_id for l in (request.links or []) if getattr(l, "s_vlan_id", 0)), 0)
+            if _s_vlan and getattr(request, "compute_ssh_map", None):
+                await _qinq_teardown(_s_vlan, request.compute_ssh_map)
 
             # 0. Borrar redes, subredes y puertos de enlaces (links) punto a punto
             if request.links:

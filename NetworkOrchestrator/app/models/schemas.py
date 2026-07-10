@@ -73,6 +73,8 @@ class DeployNetworkRequest(BaseModel):
     availability_zone_id: int = Field(default=1, description="1=Linux Cluster, 2=OpenStack")
     mode:                 str = Field(default="deploy", description="deploy | extend (Modo Edición)")
     host_map:             dict = Field(default_factory=dict, description="vm_id → selected_host (del VMPlacement)")
+    # Q-in-Q OpenStack: {host_de_nova: {ip,port,user,key}} para SSH a los computes
+    compute_ssh_map:      Optional[dict] = Field(default=None)
     links:                List[NetworkLink]
     vms:                  List[VMNetworkSpec] = Field(default_factory=list)
 
@@ -86,6 +88,8 @@ class DestroyNetworkRequest(BaseModel):
     vms:                  Optional[List[VMNetworkSpec]] = None
     # Para OpenStack destroy: UUIDs de puertos Neutron a borrar
     port_map:             Optional[dict] = Field(default=None, description="vm_id → {provider_port_id, floating_ip_id}")
+    # Q-in-Q OpenStack: {host_de_nova: {ip,port,user,key}} para limpiar el dot1q-tunnel
+    compute_ssh_map:      Optional[dict] = Field(default=None)
 # ---------------------------------------------------------------------------
 # Modelos de Salida (Respuesta al Queue Manager)
 # ---------------------------------------------------------------------------

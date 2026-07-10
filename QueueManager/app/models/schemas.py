@@ -126,6 +126,8 @@ class DeploySliceRequest(BaseModel):
     vms:                  List[VMSpec] = Field(..., min_length=1)
     links:                List[NetworkLink] = Field(default_factory=list)
     workers:              List[dict] = Field(default_factory=list)
+    # Q-in-Q OpenStack: {host_de_nova: {ip,port,user,key}} — lo usa el NetworkOrchestrator
+    compute_ssh_map:      Optional[dict] = Field(default=None)
 
 class DestroySliceRequest(BaseModel):
     """
@@ -140,6 +142,8 @@ class DestroySliceRequest(BaseModel):
     links:      List[NetworkLink] = Field(default_factory=list)
     # Shrink: NICs a desconectar en caliente de VMs sobrevivientes
     unplugs:    List[dict]        = Field(default_factory=list)
+    # Q-in-Q OpenStack: {host_de_nova: {ip,port,user,key}} — lo usa el NetworkOrchestrator
+    compute_ssh_map: Optional[dict] = Field(default=None)
 
 
 # ---------------------------------------------------------------------------

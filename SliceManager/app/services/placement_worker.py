@@ -620,6 +620,24 @@ async def process_placement_worker():
                     "workers":              servers_state
                 }
 
+                # Q-in-Q en OpenStack: mapa SSH de los computes (keyed por
+                # Worker.name == host de Nova). El NetworkOrchestrator lo usa,
+                # junto al host_map y a los s_vlan_id de los enlaces, para
+                # interponer el dot1q-tunnel en el compute de cada VM ANTES de
+                # que Compute la cree (mismo paso que en Linux Cluster).
+                if qinq_enabled and zone_id == 2 and s_vlan_id:
+                    queue_manager_payload["compute_ssh_map"] = {
+                        w.name: {
+                            "ip":   w.ip,
+                            "port": getattr(w, "ssh_port", 22),
+                            "user": getattr(w, "ssh_user", None),
+                            "key":  get_ssh_key(getattr(w, "ssh_key_path", "")),
+                        }
+                        for w in workers_zona if w.name
+                    }
+                    logger.info("[PLACEMENT] 🏷️  Q-in-Q OpenStack: S-VID %d, %d computes en el mapa SSH",
+                                s_vlan_id, len(queue_manager_payload["compute_ssh_map"]))
+
                 slice_json = db_slice.slice_json
                 if isinstance(slice_json, str):
                     slice_json = json.loads(slice_json)

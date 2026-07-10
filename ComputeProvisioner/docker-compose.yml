@@ -18,7 +18,7 @@ services:
       OS_IDENTITY_API_VERSION:  "3"
       OS_IMAGE_API_VERSION:     "2"
       OPENSTACK_AZ_ID:          "2"
-      OS_BYOS_FORCE_HOST:       "false"   # cambiar a true cuando Nova scheduler esté configurado para ello
+      OS_BYOS_FORCE_HOST:       "true"    # flavors exactos ya implementados → Nova respeta el placement (selected_host)
       # ── SOCKS5 Proxy para OpenStack ──
       HTTP_PROXY:               "socks5h://openstack-proxy:1080"
       HTTPS_PROXY:              "socks5h://openstack-proxy:1080"

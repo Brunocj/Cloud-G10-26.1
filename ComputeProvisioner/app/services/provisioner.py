@@ -58,6 +58,9 @@ class Provisioner:
                 os_executor = OpenStackComputeExecutor()
                 tasks = [os_executor.deploy_vm(conn, vm, request.slice_id) for vm in request.vms]
                 results = await asyncio.gather(*tasks)
+                # NOTA: el Q-in-Q (802.1ad) de OpenStack lo aplica ahora el
+                # NetworkOrchestrator en el paso de RED (pre-compute), usando el
+                # host_map del placement — igual que en Linux Cluster.
             except Exception as e:
                 logger.error(f"[CP] Error conectando a OpenStack: {e}")
                 results = [VMResult(vm_id=vm.vm_id, worker_ip=vm.worker_ip, error=str(e)) for vm in request.vms]
@@ -222,6 +225,8 @@ class Provisioner:
                         await os_executor.detach_interface(conn, up, request.slice_id)
                 tasks = [os_executor.destroy_vm(conn, record, request.slice_id) for record in vm_records]
                 errors = await asyncio.gather(*tasks)
+                # NOTA: el teardown Q-in-Q de OpenStack lo hace ahora el
+                # NetworkOrchestrator en el paso de RED (destroy).
             except Exception as e:
                 logger.error(f"[CP] Error conectando a OpenStack durante destroy: {e}")
                 errors = [str(e)] * len(vm_records)

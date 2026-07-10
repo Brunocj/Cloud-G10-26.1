@@ -5,6 +5,7 @@ import openstack
 from typing import Optional, List
 from urllib.parse import urlparse, parse_qs, unquote
 from app.models.schemas import VMSpec, VMResult, DeployStatus
+from app.services.ssh_client import SSHClient
 
 logger = logging.getLogger("compute-provisioner.openstack")
 
@@ -90,28 +91,39 @@ class OpenStackComputeExecutor:
                 
         raise RuntimeError(f"No se pudo encontrar ninguna imagen en Glance que coincida con: {image_path}")
 
-    def _find_flavor_uuid(self, conn, requested_vcpus: int, requested_ram_mb: int) -> str:
-        """Busca el flavor adecuado en Nova según los requisitos de CPU y RAM."""
-        # 1. Buscar coincidencia exacta
+    def _ensure_flavor_uuid(self, conn, vcpus: int, ram_mb: int, disk_gb: int) -> str:
+        """
+        Materializa un flavor Nova con specs EXACTOS (estrategia BYOS-flavors).
+
+        Como usamos credenciales admin, en vez de "el más cercano" garantizamos
+        que Nova tenga un flavor idéntico a lo pedido: si ya existe uno con
+        (vcpus, ram, disk) exactos lo reutiliza; si no, lo crea al vuelo. Así la
+        VM sale con los recursos exactos que el usuario eligió en su flavor.
+        """
+        vcpus   = int(vcpus)
+        ram_mb  = int(round(float(ram_mb)))
+        disk_gb = int(round(float(disk_gb))) if disk_gb else 1
+
+        # 1. Coincidencia exacta (cpu + ram + disco)
         for flavor in conn.compute.flavors():
-            if flavor.vcpus == requested_vcpus and flavor.ram == requested_ram_mb:
+            if (flavor.vcpus == vcpus and int(flavor.ram) == ram_mb
+                    and int(getattr(flavor, "disk", 0) or 0) == disk_gb):
                 return flavor.id
-                
-        # 2. Pequeño flavor que satisfaga los requisitos mínimos (vcpus >= req y ram >= req)
-        candidate = None
-        for flavor in conn.compute.flavors():
-            if flavor.vcpus >= requested_vcpus and flavor.ram >= requested_ram_mb:
-                if candidate is None or (flavor.vcpus < candidate.vcpus or (flavor.vcpus == candidate.vcpus and flavor.ram < candidate.ram)):
-                    candidate = flavor
-        if candidate:
-            return candidate.id
-            
-        # 3. Fallback al primer flavor disponible
-        flavors = list(conn.compute.flavors())
-        if flavors:
-            return flavors[0].id
-            
-        raise RuntimeError(f"No se encontró un Flavor Nova adecuado para vCPUs={requested_vcpus}, RAM={requested_ram_mb} MB")
+
+        # 2. No existe → crearlo con specs exactos (idempotente por nombre)
+        name = f"pucp-{vcpus}c-{ram_mb}m-{disk_gb}g"
+        try:
+            created = conn.compute.create_flavor(
+                name=name, vcpus=vcpus, ram=ram_mb, disk=disk_gb, is_public=True,
+            )
+            logger.info(f"[OpenStack] Flavor Nova creado al vuelo: {name} (UUID={created.id})")
+            return created.id
+        except Exception as exc:
+            # Carrera: otro deploy lo pudo crear en paralelo → reintentar la búsqueda por nombre
+            for flavor in conn.compute.flavors():
+                if flavor.name == name:
+                    return flavor.id
+            raise RuntimeError(f"No se pudo crear/encontrar el flavor Nova '{name}': {exc}")
 
     async def attach_interfaces(self, conn, vm: VMSpec, slice_id: str) -> VMResult:
         """
@@ -159,7 +171,7 @@ class OpenStackComputeExecutor:
         try:
             # 1. Resolver Imagen y Flavor
             image_uuid = await asyncio.to_thread(self._resolve_image_uuid, conn, vm.image_path)
-            flavor_uuid = await asyncio.to_thread(self._find_flavor_uuid, conn, vm.vcpus, vm.ram_mb)
+            flavor_uuid = await asyncio.to_thread(self._ensure_flavor_uuid, conn, vm.vcpus, vm.ram_mb, getattr(vm, "disk_gb", 1))
             
             # 2. Extraer ID de Puerto Neutron
             port_id = None
@@ -279,6 +291,94 @@ class OpenStackComputeExecutor:
                     logger.warning(f"[OpenStack] detach del puerto {port.id} en {instance_id} falló: {e}")
         except Exception as exc:
             logger.warning(f"[OpenStack] detach_interface error para VM {vm_id}: {exc}")
+
+    async def _qinq_ovs_cmds(self, s_vlan: int, cvlans_sp: str) -> str:
+        """Secuencia OVS (validada a mano) para interponer Q-in-Q en un compute."""
+        pi, pq = f"pi-{s_vlan}", f"pq-{s_vlan}"
+        cmds = [
+            "ovs-vsctl set Open_vSwitch . other_config:vlan-limit=2",
+            "ovs-vsctl --may-exist add-br br-qinq",
+            "ovs-vsctl set-fail-mode br-qinq standalone",
+            "ovs-vsctl --if-exists del-port br-vlan ens4",
+            "ovs-vsctl --may-exist add-port br-qinq ens4",
+            f"ovs-vsctl --may-exist add-port br-vlan {pi} -- set interface {pi} type=patch options:peer={pq}",
+            f"ovs-vsctl --may-exist add-port br-qinq {pq} -- set interface {pq} type=patch options:peer={pi}",
+            f"ovs-vsctl set port {pq} vlan_mode=dot1q-tunnel tag={s_vlan} other_config:qinq-ethtype=802.1ad",
+        ]
+        if cvlans_sp:
+            cmds.append(f"ovs-vsctl add port {pq} cvlans {cvlans_sp}")
+        return " && ".join(f"sudo {c}" for c in cmds)
+
+    async def apply_qinq(self, conn, slice_id: str, s_vlan: int,
+                         deployed_results: list, compute_ssh_map: dict) -> None:
+        """
+        Q-in-Q en OpenStack (SSH a los computes, post-Neutron). Interpone un
+        `br-qinq` con un puerto dot1q-tunnel que empuja el S-VID del slice sobre
+        los C-VIDs (segmentation_ids que Neutron asignó a las redes de enlace).
+        Se aplica en cada compute donde Nova REALMENTE puso una VM del slice
+        (fuente de verdad = Nova, no el worker_id de la BD).
+        """
+        if not s_vlan or not compute_ssh_map:
+            return
+        hosts, cvlans = set(), set()
+        for r in deployed_results:
+            if getattr(r, "error", None) or not getattr(r, "provider_instance_id", None):
+                continue
+            try:
+                srv = await asyncio.to_thread(conn.compute.get_server, r.provider_instance_id)
+                host = getattr(srv, "compute_host", None) or getattr(srv, "hypervisor_hostname", None)
+                if host:
+                    hosts.add(host)
+                ifaces = await asyncio.to_thread(lambda: list(conn.compute.server_interfaces(srv.id)))
+                for iface in ifaces:
+                    net = await asyncio.to_thread(conn.network.get_network, iface.net_id)
+                    seg  = getattr(net, "provider_segmentation_id", None)
+                    name = getattr(net, "name", "") or ""
+                    if seg and name.startswith("net-link-"):
+                        cvlans.add(int(seg))
+            except Exception as exc:
+                logger.warning(f"[OpenStack][QinQ] No se pudo leer host/segids de {r.vm_id}: {exc}")
+
+        if not hosts:
+            logger.warning(f"[OpenStack][QinQ] slice {slice_id}: sin hosts — omitido")
+            return
+        cvlans_sp = " ".join(str(v) for v in sorted(cvlans))
+        cmd = await self._qinq_ovs_cmds(s_vlan, cvlans_sp)
+
+        for host in hosts:
+            creds = compute_ssh_map.get(host)
+            if not creds:
+                logger.error(f"[OpenStack][QinQ] Sin SSH para compute '{host}' — omitido (¿Worker.name == host de Nova?)")
+                continue
+            try:
+                def _run():
+                    with SSHClient(creds["ip"], creds["user"], creds.get("key", ""),
+                                   port=int(creds.get("port", 22))) as ssh:
+                        return ssh.exec(cmd)
+                ec, _, err = await asyncio.to_thread(_run)
+                if ec != 0:
+                    logger.error(f"[OpenStack][QinQ] Fallo en compute '{host}': {err}")
+                else:
+                    logger.info(f"[OpenStack][QinQ] ✅ compute '{host}': S-VID {s_vlan} sobre C-VIDs [{cvlans_sp}]")
+            except Exception as exc:
+                logger.error(f"[OpenStack][QinQ] Error SSH a '{host}': {exc}")
+
+    async def teardown_qinq(self, slice_id: str, s_vlan: int, compute_ssh_map: dict) -> None:
+        """Quita el patch dot1q-tunnel del slice en todos los computes (destroy)."""
+        if not s_vlan or not compute_ssh_map:
+            return
+        pi, pq = f"pi-{s_vlan}", f"pq-{s_vlan}"
+        cmd = (f"sudo ovs-vsctl --if-exists del-port br-vlan {pi}; "
+               f"sudo ovs-vsctl --if-exists del-port br-qinq {pq}")
+        for host, creds in compute_ssh_map.items():
+            try:
+                def _run():
+                    with SSHClient(creds["ip"], creds["user"], creds.get("key", ""),
+                                   port=int(creds.get("port", 22))) as ssh:
+                        return ssh.exec(cmd)
+                await asyncio.to_thread(_run)
+            except Exception as exc:
+                logger.warning(f"[OpenStack][QinQ] teardown en '{host}' falló: {exc}")
 
     async def destroy_vm(self, conn, vm_record: dict, slice_id: str) -> Optional[str]:
         """Destruye una VM individual en OpenStack."""

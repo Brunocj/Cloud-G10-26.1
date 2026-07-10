@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import CurrentUser, get_current_user, require_roles
 from app.database import get_db
-from app.models import AvailabilityZone, Image, IpPool, Slice, Vm, Worker, Role, UserProject
+from app.models import AvailabilityZone, Flavor, Image, IpPool, Slice, Vm, Worker, Role, UserProject
 from app.repositories.slice_repo import SliceRepository
 from app.schemas import DraftSaveRequest
 
@@ -20,6 +20,26 @@ router = APIRouter(prefix="/api/v1/slices", tags=["Slices / Topologies"])
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
+
+def _resolve_specs(db: Session, vm_data: dict) -> tuple:
+    """
+    Determina (vcore, ram_mb, disk_gb, flavor_id, flavor_name) para una VM.
+
+    Si el nodo trae `flavor_id`, el flavor es la fuente de verdad de los
+    recursos y se toma un SNAPSHOT (flavor_id + flavor_name copiados a la VM),
+    de modo que borrar el flavor luego no altere la VM. Si no trae flavor,
+    se respetan los valores sueltos del nodo (retro-compatibilidad).
+    """
+    flavor_id = vm_data.get("flavor_id")
+    if flavor_id:
+        flavor = db.query(Flavor).filter(
+            Flavor.id == int(flavor_id), Flavor.is_deleted == 0).first()
+        if flavor:
+            return (int(flavor.vcpus), float(flavor.ram_mb), float(flavor.disk_gb),
+                    flavor.id, flavor.name)
+    return (int(vm_data.get("vcores", 1)), float(vm_data.get("ram", 512.0)),
+            float(vm_data.get("disk", 5.0)), None, None)
+
 
 def _serialize_slice(t: Slice, users_map: dict = None, projects_map: dict = None) -> dict:
     """Serializa un objeto Slice a dict para la respuesta de la API."""
@@ -172,11 +192,14 @@ def create_draft(
             if img_id is not None and int(img_id) < 0:
                 img_id = None
 
+            vcore, ram_mb, disk_gb, fl_id, fl_name = _resolve_specs(db, vm_data)
             nueva_vm = Vm(
                 name=vm_data.get("id"),
-                vcore=int(vm_data.get("vcores", 1)),
-                ram=float(vm_data.get("ram", 512.0)),
-                disk=float(vm_data.get("disk", 5.0)),
+                vcore=vcore,
+                ram=ram_mb,
+                disk=disk_gb,
+                flavor_id=fl_id,
+                flavor_name=fl_name,
                 state="DRAFT",
                 slice_id=slice_creado.id,
                 image_id=img_id,
@@ -265,11 +288,14 @@ def update_draft(
         if img_id is not None and int(img_id) < 0:
             img_id = None
 
+        vcore, ram_mb, disk_gb, fl_id, fl_name = _resolve_specs(db, vm_data)
         nueva_vm = Vm(
             name=vm_data.get("id"),
-            vcore=int(vm_data.get("vcores", 1)),
-            ram=float(vm_data.get("ram", 512.0)),
-            disk=float(vm_data.get("disk", 5.0)),
+            vcore=vcore,
+            ram=ram_mb,
+            disk=disk_gb,
+            flavor_id=fl_id,
+            flavor_name=fl_name,
             state="DRAFT",
             slice_id=slice_id,
             image_id=img_id,

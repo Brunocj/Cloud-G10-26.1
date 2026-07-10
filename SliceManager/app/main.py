@@ -17,6 +17,7 @@ from app.routers import image_router
 from app.routers import project_router, user_router
 from app.routers import approval_router, notification_router
 from app.routers import audit_router, infra_router
+from app.routers import flavor_router
 from app.nats_producer import nats_producer
 from app.services.placement_worker import process_placement_worker
 from app.services.nats_listener import nats_result_listener
@@ -58,6 +59,7 @@ app.include_router(user_router.router)
 app.include_router(notification_router.router)
 app.include_router(audit_router.router)
 app.include_router(infra_router.router)
+app.include_router(flavor_router.router)
 
 @app.get("/")
 def health_check():
