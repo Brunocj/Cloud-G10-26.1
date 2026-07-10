@@ -59,9 +59,21 @@ async def destroy_deployed_slice(db: Session, db_slice: Slice) -> bool:
     if not s_json:
         s_json = {}
 
-    # Re-inyectar claves SSH frescas desde BD
-    any_worker = db.query(Worker).first()
-    fresh_key = _read_ssh_key(any_worker.ssh_key_path) if any_worker else ""
+    # Re-inyectar claves SSH frescas desde BD. Se elige un worker DE LA ZONA del
+    # slice y con ssh_key_path válido (no el primero de la tabla, que podría ser
+    # de otra zona o sin llave → dejaría las VMs sin clave en el destroy).
+    az = db_slice.availability_zone_id or 1
+    key_worker = (
+        db.query(Worker)
+          .filter(Worker.availability_zones_id == az, Worker.ssh_key_path.isnot(None))
+          .first()
+        or db.query(Worker).filter(Worker.ssh_key_path.isnot(None)).first()
+    )
+    fresh_key = _read_ssh_key(key_worker.ssh_key_path) if key_worker else ""
+    if not fresh_key:
+        logger.error("[DESTROYER] ⚠️ No se obtuvo ssh_private_key para el slice %s (az=%s) — "
+                     "el CP no podrá hacer SSH. Revisa ssh_key_path de los workers de esa zona.",
+                     slice_id, az)
 
     deployed_vms   = s_json.get("deployed_vms", [])
     deployed_links = s_json.get("deployed_links", [])

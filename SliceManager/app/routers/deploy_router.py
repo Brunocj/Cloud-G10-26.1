@@ -449,8 +449,17 @@ async def _shrink_slice(db, user, db_slice, zone_id, s_json,
     deployed_vms   = s_json.get("deployed_vms", [])
     deployed_links = s_json.get("deployed_links", [])
 
-    any_worker = db.query(Worker).first()
-    fresh_key  = _read_ssh_key(any_worker.ssh_key_path) if any_worker else ""
+    # Worker de la zona del slice con llave válida (no el primero de la tabla,
+    # que podría ser de otra zona o sin ssh_key_path).
+    key_worker = (
+        db.query(Worker)
+          .filter(Worker.availability_zones_id == zone_id, Worker.ssh_key_path.isnot(None))
+          .first()
+        or db.query(Worker).filter(Worker.ssh_key_path.isnot(None)).first()
+    )
+    fresh_key  = _read_ssh_key(key_worker.ssh_key_path) if key_worker else ""
+    if not fresh_key:
+        logger.error("[SHRINK] ⚠️ ssh_private_key vacía para slice %s (az=%s)", slice_id, zone_id)
 
     # Pares (from,to) de los enlaces eliminados explícitamente
     removed_edge_pairs = set()

@@ -103,6 +103,74 @@ async def _qinq_teardown(s_vlan: int, compute_ssh_map: dict) -> None:
         except Exception as exc:
             logger.warning(f"[OpenStack][QinQ] teardown en '{host}' falló: {exc}")
 
+
+# ── Purga idempotente de recursos de red de un slice ───────────────────────────
+# Borra por ID TODOS los recursos que coincidan por nombre (incluye duplicados
+# de intentos fallidos previos). Se usa como GUARDIA pre-deploy (clean slate) y
+# durante el destroy, para que nunca se acumulen recursos huérfanos.
+
+async def _purge_slice_networking(conn, slice_id: str, link_vlans: list) -> None:
+    def _list(gen_call):
+        return list(gen_call())
+
+    router_name = f"router-slice-{slice_id}"
+    net_names   = [f"net-slice-{slice_id}"] + [f"net-link-{v}" for v in (link_vlans or [])]
+    sg_names    = [f"secgroup-slice-{slice_id}", f"secgroup-slice-{slice_id}-no-internet"]
+
+    # 1. Routers (todos los homónimos): quitar interfaces + gateway, borrar por ID
+    routers = await asyncio.to_thread(_list, lambda: conn.network.routers(name=router_name))
+    for r in routers:
+        iface_ports = await asyncio.to_thread(
+            _list, lambda rid=r.id: conn.network.ports(device_id=rid))
+        for p in iface_ports:
+            try:
+                await asyncio.to_thread(conn.network.remove_interface_from_router, r.id, port_id=p.id)
+            except Exception:
+                pass
+        try:
+            await asyncio.to_thread(conn.network.update_router, r, external_gateway_info=None)
+        except Exception:
+            pass
+        try:
+            await asyncio.to_thread(conn.network.delete_router, r.id)
+            logger.info(f"[OpenStack][PURGE] router {router_name} ({r.id}) eliminado")
+        except Exception as e:
+            logger.warning(f"[OpenStack][PURGE] no se pudo borrar router {r.id}: {e}")
+
+    # 2. Redes (todas las homónimas): liberar FIPs + borrar puertos, luego la red
+    for nm in net_names:
+        nets = await asyncio.to_thread(_list, lambda name=nm: conn.network.networks(name=name))
+        for net in nets:
+            ports = await asyncio.to_thread(
+                _list, lambda nid=net.id: conn.network.ports(network_id=nid))
+            for p in ports:
+                fips = await asyncio.to_thread(
+                    _list, lambda pid=p.id: conn.network.ips(port_id=pid))
+                for fip in fips:
+                    try:
+                        await asyncio.to_thread(conn.network.delete_ip, fip.id)
+                    except Exception:
+                        pass
+                try:
+                    await asyncio.to_thread(conn.network.delete_port, p.id)
+                except Exception:
+                    pass
+            try:
+                await asyncio.to_thread(conn.network.delete_network, net.id)
+                logger.info(f"[OpenStack][PURGE] red {nm} ({net.id}) eliminada")
+            except Exception as e:
+                logger.warning(f"[OpenStack][PURGE] no se pudo borrar red {net.id}: {e}")
+
+    # 3. Security groups (todos los homónimos)
+    for nm in sg_names:
+        sgs = await asyncio.to_thread(_list, lambda name=nm: conn.network.security_groups(name=name))
+        for sg in sgs:
+            try:
+                await asyncio.to_thread(conn.network.delete_security_group, sg.id)
+                logger.info(f"[OpenStack][PURGE] security group {nm} ({sg.id}) eliminado")
+            except Exception as e:
+                logger.warning(f"[OpenStack][PURGE] no se pudo borrar SG {sg.id}: {e}")
+
 class OpenStackNetworkExecutor:
     """Implementa el aprovisionamiento de red para la zona OpenStack (Strategy Pattern)."""
 
@@ -201,6 +269,15 @@ class OpenStackNetworkExecutor:
                             f"({_created_network.id}) para la extensión del slice {slice_id}")
 
             if not is_extend:
+                # 0. GUARDIA idempotente: purgar cualquier resto previo de este
+                # slice_id (de un intento fallido anterior) para NO acumular
+                # recursos duplicados con el mismo nombre en un re-deploy.
+                try:
+                    await _purge_slice_networking(
+                        conn, slice_id, [l.vlan_id for l in request.links])
+                except Exception as _pexc:
+                    logger.warning(f"[OpenStack] Guardia pre-deploy: purga best-effort falló: {_pexc}")
+
                 # 1. Crear Provider Network
                 network_args = {"name": network_name}
                 if os.getenv("OS_VLAN_TRANSPARENT", "").lower() in ("1", "true", "yes"):
@@ -578,6 +655,16 @@ class OpenStackNetworkExecutor:
             _s_vlan = next((l.s_vlan_id for l in (request.links or []) if getattr(l, "s_vlan_id", 0)), 0)
             if _s_vlan and getattr(request, "compute_ssh_map", None):
                 await _qinq_teardown(_s_vlan, request.compute_ssh_map)
+
+            # 0.b Purga idempotente a prueba de duplicados: borra por ID TODOS los
+            # routers/redes/SGs homónimos del slice (resuelve el caso "More than
+            # one X exists with the name..."). Los bloques siguientes quedan como
+            # respaldo (no-ops si esto ya limpió todo) + puertos externos.
+            try:
+                await _purge_slice_networking(
+                    conn, slice_id, [l.vlan_id for l in (request.links or [])])
+            except Exception as _pexc:
+                logger.warning(f"[OpenStack] Destroy: purga best-effort falló: {_pexc}")
 
             # 0. Borrar redes, subredes y puertos de enlaces (links) punto a punto
             if request.links:

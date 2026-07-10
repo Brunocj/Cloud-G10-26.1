@@ -221,9 +221,14 @@ async def nats_result_listener():
                     s_json = db_slice.slice_json or {}
                     if isinstance(s_json, str):
                         s_json = json.loads(s_json)
-                    all_workers = db.query(Worker).all()
-                    workers_by_ip = {w.ip: w for w in all_workers}
-                    any_worker = next(iter(workers_by_ip.values()), None)
+                    # Worker de la zona del slice con llave válida (no uno arbitrario)
+                    _az = db_slice.availability_zone_id or 1
+                    any_worker = (
+                        db.query(Worker)
+                          .filter(Worker.availability_zones_id == _az, Worker.ssh_key_path.isnot(None))
+                          .first()
+                        or db.query(Worker).filter(Worker.ssh_key_path.isnot(None)).first()
+                    )
                     fresh_key = ""
                     if any_worker and any_worker.ssh_key_path:
                         key_path = any_worker.ssh_key_path
