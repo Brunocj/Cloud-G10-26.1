@@ -39,7 +39,7 @@ export const Sidebar = ({
     apiFetch, user, flash,
     isSuperAdmin, onInfraMonitor, onProjects, onUsersManage,
     onRequests, pendingCount = 0,
-    onConsumption, onAudit, onInfraManage,
+    onConsumption, onAudit,
     onLoadTemplate, onPublishTemplate, onLogs,
 }) => {
     const isAdmin        = user?.role === "admin" || user?.role === "superAdmin" || user?.role === "jefeProyecto";
@@ -182,10 +182,7 @@ export const Sidebar = ({
                             <SecondaryBtn onClick={onAudit} icon={ClipboardList} label="Bitácora de Eventos" />
                         )}
                         {isSuperAdmin && (
-                            <SecondaryBtn onClick={onInfraMonitor} icon={Activity} label="Monitoreo de Infraestructura" />
-                        )}
-                        {isSuperAdmin && (
-                            <SecondaryBtn onClick={onInfraManage} icon={Server} label="Gestión de Infraestructura" />
+                            <SecondaryBtn onClick={onInfraMonitor} icon={Server} label="Infraestructura" />
                         )}
                         {isSuperAdmin && (
                             <SecondaryBtn onClick={onLogs} icon={Terminal} label="Logs de contenedores" />

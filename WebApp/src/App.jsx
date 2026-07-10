@@ -20,7 +20,6 @@ import { UsersView }        from "./views/UsersView";
 import { RequestsView }     from "./views/RequestsView";
 import { ConsumptionView }  from "./views/ConsumptionView";
 import { AuditView }        from "./views/AuditView";
-import { InfraManageView }  from "./views/InfraManageView";
 
 // Realtime notifications
 import { useNotifications } from "./hooks/useNotifications";
@@ -606,7 +605,6 @@ export default function App() {
             pendingCount={pendingCount}
             onConsumption={() => navigate("/admin/consumption")}
             onAudit={() => navigate("/admin/audit")}
-            onInfraManage={() => navigate("/admin/infra-manage")}
             onLoadTemplate={loadTemplate}
             onPublishTemplate={(id) => setModal({ type: "publishTemplate", id })}
             onLogs={() => navigate("/admin/logs")}
@@ -652,6 +650,9 @@ export default function App() {
     };
 
     return (
+        <>
+        {/* CSS global (margin 0, fondo del body, scrollbars) para TODAS las rutas, incluidas las fullscreen */}
+        <style key={themeRev}>{getGlobalCss()}</style>
         <Routes>
             {/* Profile — full screen, no sidebar */}
             <Route path="/profile" element={
@@ -669,7 +670,7 @@ export default function App() {
                           user={user} logout={logout} reTheme={reTheme}
                           themeRev={themeRev} onBack={() => navigate("/")}
                           onProfile={() => navigate("/profile")}
-                          apiFetch={apiFetch}
+                          apiFetch={apiFetch} flash={flash}
                       />
                     : <Navigate to="/" replace />
             } />
@@ -711,13 +712,8 @@ export default function App() {
                     : <Navigate to="/" replace />
             } />
 
-            {/* Infrastructure management — superAdmin only */}
-            <Route path="/admin/infra-manage" element={
-                isSuperAdmin
-                    ? <InfraManageView user={user} onBack={() => navigate("/")}
-                          onProfile={() => navigate("/profile")} apiFetch={apiFetch} flash={flash} />
-                    : <Navigate to="/" replace />
-            } />
+            {/* Infrastructure management — fusionada en /admin/infra */}
+            <Route path="/admin/infra-manage" element={<Navigate to="/admin/infra" replace />} />
 
             {/* Deploy requests inbox — admin/superAdmin/jefeProyecto, full screen */}
             <Route path="/requests" element={
@@ -777,5 +773,6 @@ export default function App() {
             {/* Catch-all */}
             <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
+        </>
     );
 }
