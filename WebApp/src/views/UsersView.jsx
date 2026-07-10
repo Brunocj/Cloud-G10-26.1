@@ -361,12 +361,11 @@ export const UsersView = ({ user, logout, reTheme, themeRev, onBack, onProfile, 
             {/* Topbar */}
             <div style={{ padding: "0 20px", height: 54, borderBottom: `1px solid ${T.border}`, background: T.surface, display: "flex", alignItems: "center", gap: 12, flexShrink: 0, boxShadow: "0 2px 8px rgba(20,50,22,0.05)" }}>
                 <button onClick={onBack}
-                    style={btnBase({ padding: "5px 12px", fontSize: 11, boxShadow: "none", display: "flex", alignItems: "center", gap: 5 })}>
+                    style={btnBase({ padding: "6px 10px", fontSize: 11, background: T.surfaceElevated, color: T.textMuted, border: `1px solid ${T.border}`, boxShadow: "none", display: "flex", alignItems: "center", gap: 6 })}>
                     <ArrowLeft size={13} /> Volver
                 </button>
-                <div style={{ width: 1, height: 22, background: T.border }} />
                 <ShieldCheck size={16} color={T.accent} />
-                <span style={{ fontSize: 14, fontWeight: 800, color: T.text }}>Gestión de Usuarios</span>
+                <span style={{ fontSize: 15, fontWeight: 800, color: T.text }}>Gestión de Usuarios</span>
                 <div style={{ flex: 1 }} />
                 <button onClick={() => setImporting(true)}
                     style={btnBase({ padding: "6px 14px", fontSize: 12, fontWeight: 700, background: T.surfaceElevated, color: T.accent, border: `1px solid ${T.accent}44`, boxShadow: "none", display: "flex", alignItems: "center", gap: 5 })}>
