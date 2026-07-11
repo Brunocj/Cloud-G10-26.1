@@ -14,6 +14,9 @@ class WorkerState(BaseModel):
     disponible_cpu: float    # C_efectivo_cpu[j] - Σ vcpus(VMs ACTIVE)
     disponible_ram: float    # C_efectivo_ram[j] - Σ ram_gb(VMs ACTIVE)
     disponible_disco: float  # C_efectivo_disco[j] - Σ disco_gb(VMs ACTIVE)
+    # Nombre físico del host (BYOS). Linux: opcional (se deriva del worker_id).
+    # OpenStack: nombre del host de Nova (worker1/2/3) para forzar el scheduler.
+    host_name: Optional[str] = None
 
 
 class PlacementRequest(BaseModel):

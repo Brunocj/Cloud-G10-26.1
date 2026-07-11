@@ -240,6 +240,9 @@ async def process_placement_worker():
                     "disponible_cpu":   disp_cpu,
                     "disponible_ram":   disp_ram,
                     "disponible_disco": disp_disco,
+                    # Nombre físico del host para el BYOS (OpenStack: host de Nova).
+                    # Con esto VMPlacement ya no necesita consultar a Nova.
+                    "host_name":        w.name,
                 })
                 logger.info(
                     "[SERVERS_STATE] Worker-%d | "

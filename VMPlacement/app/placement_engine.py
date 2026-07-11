@@ -52,13 +52,18 @@ AZ_ID_OPENSTACK  = int(os.getenv("OPENSTACK_AZ_ID", "2"))
 # STRATEGY: Recolección de datos de capacidad
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _collect_linux_workers(workers_in: List[WorkerState]) -> Tuple[List[WorkerState], List[str]]:
+def _collect_provided_workers(workers_in: List[WorkerState]) -> Tuple[List[WorkerState], List[str]]:
     """
-    Strategy LINUX CLUSTER:
-    Usa los WorkerState enviados por el SliceManager (ya calculados con Prometheus).
-    Retorna (workers_normalizados, hostnames).
+    Strategy AGNÓSTICA (Linux Cluster y OpenStack):
+    Usa los WorkerState enviados por el SliceManager, ya calculados desde la BD
+    (capacidad efectiva con overcommit − uso de VMs ACTIVE). VMPlacement queda
+    ciego a la zona: solo resuelve el bin-packing con las capacidades recibidas.
+
+    El nombre físico del host (BYOS) sale de `host_name` si el caller lo envía
+    (OpenStack: host de Nova); si no, se deriva del worker_id (Linux legado).
+    Retorna (workers, hostnames).
     """
-    host_names = [f"worker-{w.worker_id}" for w in workers_in]
+    host_names = [w.host_name or f"worker-{w.worker_id}" for w in workers_in]
     return workers_in, host_names
 
 
@@ -352,9 +357,19 @@ def run_placement(
       (success, placement_map, reason, detail)
       donde placement_map[i].selected_host = nombre físico del host ganador.
     """
+    # ── Strategy AGNÓSTICA ─────────────────────────────────────────────────────
+    # Si el caller envió inventario (WorkerState desde la BD), se usa para AMBAS
+    # zonas por el mismo camino. VMPlacement no consulta a ningún backend de zona.
+    if workers:
+        logger.info("[PLACEMENT] az_id=%d → %d workers recibidos de la BD (agnóstico)",
+                    availability_zone_id, len(workers))
+        norm_workers, host_names = _collect_provided_workers(workers)
+        return _solve_cpsat(vms, norm_workers, host_names, timeout_seconds)
+
+    # ── Fallback legado ────────────────────────────────────────────────────────
+    # OpenStack sin inventario recibido → consultar Nova (compatibilidad).
     if availability_zone_id == AZ_ID_OPENSTACK:
-        # ── Strategy: OpenStack (BYOS) ─────────────────────────────────────────
-        logger.info("[BYOS] az_id=%d → Strategy OpenStack Nova Hypervisors", availability_zone_id)
+        logger.info("[BYOS] az_id=%d sin workers → fallback a Nova Hypervisors API", availability_zone_id)
         try:
             os_workers, host_names = _collect_openstack_workers()
         except Exception as exc:
@@ -368,13 +383,11 @@ def run_placement(
                 False, [], "NO_WORKERS_AVAILABLE",
                 "OpenStack no reportó hipervisores activos en la zona.",
             )
-        logger.info(
-            "[BYOS][OpenStack] %d hipervisores disponibles para el solver.", len(os_workers)
-        )
+        logger.info("[BYOS][OpenStack] %d hipervisores (fallback Nova) para el solver.", len(os_workers))
         return _solve_cpsat(vms, os_workers, host_names, timeout_seconds)
 
-    else:
-        # ── Strategy: Linux Cluster (comportamiento original) ──────────────────
-        logger.info("[BYOS] az_id=%d → Strategy Linux Cluster (workers locales)", availability_zone_id)
-        norm_workers, host_names = _collect_linux_workers(workers)
-        return _solve_cpsat(vms, norm_workers, host_names, timeout_seconds)
+    # Linux (o cualquier zona) sin workers → nada que resolver
+    return (
+        False, [], "NO_WORKERS_AVAILABLE",
+        "No se recibió inventario de workers para el placement.",
+    )
