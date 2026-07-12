@@ -8,8 +8,12 @@ class Settings(BaseSettings):
     # URL interna de Loki (nombre de servicio Docker en pucp_cloud_net)
     LOKI_URL: str = "http://loki:3100"
 
-    # Timeout en segundos para el reenvío de requests
+    # Timeout en segundos para el reenvío de requests genéricos
     FORWARD_TIMEOUT: float = 30.0
+
+    # Timeout extendido para subidas de imágenes (pueden pesar varios GB
+    # y pasar por el tunnel SOCKS5 hacia OpenStack Glance)
+    IMAGE_UPLOAD_TIMEOUT: float = 300.0
 
     LOG_LEVEL: str = "INFO"
 

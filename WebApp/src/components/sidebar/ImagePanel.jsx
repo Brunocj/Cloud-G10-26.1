@@ -4,12 +4,14 @@ import { Label } from "../ui/Label";
 import { Upload, RefreshCcw, Trash2, CheckCircle, Circle, Lock, Package, Loader } from "../ui/Icon";
 
 export const ImagePanel = ({ fullImages, onRefresh, flash, refreshImageList, apiFetch, user }) => {
-    const [uploading,   setUploading]   = useState(false);
-    const [gcRunning,   setGcRunning]   = useState(false);
-    const [uploadForm,  setUploadForm]  = useState({ name: "", file: null, isGeneral: false, azId: 1, cloudInit: true, defaultUsername: "", defaultPassword: "" });
-    const [showUpload,  setShowUpload]  = useState(false);
-    const [azList,      setAzList]      = useState([{ id: 1, name: "Linux Cluster" }, { id: 2, name: "OpenStack" }]);
-    const fileRef = useRef(null);
+    const [uploading,      setUploading]      = useState(false);
+    const [gcRunning,      setGcRunning]      = useState(false);
+    const [uploadForm,     setUploadForm]     = useState({ name: "", file: null, isGeneral: false, azId: 1, cloudInit: true, defaultUsername: "", defaultPassword: "" });
+    const [showUpload,     setShowUpload]     = useState(false);
+    const [azList,         setAzList]         = useState([{ id: 1, name: "Linux Cluster" }, { id: 2, name: "OpenStack" }]);
+    const [uploadProgress, setUploadProgress] = useState(null); // null=idle, 0-100=subiendo
+    const fileRef  = useRef(null);
+    const abortRef = useRef(null); // AbortController activo durante la subida
 
     // Fetch AZ list when upload panel is opened
     useState(() => {
@@ -27,19 +29,31 @@ export const ImagePanel = ({ fullImages, onRefresh, flash, refreshImageList, api
         if (!uploadForm.cloudInit && !(uploadForm.defaultUsername.trim() && uploadForm.defaultPassword.trim())) {
             flash("Esta imagen no soporta cloud-init: indica el usuario y contraseña por defecto", "error"); return;
         }
+
+        const controller = new AbortController();
+        abortRef.current = controller;
         setUploading(true);
+        setUploadProgress(0);
+
         const fd = new FormData();
-        fd.append("name",       uploadForm.name.trim());
-        fd.append("is_general", uploadForm.isGeneral ? 1 : 0);
+        fd.append("name",                uploadForm.name.trim());
+        fd.append("is_general",          uploadForm.isGeneral ? 1 : 0);
         fd.append("availability_zone_id", uploadForm.azId);
-        fd.append("cloud_init_support", uploadForm.cloudInit ? 1 : 0);
+        fd.append("cloud_init_support",  uploadForm.cloudInit ? 1 : 0);
         if (!uploadForm.cloudInit) {
             fd.append("default_username", uploadForm.defaultUsername.trim());
             fd.append("default_password", uploadForm.defaultPassword.trim());
         }
-        fd.append("file",       uploadForm.file);
+        fd.append("file", uploadForm.file);
+
         try {
-            const res  = await apiFetch("/slices/utils/images/upload", { method: "POST", body: fd });
+            const res = await apiFetch("/slices/utils/images/upload", {
+                method: "POST",
+                body: fd,
+                onUploadProgress: (pct) => setUploadProgress(pct),
+                timeout: 300,          // 5 minutos — suficiente para Glance via SOCKS5
+                signal: controller.signal,
+            });
             const data = await res.json();
             if (!res.ok) throw new Error(data.detail || "Error al subir");
             flash(`Imagen '${uploadForm.name}' subida correctamente.`);
@@ -47,8 +61,17 @@ export const ImagePanel = ({ fullImages, onRefresh, flash, refreshImageList, api
             setUploadForm({ name: "", file: null, isGeneral: false, azId: 1, cloudInit: true, defaultUsername: "", defaultPassword: "" });
             onRefresh();
             if (refreshImageList) refreshImageList();
-        } catch (e) { flash(e.message, "error"); }
-        finally { setUploading(false); }
+        } catch (e) {
+            if (e.message !== "Subida cancelada") flash(e.message, "error");
+        } finally {
+            setUploading(false);
+            setUploadProgress(null);
+            abortRef.current = null;
+        }
+    };
+
+    const handleCancelUpload = () => {
+        if (abortRef.current) abortRef.current.abort();
     };
 
     const handleDelete = async (img) => {
@@ -145,13 +168,51 @@ export const ImagePanel = ({ fullImages, onRefresh, flash, refreshImageList, api
                             </div>
                         )}
 
-                        <button onClick={handleUpload} disabled={uploading}
-                            style={btnBase({ width: "100%", background: T.accent, color: "#fff", border: "none", opacity: uploading ? 0.6 : 1,
-                                display: "flex", alignItems: "center", justifyContent: "center", gap: 6 })}>
-                            {uploading
-                                ? <><Loader size={13} style={{ animation: "spin 0.8s linear infinite" }} /> Subiendo...</>
-                                : <><CheckCircle size={13} /> Confirmar Subida</>}
-                        </button>
+                        {/* Barra de progreso — visible mientras se sube */}
+                        {uploadProgress !== null && (
+                            <div style={{ marginBottom: 8 }}>
+                                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: T.textMuted, marginBottom: 4 }}>
+                                    <span>
+                                        {uploadForm.azId === 2
+                                            ? "☁ Subiendo a OpenStack Glance..."
+                                            : "🖥 Copiando al NFS..."}
+                                    </span>
+                                    <span style={{ fontWeight: 700, color: T.accent }}>{uploadProgress}%</span>
+                                </div>
+                                <div style={{ height: 6, background: T.border, borderRadius: 99, overflow: "hidden" }}>
+                                    <div style={{
+                                        height: "100%",
+                                        width: `${uploadProgress}%`,
+                                        background: `linear-gradient(90deg, ${T.accent}, #7c3aed)`,
+                                        borderRadius: 99,
+                                        transition: "width 0.3s ease",
+                                    }} />
+                                </div>
+                                {uploadProgress === 100 && (
+                                    <div style={{ fontSize: 9.5, color: T.textMuted, marginTop: 4, textAlign: "center" }}>
+                                        Procesando en el servidor...
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {/* Botones Confirmar / Cancelar */}
+                        <div style={{ display: "flex", gap: 6 }}>
+                            <button onClick={handleUpload} disabled={uploading}
+                                style={btnBase({ flex: 1, background: T.accent, color: "#fff", border: "none", opacity: uploading ? 0.6 : 1,
+                                    display: "flex", alignItems: "center", justifyContent: "center", gap: 6 })}>
+                                {uploading
+                                    ? <><Loader size={13} style={{ animation: "spin 0.8s linear infinite" }} /> Subiendo...</>
+                                    : <><CheckCircle size={13} /> Confirmar Subida</>}
+                            </button>
+                            {uploading && (
+                                <button onClick={handleCancelUpload}
+                                    style={btnBase({ padding: "6px 12px", background: T.redLight, color: T.red,
+                                        border: `1px solid ${T.red}44`, display: "flex", alignItems: "center", gap: 5 })}>
+                                    ✕ Cancelar
+                                </button>
+                            )}
+                        </div>
                     </div>
                 )}
 

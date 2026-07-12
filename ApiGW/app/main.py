@@ -77,25 +77,15 @@ app.add_middleware(
 
 # ── JWT Middleware ─────────────────────────────────────────────────────────
 # Se registra DESPUÉS de CORS para que OPTIONS ya haya sido manejado.
+#
+# Middleware ASGI puro (no BaseHTTPMiddleware): lee el jwks_client desde
+# app.state en cada request via scope["app"], sin envolver ni bufferizar
+# el body — necesario para que uploads grandes (imágenes OpenStack) no se
+# corrompan al pasar por el middleware.
 if settings.JWT_ENABLED:
     from app.middleware.jwt_auth import JWTAuthMiddleware
 
-    @app.middleware("http")
-    async def jwt_middleware(request, call_next):
-        """
-        Wrapper que inyecta el JWTAuthMiddleware usando el jwks_client
-        inicializado en el lifespan (disponible en app.state).
-        """
-        from starlette.responses import JSONResponse
-        jwks = request.app.state.jwks_client
-        if jwks is None:
-            # Keycloak no disponible al arrancar — rechazar todas las peticiones
-            return JSONResponse(
-                {"detail": "Servicio de autenticación no disponible"},
-                status_code=503,
-            )
-        mw = JWTAuthMiddleware(app=None, jwks_client=jwks)
-        return await mw.dispatch(request, call_next)
+    app.add_middleware(JWTAuthMiddleware)
 
 # ── Routers ────────────────────────────────────────────────────────────────
 app.include_router(slices.router)
