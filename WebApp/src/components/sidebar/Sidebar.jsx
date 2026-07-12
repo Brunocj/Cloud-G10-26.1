@@ -5,12 +5,13 @@ import { AzureVm }     from "../ui/AzureIcons";
 import {
     Cloud, Wrench,
     Terminal, LayoutList, Image, Plus, ArrowLeft, Activity, ChevronDown, Users, ShieldCheck, Inbox,
-    BarChart2, ClipboardList, Server,
+    BarChart2, ClipboardList, Server, Cpu,
 } from "../ui/Icon";
 
 import { TemplatePicker } from "./TemplatePicker";
 import { SliceCard }      from "./SliceCard";
 import { ImagePanel }     from "./ImagePanel";
+import { FlavorPanel }    from "./FlavorPanel";
 
 // Statuses considered "active" — shown by default
 const ACTIVE_STATUSES = new Set(["ACTIVE", "PROVISIONING", "PENDING_APPROVAL", "REJECTED", "DRAFT"]);
@@ -130,6 +131,26 @@ export const Sidebar = ({
                 </>
             )}
 
+            {/* ── FLAVORS MODE ────────────────────────────────────────────── */}
+            {sidebarMode === "flavors" && (
+                <>
+                    <button onClick={() => setSidebarMode("browse")} style={{
+                        width: "100%", padding: "10px 16px",
+                        display: "flex", alignItems: "center", gap: 6,
+                        background: "transparent", border: "none", borderBottom: `1px solid ${T.border}`,
+                        cursor: "pointer", fontFamily: "inherit",
+                        color: T.textMuted, fontSize: 11, fontWeight: 700, transition: "background 0.15s",
+                    }}
+                        onMouseEnter={e => e.currentTarget.style.background = T.accentLight}
+                        onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+                        <ArrowLeft size={12} /> Volver a Slices
+                    </button>
+                    <div style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
+                        <FlavorPanel apiFetch={apiFetch} user={user} flash={flash} />
+                    </div>
+                </>
+            )}
+
             {/* ── BROWSE MODE ─────────────────────────────────────────────── */}
             {sidebarMode === "browse" && (
                 <>
@@ -174,6 +195,9 @@ export const Sidebar = ({
                         )}
                         {isAdmin && (
                             <SecondaryBtn onClick={() => setSidebarMode("images")} icon={Image} label="Gestionar Imágenes" />
+                        )}
+                        {isAdmin && (
+                            <SecondaryBtn onClick={() => setSidebarMode("flavors")} icon={Cpu} label="Gestionar Flavors" />
                         )}
                         {isAdmin && (
                             <SecondaryBtn onClick={onConsumption} icon={BarChart2} label="Consumo por Proyecto" />

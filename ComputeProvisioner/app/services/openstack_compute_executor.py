@@ -1,4 +1,5 @@
 import os
+import re
 import logging
 import asyncio
 import openstack
@@ -8,6 +9,12 @@ from app.models.schemas import VMSpec, VMResult, DeployStatus
 from app.services.ssh_client import SSHClient
 
 logger = logging.getLogger("compute-provisioner.openstack")
+
+
+def _sanitize_flavor_name(name: str) -> str:
+    """Nombre legible para Nova: solo alfanuméricos/._- , máx 60 chars."""
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", name.strip()).strip("-")
+    return cleaned[:60] or "flavor"
 
 def get_connection():
     """Establece conexión con la API de OpenStack usando openstacksdk."""
@@ -91,7 +98,7 @@ class OpenStackComputeExecutor:
                 
         raise RuntimeError(f"No se pudo encontrar ninguna imagen en Glance que coincida con: {image_path}")
 
-    def _ensure_flavor_uuid(self, conn, vcpus: int, ram_mb: int, disk_gb: int) -> str:
+    def _ensure_flavor_uuid(self, conn, vcpus: int, ram_mb: int, disk_gb: int, cached_flavor_id: str = None, flavor_name: str = None) -> str:
         """
         Materializa un flavor Nova con specs EXACTOS (estrategia BYOS-flavors).
 
@@ -99,18 +106,57 @@ class OpenStackComputeExecutor:
         que Nova tenga un flavor idéntico a lo pedido: si ya existe uno con
         (vcpus, ram, disk) exactos lo reutiliza; si no, lo crea al vuelo. Así la
         VM sale con los recursos exactos que el usuario eligió en su flavor.
+
+        Si `flavor_name` viene informado (la VM usa un flavor lógico con
+        nombre propio), se prioriza crearlo/reutilizarlo con ese nombre para
+        que sea reconocible en `openstack flavor list`, en vez de colapsarlo
+        por specs con otro flavor de nombre distinto.
         """
         vcpus   = int(vcpus)
         ram_mb  = int(round(float(ram_mb)))
         disk_gb = int(round(float(disk_gb))) if disk_gb else 1
 
-        # 1. Coincidencia exacta (cpu + ram + disco)
+        # 0. UUID cacheado (flavor lógico materializado eager por un admin, o
+        #    ya resuelto en un deploy previo) — evita listar todos los flavors
+        #    de Nova si ya sabemos cuál es. Se valida que siga existiendo y con
+        #    los specs correctos por si fue borrado/editado fuera de la plataforma.
+        if cached_flavor_id:
+            try:
+                cached = conn.compute.get_flavor(cached_flavor_id)
+                if (cached.vcpus == vcpus and int(cached.ram) == ram_mb
+                        and int(getattr(cached, "disk", 0) or 0) == disk_gb):
+                    return cached.id
+                logger.warning(
+                    f"[OpenStack] provider_flavor_id cacheado {cached_flavor_id} tiene specs distintos "
+                    f"a los pedidos — recalculando."
+                )
+            except Exception:
+                logger.warning(f"[OpenStack] provider_flavor_id cacheado {cached_flavor_id} ya no existe en Nova — recalculando.")
+
+        # 1. Nombre propio → crear/reutilizar directo con ese nombre
+        if flavor_name:
+            base_name = _sanitize_flavor_name(flavor_name)
+            for candidate in (base_name, f"{base_name}-{vcpus}c{ram_mb}m{disk_gb}g"):
+                try:
+                    created = conn.compute.create_flavor(
+                        name=candidate, vcpus=vcpus, ram=ram_mb, disk=disk_gb, is_public=True,
+                    )
+                    logger.info(f"[OpenStack] Flavor Nova creado al vuelo: {candidate} (UUID={created.id})")
+                    return created.id
+                except Exception:
+                    existing = next((f for f in conn.compute.flavors() if f.name == candidate), None)
+                    if (existing and existing.vcpus == vcpus and int(existing.ram) == ram_mb
+                            and int(getattr(existing, "disk", 0) or 0) == disk_gb):
+                        return existing.id
+            logger.warning(f"[OpenStack] No se pudo crear el flavor Nova con nombre '{base_name}' — usando fallback genérico.")
+
+        # 2. Coincidencia exacta (cpu + ram + disco)
         for flavor in conn.compute.flavors():
             if (flavor.vcpus == vcpus and int(flavor.ram) == ram_mb
                     and int(getattr(flavor, "disk", 0) or 0) == disk_gb):
                 return flavor.id
 
-        # 2. No existe → crearlo con specs exactos (idempotente por nombre)
+        # 3. No existe → crearlo con specs exactos (idempotente por nombre)
         name = f"pucp-{vcpus}c-{ram_mb}m-{disk_gb}g"
         try:
             created = conn.compute.create_flavor(
@@ -171,7 +217,10 @@ class OpenStackComputeExecutor:
         try:
             # 1. Resolver Imagen y Flavor
             image_uuid = await asyncio.to_thread(self._resolve_image_uuid, conn, vm.image_path)
-            flavor_uuid = await asyncio.to_thread(self._ensure_flavor_uuid, conn, vm.vcpus, vm.ram_mb, getattr(vm, "disk_gb", 1))
+            flavor_uuid = await asyncio.to_thread(
+                self._ensure_flavor_uuid, conn, vm.vcpus, vm.ram_mb, getattr(vm, "disk_gb", 1),
+                getattr(vm, "provider_flavor_id", None), getattr(vm, "flavor_name", None),
+            )
             
             # 2. Extraer ID de Puerto Neutron
             port_id = None
@@ -255,6 +304,7 @@ class OpenStackComputeExecutor:
                 provider_instance_id=server.id,
                 vnc_url=vnc_token,
                 external_ip=external_ip,
+                provider_flavor_id=flavor_uuid,
             )
             logger.info(f"[OpenStack] VMResult.vnc_url = {result.vnc_url!r}")
             return result

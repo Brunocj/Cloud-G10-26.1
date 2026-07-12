@@ -39,8 +39,6 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, editMode = fals
     const [f, setF]                 = useState(() => initForm(node));
     const [availableIps, setIps]    = useState([]);
     const [flavors, setFlavors]     = useState([]);
-    const [showNewFlavor, setShowNewFlavor] = useState(false);
-    const [nf, setNf]               = useState({ name: "", visibility: "private", project_id: "" });
     const u = (k, v) => setF(p => ({ ...p, [k]: v }));
 
     // Una VM está "desplegada" si trae campos que solo el servidor inyecta.
@@ -80,36 +78,6 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, editMode = fals
     const applyFlavor = (fl) => {
         if (!fl) { setF(p => ({ ...p, flavor_id: null })); return; }  // "Personalizado"
         setF(p => ({ ...p, flavor_id: fl.id, vcores: fl.vcpus, ram: fl.ram_mb, disk: fl.disk_gb }));
-    };
-
-    const createFlavor = () => {
-        if (!apiFetch || !nf.name.trim()) return;
-        const body = {
-            name: nf.name.trim(), vcpus: Number(f.vcores) || 1,
-            ram_mb: Number(f.ram) || 512, disk_gb: Number(f.disk) || 5,
-            visibility: nf.visibility,
-            project_id: nf.visibility === "project" && nf.project_id ? Number(nf.project_id) : null,
-        };
-        apiFetch("/slices/utils/flavors", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
-            .then(r => { if (!r.ok) return r.json().then(e => Promise.reject(e)); return r.json(); })
-            .then(created => {
-                setFlavors(prev => [...prev, created]);
-                setF(p => ({ ...p, flavor_id: created.id }));
-                setShowNewFlavor(false);
-                setNf({ name: "", visibility: "private", project_id: "" });
-            })
-            .catch(e => alert(e?.detail || "No se pudo crear el flavor."));
-    };
-
-    const deleteFlavor = (id) => {
-        if (!apiFetch || !window.confirm("¿Eliminar este flavor? Las VMs que ya lo usaron conservan sus recursos.")) return;
-        apiFetch(`/slices/utils/flavors/${id}`, { method: "DELETE" })
-            .then(r => { if (!r.ok) return r.json().then(e => Promise.reject(e)); return r.json(); })
-            .then(() => {
-                setFlavors(prev => prev.filter(x => x.id !== id));
-                setF(p => (p.flavor_id === id ? { ...p, flavor_id: null } : p));
-            })
-            .catch(e => alert(e?.detail || "No se pudo eliminar el flavor."));
     };
 
     const selectedFlavor = flavors.find(x => x.id === f.flavor_id);
@@ -259,58 +227,17 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, editMode = fals
                             {!isReadOnly && (
                                 <div style={{ marginBottom: 9 }}>
                                     <div style={{ fontSize: 9, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 3 }}>Flavor</div>
-                                    <div style={{ display: "flex", gap: 6 }}>
-                                        <select value={f.flavor_id || ""}
-                                            onChange={e => applyFlavor(e.target.value ? flavors.find(x => x.id === Number(e.target.value)) : null)}
-                                            style={{ ...inp, fontSize: 12, cursor: "pointer", flex: 1 }}>
-                                            <option value="">⚙ Personalizado (recursos libres)</option>
-                                            {flavors.map(fl => (
-                                                <option key={fl.id} value={fl.id}>
-                                                    {fl.name} — {fl.vcpus}c / {Math.round(fl.ram_mb)}MB / {Math.round(fl.disk_gb)}GB
-                                                    {fl.visibility === "global" ? " 🌐" : fl.visibility === "project" ? " 👥" : ""}
-                                                </option>
-                                            ))}
-                                        </select>
-                                        {usingFlavor && selectedFlavor?.editable ? (
-                                            <button title="Eliminar este flavor" onClick={() => deleteFlavor(f.flavor_id)}
-                                                style={{ background: T.redLight, border: `1px solid ${T.red}33`, borderRadius: 6, cursor: "pointer", color: T.red, padding: "0 8px", display: "flex", alignItems: "center" }}>
-                                                <Trash2 size={12} />
-                                            </button>
-                                        ) : (
-                                            <button title="Crear flavor con los recursos actuales" onClick={() => setShowNewFlavor(v => !v)}
-                                                style={{ background: T.accentLight, border: `1px solid ${T.accent}44`, borderRadius: 6, cursor: "pointer", color: T.accent, padding: "0 8px", display: "flex", alignItems: "center" }}>
-                                                <Plus size={13} />
-                                            </button>
-                                        )}
-                                    </div>
-
-                                    {/* Mini-form: crear flavor personalizado */}
-                                    {showNewFlavor && !usingFlavor && (
-                                        <div style={{ marginTop: 8, padding: "8px 9px", background: T.surface, borderRadius: 7, border: `1px dashed ${T.accent}55`, display: "flex", flexDirection: "column", gap: 6 }}>
-                                            <div style={{ fontSize: 9, color: T.textFaint }}>
-                                                Guarda {f.vcores}c / {Math.round(f.ram)}MB / {Math.round(f.disk)}GB como flavor reutilizable.
-                                            </div>
-                                            <input value={nf.name} placeholder="Nombre del flavor (ej. mini)"
-                                                onChange={e => setNf(p => ({ ...p, name: e.target.value }))}
-                                                style={{ ...inp, fontSize: 12 }} />
-                                            <select value={nf.visibility} onChange={e => setNf(p => ({ ...p, visibility: e.target.value }))}
-                                                style={{ ...inp, fontSize: 12, cursor: "pointer" }}>
-                                                <option value="private">Privado (solo yo)</option>
-                                                <option value="project">De proyecto (jefe/admin)</option>
-                                                <option value="global">Global (solo admin)</option>
-                                            </select>
-                                            {nf.visibility === "project" && (
-                                                <input value={nf.project_id} placeholder="ID de proyecto" type="number"
-                                                    onChange={e => setNf(p => ({ ...p, project_id: e.target.value }))}
-                                                    style={{ ...inp, fontSize: 12 }} />
-                                            )}
-                                            <button onClick={createFlavor} disabled={!nf.name.trim()}
-                                                style={btnBase({ background: T.accent, color: "#fff", border: "none", padding: "6px 0", opacity: nf.name.trim() ? 1 : 0.5,
-                                                    display: "flex", alignItems: "center", justifyContent: "center", gap: 6, fontSize: 12 })}>
-                                                <Save size={12} /> Crear flavor
-                                            </button>
-                                        </div>
-                                    )}
+                                    <select value={f.flavor_id || ""}
+                                        onChange={e => applyFlavor(e.target.value ? flavors.find(x => x.id === Number(e.target.value)) : null)}
+                                        style={{ ...inp, fontSize: 12, cursor: "pointer" }}>
+                                        <option value="">⚙ Personalizado (recursos libres)</option>
+                                        {flavors.map(fl => (
+                                            <option key={fl.id} value={fl.id}>
+                                                {fl.name} — {fl.vcpus}c / {Math.round(fl.ram_mb)}MB / {Math.round(fl.disk_gb)}GB
+                                                {fl.visibility === "global" ? " 🌐" : fl.visibility === "project" ? " 👥" : ""}
+                                            </option>
+                                        ))}
+                                    </select>
                                 </div>
                             )}
 
