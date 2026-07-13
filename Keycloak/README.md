@@ -34,12 +34,20 @@ docker compose up -d
 
 ### Roles Globales
 
-| Rol       | Descripción                                                |
-|-----------|------------------------------------------------------------|
-| `admin`   | Administrador de plataforma — acceso total                 |
-| `profesor`| Docente — gestiona slices de su curso, ve métricas        |
-| `alumno`  | Estudiante — gestiona sus propios slices                   |
-| `monitor` | Observador — solo lectura                                  |
+Los roles del realm deben coincidir con los que espera el sistema (ver
+`SliceManager/app/auth.py`, `ROLE_LEVEL`). El API Gateway extrae el rol de mayor
+prioridad del token y lo inyecta como `X-User-Role`.
+
+| Rol            | Nivel | Descripción                                                       |
+|----------------|-------|-------------------------------------------------------------------|
+| `usuario`      | 1     | Estudiante — gestiona sus propios slices, imágenes y flavors     |
+| `jefeProyecto` | 2     | Jefe de proyecto — ve/gestiona los slices de su proyecto, aprueba |
+| `admin`        | 3     | Administrador — acceso total, gestiona todos los recursos         |
+| `superAdmin`   | 4     | Superadministrador — nivel máximo (infraestructura, kill switch)  |
+
+> Si el realm todavía define roles antiguos (`profesor`/`alumno`/`monitor`),
+> hay que actualizar `realm-export.json` a estos 4 roles para que el RBAC del
+> Slice Manager funcione.
 
 ### Usuarios de Prueba
 

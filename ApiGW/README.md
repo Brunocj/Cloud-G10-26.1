@@ -13,9 +13,16 @@ conservando método, headers, query string y body exactamente como llegan.
 | Funcionalidad | Estado |
 |---|---|
 | Reenvío `/api/v1/slices/**` → Slice Manager | ✅ Activo |
-| Reenvío `/auth/**` → Keycloak | 🔜 Preparado (503 hasta que Keycloak exista) |
-| CORS habilitado para Web App (`localhost:5173`) | ✅ Activo |
-| Validación JWT (Keycloak) + reinyección de claims | 🔜 Preparado, pendiente de activar |
+| Reenvío `/auth/**` → Keycloak | ✅ Activo |
+| CORS habilitado para la Web App | ✅ Activo |
+| **Validación JWT (Keycloak) + reinyección de `X-User-Id` / `X-User-Role`** | ✅ **Activo** |
+
+> **Middleware JWT como ASGI puro.** `JWTAuthMiddleware` (registrado con
+> `app.add_middleware`) valida la firma RS256 del token, extrae el `sub`
+> (`X-User-Id`) y el rol de mayor prioridad (`X-User-Role`), y los inyecta como
+> headers internos hacia el Slice Manager. **No** hereda de `BaseHTTPMiddleware`
+> ni toca el body del request: eso evita bufferizar el stream y permite **subir
+> imágenes de varios GB** a Glance sin corromper el cuerpo del request.
 
 ---
 
@@ -47,8 +54,8 @@ Web App (localhost:5173)
   │         La Web App lo almacena en el cliente
   │
   └── * /api/v1/slices/**          →  Slice Manager
-            (futuro) Gateway valida JWT antes de reenviar
-            (futuro) Gateway inyecta X-User-Id y X-User-Role como headers internos
+            Gateway valida el JWT (RS256) antes de reenviar
+            Gateway inyecta X-User-Id y X-User-Role como headers internos
 ```
 
 ---
@@ -73,8 +80,8 @@ curl http://localhost:8085/health
 | Ruta | Upstream | JWT requerido |
 |---|---|---|
 | `GET /health` | — (propio gateway) | No |
-| `* /api/v1/slices/**` | `slice-manager:8000` | No (futuro: Sí) |
-| `* /auth/**` | `keycloak:8080` | No (ruta pública) |
+| `* /api/v1/slices/**` | `slice-manager:8000` | **Sí** (JWT + reinyección de claims) |
+| `* /auth/**` | `keycloak:8080` | No (ruta pública de login) |
 
 ---
 

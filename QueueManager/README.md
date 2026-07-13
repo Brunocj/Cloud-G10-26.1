@@ -1,23 +1,41 @@
-# Queue Manager — PUCP Cloud Orchestrator
+# Queue Manager / Workflow Orchestrator — PUCP Cloud Orchestrator
 
-Microservicio que actúa como orquestador central del sistema de slices.
-Recibe solicitudes del Slice Manager, coordina la ejecución ordenada de los módulos
-internos (Compute Provisioner y Network Orchestrator), y notifica el resultado
-final de vuelta al Slice Manager.
+Orquestador central del sistema (a.k.a. **Workflow Orchestrator**). Recibe
+solicitudes del Slice Manager y ejecuta el ciclo de vida del slice como un
+**patrón SAGA** de transacciones distribuidas, coordinando VM Placement, Network
+Orchestrator y Compute Provisioner. Aloja el servidor NATS embebido.
 
----
+Es **agnóstico a la plataforma**: propaga `availability_zone_id` en todos los
+payloads sin interpretarlo — cada módulo ejecutor aplica su Strategy (Linux u OpenStack).
+
+## SAGA de despliegue (orden ESTRICTO)
+
+```
+Paso 1 — PLACEMENT : slice.placement.process → VM Placement  (selected_host por VM)
+Paso 2 — NETWORK   : network.deploy          → Network Orch.  (crea red, devuelve port_map)
+Paso 3 — COMPUTE   : compute.deploy          → Compute Prov.  (crea las VMs)
+Paso 4 — STATE     : slice.state.update      → Slice Manager  (marca ACTIVE)
+```
+
+> **La red va ANTES que el cómputo** (inversión respecto a la Fase 1): en OpenStack
+> Nova exige los puertos Neutron ya creados, así que Network devuelve el `port_map`
+> antes de que Compute cree las instancias. En Linux el orden es el mismo por consistencia.
+
+**Rollback (compensación en orden inverso):** si falla COMPUTE, se llama a
+`network.destroy` para limpiar la red creada; si falla NETWORK/PLACEMENT no hay
+infraestructura que compensar. El Slice Manager mantiene una segunda capa de rollback.
 
 ## Responsabilidades
 
-- Recibir solicitudes de despliegue y destrucción de slices desde el Slice Manager.
-- Orquestar el orden de ejecución entre módulos: primero Compute, luego Network.
-- Persistir el estado de cada operación en NATS JetStream KV.
-- Notificar el resultado final al Slice Manager vía NATS.
-- Alojar el servidor NATS que usan todos los módulos internos.
+- Recibir `slice.deploy` / `slice.destroy` del Slice Manager (JetStream, con ACK).
+- Ejecutar la SAGA de 4 pasos (destroy en orden inverso: Compute → Network).
+- Propagar `availability_zone_id`, `host_map`, `mgmt_vlan` y `compute_ssh_map` a los módulos.
+- Balancear las solicitudes de gestión hacia las réplicas del Slice Manager (**queue groups**).
+- Persistir el estado de cada operación en NATS JetStream KV (para rollback selectivo).
+- Notificar el resultado final (`slice.result`) y alojar el NATS embebido.
 
-**No** ejecuta comandos en los workers — eso es responsabilidad del Compute Provisioner.  
-**No** configura red — eso es responsabilidad del Network Orchestrator.  
-**No** decide en qué worker va cada VM — eso es responsabilidad del VM Placement.
+**No** ejecuta comandos en workers (Compute) · **No** configura red (Network) ·
+**No** decide el worker de cada VM (VM Placement).
 
 ---
 
@@ -65,22 +83,25 @@ Slice Manager
     │
     │  JetStream → slice.deploy
     ▼
-Queue Manager
+Workflow Orchestrator
     │
     ├─ ACK inmediato al stream
     ├─ Persiste estado en NATS KV
     │
-    ├─ Paso 1: core NATS request → compute.deploy  (timeout: 300s)
-    │           espera respuesta directa del Compute Provisioner
-    │           si status == "error" → falla y notifica
+    ├─ Paso 1: request → slice.placement.process  (VM Placement)
+    │           → host_map (vm_id → selected_host). Si falla: notifica error (sin limpiar)
     │
-    ├─ Paso 2: core NATS request → network.deploy  (timeout: 60s)
-    │           envía links + vms (necesario para Gateway, DHCP y NAT)
-    │           espera respuesta directa del Network Orchestrator
-    │           si status != "success" → falla y notifica
+    ├─ Paso 2: request → network.deploy  (timeout: 60s)
+    │           envía host_map + mgmt_vlan + compute_ssh_map + links + vms
+    │           → port_map. Si falla: notifica error
     │
+    ├─ Paso 3: request → compute.deploy  (timeout: 300s)
+    │           envía selected_host + network_ports por VM
+    │           si falla → ROLLBACK: network.destroy, luego notifica error
+    │
+    ├─ Paso 4: publish → slice.state.update (Slice Manager marca ACTIVE)
     ├─ Elimina estado del KV
-    └─ core NATS publish → slice.result
+    └─ publish → slice.result
     │
     ▼
 Slice Manager
@@ -98,12 +119,12 @@ Queue Manager
     ├─ ACK inmediato al stream
     ├─ Persiste estado en NATS KV
     │
-    ├─ Paso 0: core NATS request → network.destroy  (timeout: 60s)
-    │           envía links + vms (para limpiar Gateway, NAT y puertos OVS)
-    │           si no responde: warning y continúa (no bloquea)
+    ├─ Paso 0: core NATS request → compute.destroy  (timeout: 300s)
+    │           termina las VMs (mata QEMU en Linux / delete_server en Nova)
     │
-    ├─ Paso 1: core NATS request → compute.destroy  (timeout: 300s)
-    │           destruye VMs
+    ├─ Paso 1: core NATS request → network.destroy  (timeout: 60s)
+    │           limpia red (puertos OVS/gateway en Linux; Neutron en OpenStack)
+    │           si no responde: warning y continúa (no bloquea)
     │
     ├─ Elimina estado del KV
     └─ core NATS publish → slice.result
@@ -112,8 +133,8 @@ Queue Manager
 Slice Manager
 ```
 
-> El destroy limpia la red **antes** de destruir las VMs para garantizar
-> que los puertos OVS se desconecten mientras las interfaces TAP todavía existen.
+> El destroy va en orden inverso al deploy: primero se terminan las VMs
+> (Compute) y luego se limpia la red (Network).
 
 ---
 
@@ -259,6 +280,8 @@ Slice Manager
 | `SUBJECT_DEPLOY` | `slice.deploy` | Subject de entrada para deploy |
 | `SUBJECT_DESTROY` | `slice.destroy` | Subject de entrada para destroy |
 | `SUBJECT_RESULT` | `slice.result` | Subject de salida de resultados |
+| `SUBJECT_PLACEMENT` | `slice.placement.process` | Subject hacia el VM Placement (Paso 1) |
+| `PLACEMENT_TIMEOUT` | `30` | Segundos máximos para esperar al VM Placement |
 | `SUBJECT_COMPUTE_DEPLOY` | `compute.deploy` | Subject hacia el Compute Provisioner (deploy) |
 | `SUBJECT_COMPUTE_DESTROY` | `compute.destroy` | Subject hacia el Compute Provisioner (destroy) |
 | `SUBJECT_COMPUTE_RESULT` | `compute.result` | Subject de resultado del Compute Provisioner |

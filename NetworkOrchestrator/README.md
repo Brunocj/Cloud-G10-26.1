@@ -1,24 +1,46 @@
 # Network Orchestrator — PUCP Cloud Orchestrator
 
-Microservicio encargado de la configuración de red Layer 2 del sistema de slices.
-Recibe órdenes del Queue Manager via NATS, configura VLANs y puertos OVS en los
-workers via SSH, y responde el resultado de vuelta al Queue Manager.
+Microservicio encargado de la configuración de red del sistema de slices.
+Recibe órdenes del Workflow Orchestrator (Queue Manager) via NATS y aprovisiona
+la red en la infraestructura destino, respondiendo el resultado de vuelta.
+
+Es **agnóstico a la zona** vía patrón **Strategy**: según `availability_zone_id`
+del mensaje activa su ejecutor de **Linux Cluster** (OVS/SSH) o de **OpenStack**
+(Neutron/openstacksdk), sin que el resto del sistema lo sepa.
 
 ---
 
+## Estrategia por zona
+
+| | **Linux Cluster** (`network_executor.py`) | **OpenStack** (`openstack_network_executor.py`) |
+|---|---|---|
+| Backend | OVS + iptables por SSH a los workers | API de Neutron (openstacksdk) |
+| L2 | tag VLAN por enlace en `br-int`; trunk inter-worker por `ens4` | red/subred/puerto Neutron tipo **provider `vlan`** por enlace |
+| Gestión | `mgmt_vlan` (VLAN de gestión del slice) + gateway/NAT/DHCP | `net-slice` + router + Floating IPs |
+| Seguridad | iptables por TAP (security rules del usuario) | Security Groups de Neutron |
+| Orden | Compute **antes** que Network (los TAP ya existen) | **Network antes que Compute** (Nova exige los puertos ya creados → devuelve `port_map`) |
+
 ## Responsabilidades
 
-- Conectar interfaces TAP (ya creadas por el Compute Provisioner) al bridge OVS (`br-int`).
-- Asignar la VLAN de aislamiento a cada TAP para garantizar separación entre slices.
-- Aplicar reglas de firewall básicas por TAP usando iptables (security groups).
-- Limpiar puertos OVS durante la destrucción de un slice.
-- Procesar múltiples workers en paralelo para reducir el tiempo de despliegue.
-- Responder el resultado al Queue Manager via NATS reply.
+- **Linux:** conectar los TAP (creados por Compute) a `br-int`, aplicar el tag VLAN
+  por enlace, mantener `ens4` como trunk inter-worker en `br-int`, configurar el
+  gateway/NAT/DHCP del slice sobre la `mgmt_vlan`, y aplicar las reglas de firewall
+  del usuario (iptables). Aislamiento extra: regla `FORWARD gw_+ → gw_+ DROP` para
+  que gateways de slices distintos que comparten worker no se enruten entre sí.
+- **OpenStack:** crear en Neutron la red/subred/puertos del slice, las redes de
+  enlace (provider VLAN, con `segmentation_id` **forzado** al C-VID reservado por el
+  Slice Manager cuando `OS_PROVIDER_PHYSICAL_NETWORK` está seteado), el router,
+  las Floating IPs y los Security Groups; devuelve el `port_map` para el Compute.
+- **Q-in-Q (802.1ad):** opcional (`QINQ_ENABLED`), **solo Linux** en el estado
+  actual — interpone un `br-qinq` con `dot1q-tunnel` (S-VID por slice sobre los
+  C-VIDs). En OpenStack quedó desactivado por conflictos con el uplink compartido.
+- **Purga idempotente:** guardia pre-deploy y destroy borran por **ID** todos los
+  recursos homónimos del slice, evitando duplicados de intentos fallidos.
+- Procesar múltiples workers en **paralelo** y responder al Workflow Orchestrator.
 
-**No** crea las interfaces TAP — eso es responsabilidad del Compute Provisioner.  
-**No** crea el bridge OVS (`br-int`) — ese bridge ya existe en el worker antes del deploy.  
-**No** asigna VLANs — esas vienen pre-calculadas por el Slice Manager y viajan en el mensaje.  
-**No** decide en qué worker va cada VM — eso es responsabilidad del VM Placement.
+**No** crea las interfaces TAP (Compute) · **No** decide el worker de cada VM
+(VM Placement) · **No** asigna las VLANs/C-VIDs — vienen pre-calculadas por el
+Slice Manager y viajan en el mensaje.
 
 ---
 
@@ -33,11 +55,12 @@ main.py
  ├── models/
  │    └── schemas.py            → Contratos de entrada/salida (Pydantic)
  └── services/
-      ├── handlers.py           → Handlers NATS: validan JSON y disparan provisioner
-      ├── provisioner.py        → Orquestación: agrupa endpoints por worker, paraleliza
-      ├── network_executor.py   → Comandos OVS e iptables sobre el worker
-      ├── ssh_client.py         → Wrapper SSH con llave PEM en memoria (Paramiko)
-      └── queue_client.py       → Cliente NATS (subscribe, reply)
+      ├── handlers.py                    → Handlers NATS: validan JSON y despachan por zona
+      ├── provisioner.py                 → Orquestación Linux: agrupa endpoints por worker, paraleliza
+      ├── network_executor.py            → Comandos OVS/iptables/Q-in-Q sobre el worker (Linux)
+      ├── openstack_network_executor.py  → Aprovisionamiento Neutron (redes, puertos, router, SGs, FIPs, purga)
+      ├── ssh_client.py                  → Wrapper SSH con llave PEM en memoria (Paramiko)
+      └── queue_client.py                → Cliente NATS (subscribe, reply)
 ```
 
 ---
@@ -124,6 +147,22 @@ El Network Orchestrator las aplica directamente sin modificarlas.
 > Un enlace con ambas VMs en el mismo worker genera dos entradas en ese worker
 > (una por TAP), pero solo abre una conexión SSH.
 
+Además de `links`, el mensaje trae campos de nivel superior que el ejecutor usa
+según la zona:
+
+| Campo | Uso |
+|---|---|
+| `availability_zone_id` | 1=Linux, 2=OpenStack → selecciona el ejecutor (Strategy) |
+| `host_map` | `vm_id → selected_host` (del VM Placement) — dónde va cada VM |
+| `mgmt_vlan` | VLAN de gestión del slice (reservada por el Slice Manager) |
+| `links[].vlan_id` / `links[].s_vlan_id` | C-VID por enlace / S-VID del slice (Q-in-Q) |
+| `compute_ssh_map` | credenciales SSH por host de Nova (Q-in-Q OpenStack, si aplica) |
+| `vms[]` | specs de red por VM (IP interna, acceso a internet, IP externa) |
+
+La respuesta de deploy incluye además el **`port_map`** (`vm_id → {provider_port_id,
+external_ip, link_ports}`) en OpenStack, que el Compute Provisioner consume para
+crear las instancias con sus puertos Neutron.
+
 ### Entrada: network.destroy
 
 ```json
@@ -179,18 +218,29 @@ El Network Orchestrator las aplica directamente sin modificarlas.
 Cada enlace lógico de la topología recibe una VLAN única asignada por el Slice Manager.
 Esa VLAN es la que garantiza el aislamiento entre slices distintos en el mismo bridge OVS.
 
+**El tráfico inter-worker NO usa túneles** (ni VXLAN ni GRE): viaja etiquetado con
+802.1Q sobre el trunk físico `ens4`, que se mantiene colgado de `br-int`. Ese es el
+requisito de "VLANs, no self-service" (R5).
+
 ```
-Worker A                          Worker B
-┌─────────────────┐               ┌─────────────────┐
-│  VM-1           │               │  VM-2           │
-│  └─ tap-vm1-0   │               │  └─ tap-vm2-0   │
-│       tag=100   │               │       tag=100   │
-│  br-int (OVS)   │◄─── VXLAN ───►│  br-int (OVS)   │
-└─────────────────┘               └─────────────────┘
+Worker A                                   Worker B
+┌────────────────────┐                     ┌────────────────────┐
+│  VM-1              │                      │  VM-2              │
+│  └─ tap-vm1-0 tag=100                     │  └─ tap-vm2-0 tag=100
+│  br-int (OVS) ── ens4 ─┤  trunk 802.1Q  ├─ ens4 ── br-int (OVS)│
+└────────────────────┘   (VLAN 100 taggeada)  └────────────────────┘
 ```
 
-Ambos TAPs comparten el `tag=100` — VLAN 100 es el "cable virtual" entre vm-1 y vm-2.
-Cualquier otra VM en otro slice que use VLAN 101 no verá ese tráfico.
+Ambos TAPs comparten `tag=100` — VLAN 100 es el "cable virtual" entre vm-1 y vm-2.
+Otra VM en otro slice con VLAN 101 no ve ese tráfico.
+
+**Q-in-Q (Linux, opcional):** con `QINQ_ENABLED=true`, `ens4` se mueve a un
+`br-qinq` que empuja un **S-VID por slice** (0x88a8) sobre los C-VIDs de sus
+enlaces, permitiendo reutilizar C-VIDs entre slices. Desactivado por defecto.
+
+**OpenStack:** el aislamiento lo da Neutron con redes **provider VLAN** (`vlan`,
+no self-service/túnel). El `segmentation_id` se fuerza al C-VID de la tabla
+`vlans` cuando el physnet está configurado, para que la BD coincida con el cable.
 
 ---
 
@@ -214,8 +264,15 @@ Los distintos workers se procesan en **paralelo** mediante `ThreadPoolExecutor`.
 | `SSH_MAX_RETRIES` | `3` | Reintentos ante fallo SSH |
 | `SSH_RETRY_DELAY` | `5` | Segundos entre reintentos |
 | `MAX_CONCURRENT_WORKERS` | `10` | Workers configurados en paralelo |
+| `DATA_TRUNK_IFACE` | `ens4` | Interfaz trunk inter-worker que se cuelga de `br-int` (Linux) |
 | `LOG_LEVEL` | `INFO` | Nivel de logging |
 | `HEALTH_PORT` | `8084` | Puerto del healthcheck HTTP |
+| `OS_AUTH_URL`, `OS_USERNAME`, `OS_PASSWORD`, `OS_PROJECT_NAME`, `OS_*_DOMAIN_NAME` | — | Credenciales OpenStack (Neutron) |
+| `OS_PROVIDER_PHYSICAL_NETWORK` | — | physnet para forzar el `segmentation_id` de las redes provider VLAN |
+| `OS_EXTERNAL_NETWORK_NAME` | — | red externa para Floating IPs |
+
+> El Q-in-Q se activa con `QINQ_ENABLED` en el **Slice Manager** (es quien asigna
+> el S-VID). Este módulo solo aplica el túnel si el mensaje trae `s_vlan_id`.
 
 ---
 

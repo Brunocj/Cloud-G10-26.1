@@ -8,16 +8,24 @@ desplegar slices, monitorizar el estado de las VMs y acceder a las consolas VNC.
 
 ## Funcionalidades principales
 
-- **Canvas interactivo**: creación de topologías de red arrastrando nodos (VMs) y
-  conectándolos con enlaces. Configuración de recursos (vCPU, RAM, disco) por VM.
-- **Autenticación**: login con Keycloak (PKCE flow). El token JWT se almacena en memoria
-  y se envía en cada request al API Gateway.
-- **Gestión de slices**: crear borradores, desplegar, destruir y listar slices con su estado.
-- **Consola VNC**: acceso a la consola de cada VM directamente desde el browser,
-  usando WebSocket proxiado por el API Gateway (túnel SSH para Linux Cluster, token Nova para OpenStack).
-- **Gestión de imágenes**: subir, listar y eliminar imágenes de disco (`.qcow2`, `.img`, `.iso`).
-  Soporta imágenes en el NFS local y en OpenStack Glance.
-- **Perfil de usuario**: visualización del rol y datos del usuario autenticado.
+- **Canvas interactivo**: creación de topologías arrastrando nodos (VMs) y enlaces,
+  incluyendo **plantillas predefinidas** (lineal, malla, árbol, anillo, bus) y su combinación.
+  Configuración por VM: recursos (vCPU/RAM/disco), **flavor**, imagen, credenciales,
+  acceso a internet + IP externa, y **reglas de firewall** (security rules).
+- **Selección de zona de disponibilidad** (Linux Cluster u OpenStack) al desplegar,
+  con selector de **TTL** y motivo — la interfaz es la misma para ambas zonas (agnóstica).
+- **Flavors** (panel lateral): crear/listar/borrar plantillas de recursos con
+  visibilidad global/privado/proyecto.
+- **Plantillas de topología**: publicar un slice como plantilla y crear nuevos slices a partir de ella.
+- **Modo Edición**: editar slices ya desplegados (agregar/quitar VMs y enlaces en caliente).
+- **Autenticación**: login con Keycloak (PKCE). El JWT se guarda en memoria y se envía
+  al API Gateway; la UI se adapta al **rol** (RBAC: usuario / jefeProyecto / admin / superAdmin).
+- **Gestión de slices**: borradores, deploy, destroy, listado con estado en **tiempo real** (WebSockets).
+- **Consola VNC**: consola de cada VM en el browser (túnel SSH en Linux, token noVNC en OpenStack).
+- **Gestión de imágenes**: subir/listar/eliminar (`.qcow2`/`.img`/`.iso`) — NFS local + Glance.
+- **Vistas de administración**: consumo de recursos por proyecto, monitor de infraestructura,
+  **logs por slice (Loki)**, bitácora de auditoría, gestión de usuarios/proyectos y aprobaciones.
+- **Perfil**: datos del usuario, rol y llave SSH pública.
 
 ---
 

@@ -12,14 +12,20 @@ resultados y ejecuta rollback automático ante fallos.
 - Exponer la API REST que consume el frontend (borradores, deploy, destroy, imágenes).
 - Persistir slices, VMs e imágenes en MySQL (modelo relacional).
 - Aplicar control de acceso basado en roles (`X-User-Id` / `X-User-Role` inyectados por el API Gateway).
-- Construir el Servers' State multidimensional (cpu/ram/disco) desde BD al momento del deploy.
-- Invocar al VM Placement para obtener el mapa `vm → worker`.
-- Enriquecer el contrato con: IPs SSH, llaves PEM, MACs, TAP names (incluido TAP de gestión), VLANs, VNC ports, rutas de imagen, IPs internas de la subred de gestión.
-- Publicar `slice.deploy` y `slice.destroy` en NATS JetStream hacia el Queue Manager.
-- Escuchar `slice.result` y actualizar el estado en MySQL.
-- Ejecutar rollback automático (publish destroy) si el resultado es error.
-- Gestionar el pool de IPs externas (tabla `ip_pool`): reservar al crear borrador, liberar al destruir.
-- Gestionar imágenes: subir al NFS o a OpenStack Glance, listar catálogo híbrido, eliminar.
+- Construir el Servers' State multidimensional (cpu/ram/disco) desde BD al momento del deploy,
+  **para ambas zonas** (incluye el `host_name` de cada worker para el BYOS de OpenStack).
+- Invocar al VM Placement (HTTP) para obtener el mapa `vm → worker` (+ `selected_host`).
+- Enriquecer el contrato con: IPs SSH, llaves PEM, MACs, TAP names (incl. gestión),
+  **VLANs** (mgmt + C-VID por enlace + S-VID por slice si Q-in-Q), **reglas de firewall**
+  del usuario por VM, VNC ports, rutas de imagen, flavor, credenciales cloud-init, IPs internas.
+- Gestionar **flavors** (plantillas vCPU/RAM/disco con visibilidad global/privado/proyecto)
+  y materializarlos en Nova (eager para admin, lazy para el resto).
+- Reservar la **VLAN de gestión** del slice en la tabla `vlans` y (OpenStack) las VLANs
+  del pool `[OS_VLAN_MIN, OS_VLAN_MAX]` que se fuerzan como `segmentation_id` en Neutron.
+- Publicar `slice.deploy` y `slice.destroy` en NATS JetStream hacia el Workflow Orchestrator.
+- Escuchar `slice.result` y actualizar el estado en MySQL; rollback automático ante error.
+- Gestionar el pool de IPs externas (tabla `ip_pool`), imágenes (NFS + Glance), y el resto
+  del ciclo de vida (aprobaciones, TTL, kill switch, bitácora, consumo por proyecto).
 
 **No** ejecuta comandos en workers — eso es del Compute Provisioner.
 **No** configura red — eso es del Network Orchestrator.
@@ -38,15 +44,24 @@ app/
  ├── schemas.py                  → Pydantic: DeployRequest, DraftSaveRequest, ImageResponse
  ├── nats_producer.py            → Cliente NATS JetStream (publish deploy/destroy)
  ├── routers/
- │    ├── slice_router.py        → CRUD de borradores + endpoints utilitarios de workers/AZs
- │    ├── deploy_router.py       → POST deploy, DELETE destroy
- │    └── image_router.py        → Gestión de imágenes (NFS + OpenStack Glance)
+ │    ├── slice_router.py        → CRUD de borradores (+ snapshot de flavor a la VM)
+ │    ├── deploy_router.py       → POST deploy, DELETE destroy, Modo Edición (shrink/extend)
+ │    ├── image_router.py        → Gestión de imágenes (NFS + OpenStack Glance)
+ │    ├── flavor_router.py       → CRUD de flavors (visibilidad por rol, materialización Nova)
+ │    ├── approval_router.py     → Flujo de aprobación de despliegues
+ │    ├── project_router.py      → Proyectos + consumo de recursos por proyecto
+ │    ├── user_router.py         → Gestión de usuarios / perfil
+ │    ├── audit_router.py        → Bitácora de eventos
+ │    ├── infra_router.py        → Gestión de infraestructura (superAdmin)
+ │    └── notification_router.py → Notificaciones (WebSockets)
  ├── repositories/
  │    └── slice_repo.py          → SliceRepository.save_draft()
  └── services/
       ├── placement_worker.py    → Worker async: Servers' State → placement → enriquecimiento → NATS
-      ├── nats_listener.py       → Listener async: slice.result → actualiza MySQL
-      └── gc_scheduler.py        → Garbage collector de ISOs, discos y imágenes huérfanas
+      ├── slice_destroyer.py     → Lógica compartida de destroy (manual/TTL/kill switch)
+      ├── nats_listener.py       → Listener async: slice.result → actualiza MySQL / rollback
+      ├── ttl_scheduler.py       → Auto-destrucción de slices al vencer su TTL
+      └── gc_scheduler.py        → Garbage collector de ISOs, discos e imágenes huérfanas
 ```
 
 ---
@@ -173,12 +188,17 @@ Frontend
 deploy_router.py
     ├─ Si status == DRAFT: elimina VMs + Slice de MySQL → responde 200
     └─ Si status != DRAFT:
-        ├─ Lee deployed_vms y deployed_links de slice_json
-        ├─ Publica slice.destroy en NATS JetStream
-        ├─ Libera VLANs de MySQL
-        ├─ Cambia status → TERMINATED
-        └─ Cambia state de todas las VMs → TERMINATED
+        ├─ Cambia status → TERMINATING (no libera recursos todavía)
+        ├─ Re-inyecta llaves SSH frescas (worker de la zona con llave válida)
+        ├─ Publica slice.destroy en NATS JetStream (incluye compute_ssh_map en OpenStack)
+        └─ Al confirmar slice.result (nats_listener):
+             ├─ éxito → libera VLANs/IPs, status → TERMINATED
+             └─ error → revierte al estado anterior (reintentable) / FAILED
 ```
+
+> El destroy **espera la confirmación real** de la limpieza física antes de liberar
+> VLANs/IPs (estado `TERMINATING`). Antes se liberaba al publicar el mensaje, lo que
+> podía dejar la BD diciendo "libre" mientras la infraestructura seguía viva.
 
 ---
 
@@ -222,17 +242,34 @@ deploy_router.py
 ```json
 {
   "slice_id": "42",
-  "availability_zone": "1",
+  "availability_zone_id": 1,
   "vms": [
     { "vm_id": "n214", "vcpus": 2.0, "ram_gb": 0.5, "disco_gb": 10.0 },
     { "vm_id": "n215", "vcpus": 1.0, "ram_gb": 0.25, "disco_gb": 5.0 }
   ],
   "workers": [
-    { "worker_id": 2, "disponible_cpu": 12.5, "disponible_ram": 28.3, "disponible_disco": 180.0 },
-    { "worker_id": 3, "disponible_cpu": 10.0, "disponible_ram": 24.0, "disponible_disco": 200.0 }
+    { "worker_id": 2, "disponible_cpu": 12.5, "disponible_ram": 28.3, "disponible_disco": 180.0, "host_name": "worker1" },
+    { "worker_id": 3, "disponible_cpu": 10.0, "disponible_ram": 24.0, "disponible_disco": 200.0, "host_name": "worker3" }
   ]
 }
 ```
+
+> El Servers' State se construye **igual para ambas zonas** (Linux y OpenStack).
+> `host_name` es el nombre físico del host (host de Nova en OpenStack) que el
+> placement devuelve como `selected_host` para el BYOS. Así VM Placement es
+> agnóstico y no consulta a Nova directamente.
+
+## Asignación de VLANs
+
+- **Linux Cluster:** la VLAN de gestión (`mgmt_vlan = 1000 + slice_id`) se reserva en
+  la tabla `vlans` (type='M') y el C-VID de cada enlace se sortea global-único
+  (100–4000). Con `QINQ_ENABLED=true`, además se asigna un **S-VID por slice** y el
+  Network Orchestrator interpone el `dot1q-tunnel`.
+- **OpenStack:** mgmt y C-VIDs salen de un **pool único** `[OS_VLAN_MIN, OS_VLAN_MAX]`
+  (default 11–900, = `network_vlan_ranges` del physnet), todos únicos entre sí, para
+  **forzarlos como `segmentation_id`** en Neutron (la tabla `vlans` coincide con el cable).
+- Las reglas de firewall del usuario (por nodo, `firewall_rules`) se adjuntan a cada
+  extremo del enlace (`vmN_security_rules`) para que el Network Orchestrator las aplique.
 
 ---
 
@@ -320,8 +357,9 @@ Ejemplos:
 | Tabla | Descripción |
 |-------|-------------|
 | `slices` | Estado y metadatos del slice, `slice_json` con topología y `deployed_vms`/`deployed_links` |
-| `vms` | VMs con recursos, worker asignado, `vnc_port`, `external_ip`, `internet_access` |
-| `vlans` | VLANs asignadas por slice (se limpian al destroy o rollback) |
+| `vms` | VMs con recursos, worker asignado, `vnc_port`, `external_ip`, `internet_access`, `flavor_id`/`flavor_name` (snapshot), `provider_instance_id`, `vnc_url` |
+| `vlans` | VLANs por slice: `type` = M (gestión) / C (C-VID enlace) / S (S-VID Q-in-Q) / p2p (legado); `vlan_number` = número real. Se limpian al destroy/rollback |
+| `flavors` | Plantillas vCPU/RAM/disco con `visibility` (global/private/project), `owner_user_id`, `provider_flavor_id` (UUID Nova), soft-delete |
 | `images` | Imágenes disponibles con `path` (ruta NFS o `glance://<UUID>`) y `availability_zone_id` |
 | `workers` | Workers con IP, zona, `cpu`, `ram` (MB), `disk_gb`, `oc_cpu`, `oc_ram`, `oc_disco` |
 | `ip_pool` | Pool de IPs externas flotantes: `is_used`, `vm_id` (FK) |
@@ -368,6 +406,8 @@ El worker con `id=1` es el headnode — corre los servicios y **no recibe VMs**.
 | `OS_PROJECT_NAME` | `admin` | Proyecto OpenStack |
 | `OS_USER_DOMAIN_NAME` | `Default` | Dominio de usuario OpenStack |
 | `OS_PROJECT_DOMAIN_NAME` | `Default` | Dominio de proyecto OpenStack |
+| `QINQ_ENABLED` | `false` | Activa Q-in-Q (asigna S-VID). En el estado actual, solo Linux |
+| `OS_VLAN_MIN` / `OS_VLAN_MAX` | `11` / `900` | Rango del pool de VLANs de OpenStack (= `network_vlan_ranges` del physnet) |
 
 ---
 

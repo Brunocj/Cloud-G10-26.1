@@ -1,10 +1,29 @@
 # VM Placement — PUCP Cloud Orchestrator
 
-Microservicio HTTP de asignación óptima de VMs a workers físicos.
+Microservicio de asignación óptima de VMs a workers físicos.
 Recibe las VMs a desplegar (vcpus, ram_gb, disco_gb) y el Servers' State
 (capacidad efectiva disponible por worker y dimensión, con overcommit estadístico
 ya aplicado por el Slice Manager), y devuelve el mapa `vm_id → worker_id`
-usando el solver **CP-SAT de Google OR-Tools**.
+(+ `selected_host`) usando el solver **CP-SAT de Google OR-Tools**.
+
+> **Agnóstico a la zona de disponibilidad.** El solver es idéntico para Linux
+> Cluster y OpenStack: recibe el Servers' State **desde la BD** (construido por el
+> Slice Manager, con las capacidades y factores de overcommit de la tabla
+> `workers`) en **ambas zonas**. Ya **no consulta la API de Nova** en operación
+> normal; esa consulta quedó solo como *fallback* legado si el caller no envía
+> workers. Así el placement no depende de ningún backend de infraestructura.
+
+## Dos puntos de entrada
+
+- **HTTP `POST /placement`** — usado por el Slice Manager en su fase de
+  enriquecimiento del contrato (síncrono, request/reply).
+- **NATS `slice.placement.process`** — usado por el Workflow Orchestrator como
+  **Paso 1 del SAGA** de despliegue. Mismo motor, mismo contrato.
+
+Ambos entregan `selected_host` por VM: el **nombre físico del host** (BYOS).
+En Linux es el hostname del worker; en OpenStack es el host de Nova
+(`availability_zone=nova:<host>`), que el Compute Provisioner usa para forzar
+el scheduler.
 
 ---
 
@@ -145,8 +164,8 @@ Con factores de seguridad diferenciados:
   "slice_id": "42",
   "status": "SUCCESS",
   "placement_map": [
-    { "vm_id": "n214", "worker_id": 4 },
-    { "vm_id": "n215", "worker_id": 2 }
+    { "vm_id": "n214", "worker_id": 4, "selected_host": "worker1" },
+    { "vm_id": "n215", "worker_id": 2, "selected_host": "worker3" }
   ],
   "reason": null,
   "detail": null
@@ -222,12 +241,20 @@ class WorkerState(BaseModel):
     disponible_cpu: float    # C_efectivo_cpu[j] - Σ vcpus(VMs ACTIVE)
     disponible_ram: float    # C_efectivo_ram[j] - Σ ram_gb(VMs ACTIVE)
     disponible_disco: float  # C_efectivo_disco[j] - Σ disco_gb(VMs ACTIVE)
+    host_name: Optional[str] = None   # nombre físico del host para el BYOS
+                                      # (OpenStack: host de Nova). Si falta, se
+                                      # deriva del worker_id.
+
+class PlacementEntry(BaseModel):
+    vm_id: str
+    worker_id: int          # id del worker (Linux) / índice del hipervisor
+    selected_host: str      # nombre físico del host ganador (manifiesto BYOS)
 
 class PlacementRequest(BaseModel):
     slice_id: str
-    availability_zone: str
+    availability_zone_id: int         # 1=Linux Cluster, 2=OpenStack
     vms: List[VMSpec]
-    workers: List[WorkerState]
+    workers: List[WorkerState] = []   # inventario desde la BD (ambas zonas)
 ```
 
 ### Flujo interno de un request
@@ -299,9 +326,14 @@ curl -X POST http://localhost:8080/placement \
   en BD y los envía directamente. Este servicio no calcula ningún peso escalar.
 - **El Servers' State lo construye el Slice Manager.** Lee `OC_r[j]` de BD
   (calculados por Observabilidad), aplica `C_efectivo_r[j] = C_nominal_r[j] × OC_r[j]`
-  y resta el consumo de VMs activas. Este servicio recibe `disponible_r[j]` ya calculado.
-- **`availability_zone` es el ID como string.** El Slice Manager envía el `id` de la zona,
-  no el nombre (`"1"`, no `"Linux Cluster"`).
+  y resta el consumo de VMs activas. Este servicio recibe `disponible_r[j]` ya calculado
+  — **para ambas zonas** (Linux y OpenStack). Los workers de OpenStack se registran
+  en la BD igual que los de Linux, con su `host_name` (host de Nova) y capacidades.
+- **`selected_host` = BYOS.** El motor devuelve el nombre físico del host ganador
+  (`host_name` del worker, o `worker-<id>` si no vino). El Compute Provisioner lo usa
+  en OpenStack como `availability_zone=nova:<host>` para forzar el scheduler.
+- **Fallback a Nova.** Solo si el request llega **sin** `workers`, el servicio
+  consulta la Nova Hypervisors API (compatibilidad). En el flujo normal esto no ocurre.
 - **Sin placement parcial.** Si el solver retorna INFEASIBLE o UNKNOWN, se retorna
   `FAILED` para el slice completo. No hay asignaciones parciales.
 - **`worker_id` es siempre `int`.** El Slice Manager lo espera así para hacer lookup

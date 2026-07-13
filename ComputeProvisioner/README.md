@@ -1,24 +1,36 @@
 # Compute Provisioner — PUCP Cloud Orchestrator
 
 Microservicio encargado del aprovisionamiento computacional del sistema de slices.
-Recibe órdenes del Queue Manager via NATS, crea y destruye VMs en los workers
-via SSH+QEMU/KVM, y responde el resultado de vuelta al Queue Manager.
+Recibe órdenes del Workflow Orchestrator (Queue Manager) via NATS, crea y destruye
+las VMs en la infraestructura destino, y responde el resultado de vuelta.
 
----
+Es **agnóstico a la zona** vía patrón **Strategy**: según `availability_zone_id`
+del mensaje usa el ejecutor de **Linux Cluster** (SSH + QEMU/KVM) o el de
+**OpenStack** (API de Nova vía openstacksdk).
+
+| | **Linux Cluster** (`qemu_executor.py`) | **OpenStack** (`openstack_compute_executor.py`) |
+|---|---|---|
+| Crea la VM | proceso QEMU/KVM por SSH al worker | `POST` a Nova (`create_server`) |
+| Disco | QCOW2 thin con backing file | flavor + imagen Glance |
+| Red | TAP → `br-int` (creados aquí) | puertos Neutron (creados por Network) |
+| Placement | worker por SSH | **BYOS**: `availability_zone=nova:<selected_host>` |
+| Credenciales | cloud-init ISO (seed) | cloud-init `user_data` |
+| Consola | VNC directo (`-vnc`) | token noVNC de nova-novncproxy |
 
 ## Responsabilidades
 
-- Crear discos QCOW2 con thin provisioning (backing file = imagen base) en cada worker.
-- Crear interfaces TAP en el worker y conectarlas al bridge OVS (`br-int`).
-- Lanzar procesos QEMU/KVM con las interfaces TAP y MACs pre-asignadas.
-- Destruir VMs: matar proceso, limpiar TAPs del OVS y del kernel, eliminar disco.
-- Reintentar ante fallos transitorios.
-- Responder el resultado al Queue Manager via NATS reply.
+- **Linux:** crear disco QCOW2 thin, interfaces TAP → `br-int`, lanzar QEMU/KVM
+  con las MACs pre-asignadas, e inyectar usuario/contraseña/llave SSH por cloud-init.
+- **OpenStack:** resolver imagen (Glance) y **flavor** (materializado al vuelo con
+  specs exactos si no existe), forzar el host con BYOS, crear la instancia en Nova
+  con sus puertos Neutron, esperar `ACTIVE`, obtener el token de consola noVNC, e
+  inyectar credenciales por cloud-init `user_data` (usuario/contraseña/llave).
+- Destruir VMs (matar QEMU + limpiar TAPs/disco en Linux; `delete_server` en Nova).
+- Reintentar ante fallos transitorios y responder al Workflow Orchestrator.
 
-**No** decide en qué worker va cada VM — eso es responsabilidad del VM Placement.  
-**No** asigna MACs ni nombres de TAP — esos vienen calculados por el Slice Manager y viajan en el mensaje.  
-**No** asigna el puerto VNC ni la ruta de imagen — ambos vienen pre-calculados en el mensaje desde el Slice Manager.  
-**No** crea el bridge OVS (`br-int`) — ese bridge ya existe en el worker antes del deploy.
+**No** decide el worker de cada VM (VM Placement) · **No** asigna MACs/TAPs/VNC ni
+la ruta de imagen (Slice Manager) · **No** crea el bridge OVS ni los puertos Neutron
+(preexistente / Network Orchestrator).
 
 ---
 
@@ -34,8 +46,9 @@ main.py
  ├── models/
  │    └── schemas.py            → Contratos de entrada/salida (Pydantic)
  ├── services/
- │    ├── provisioner.py        → Orquestación deploy/destroy (lógica central)
- │    ├── qemu_executor.py      → Comandos QEMU/KVM + TAP/OVS sobre el worker
+ │    ├── provisioner.py        → Orquestación deploy/destroy (despacha por zona)
+ │    ├── qemu_executor.py      → Comandos QEMU/KVM + TAP/OVS + cloud-init (Linux)
+ │    ├── openstack_compute_executor.py → Nova: create_server, BYOS, flavors, cloud-init, token noVNC
  │    ├── ssh_client.py         → Wrapper SSH con llave PEM en memoria (Paramiko)
  │    ├── vnc_port_manager.py   → Utilidad para consultar puertos VNC en uso vía SSH (no conectado al flujo actual — el puerto VNC viene pre-calculado desde el Slice Manager)
  │    └── queue_client.py       → Cliente NATS (subscribe, reply, KV)
@@ -246,11 +259,38 @@ El estado en KV se elimina automáticamente tras cada destroy, o expira a las
 
 ---
 
+## Aprovisionamiento en OpenStack (Nova)
+
+Cuando `availability_zone_id = 2`, el ejecutor OpenStack:
+
+1. **Resuelve la imagen** en Glance (por nombre/UUID) y el **flavor**: busca uno
+   con specs exactos (vCPU/RAM/disco); si no existe, lo **crea al vuelo**
+   (`_ensure_flavor_uuid`) con esos specs — así la VM sale idéntica a lo pedido,
+   sin depender de un catálogo Nova fijo. El `provider_flavor_id` se cachea de vuelta.
+2. **BYOS (Bring Your Own Scheduler):** si `OS_BYOS_FORCE_HOST=true`, crea la
+   instancia con `availability_zone=nova:<selected_host>` para forzar el host que
+   decidió el VM Placement (bypass del scheduler de Nova).
+3. **Puertos:** usa los UUIDs de puertos Neutron que llegan en `network_ports`
+   (creados antes por el Network Orchestrator — de ahí el orden red→cómputo).
+4. **cloud-init `user_data`:** inyecta usuario/contraseña (`vm_user`/`vm_password`,
+   default `pucp2026`) y la llave pública del dueño (`owner_ssh_public_key`), con
+   `ssh_pwauth` + `chpasswd`. Solo surte efecto en imágenes con soporte cloud-init.
+5. Espera `ACTIVE` (polling), obtiene el **token de consola noVNC** y devuelve
+   `provider_instance_id`, `vnc_url` y `external_ip`.
+
+> El mensaje `compute.deploy` de OpenStack trae por VM: `selected_host`,
+> `network_ports`, `flavor_id`/`flavor_name`, `vm_user`/`vm_password`,
+> `owner_ssh_public_key`, además de los campos comunes.
+
+---
+
 ## Variables de entorno
 
 | Variable | Default | Descripción |
 |---|---|---|
 | `NATS_URL` | `nats://nats:4222` | URL del servidor NATS |
+| `OS_AUTH_URL`, `OS_USERNAME`, `OS_PASSWORD`, `OS_PROJECT_NAME`, `OS_*_DOMAIN_NAME` | — | Credenciales OpenStack (Nova/Glance) |
+| `OS_BYOS_FORCE_HOST` | `true` | Forzar el host del placement vía `availability_zone=nova:<host>` |
 | `NATS_KV_BUCKET` | `compute-state` | Bucket KV para persistir VMs desplegadas |
 | `QUEUE_DEPLOY` | `compute.deploy` | Subject de entrada para deploy |
 | `QUEUE_DESTROY` | `compute.destroy` | Subject de entrada para destroy |
