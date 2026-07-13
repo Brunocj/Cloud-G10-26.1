@@ -3,6 +3,7 @@ Lógica de proxy compartida entre todos los routers.
 """
 
 import logging
+from typing import Optional
 
 import httpx
 from starlette.requests import Request
@@ -42,10 +43,16 @@ async def forward(
     request: Request,
     target_url: str,
     extra_headers: dict | None = None,
+    timeout: Optional[float] = None,
 ) -> Response:
     """
     Reenvía el request al upstream y devuelve la respuesta al cliente.
     Conserva método, headers, query string y body exactamente como llegan.
+
+    Args:
+        timeout: Si se especifica, sobreescribe el timeout del cliente
+                 solo para esta llamada (ej. subida de imágenes grandes).
+                 Si es None, se usa el timeout global configurado en el cliente.
     """
     if request.query_params:
         target_url += f"?{request.query_params}"
@@ -58,12 +65,24 @@ async def forward(
     client: httpx.AsyncClient = request.app.state.http_client
 
     try:
-        upstream = await client.request(
+        # Si se pide un timeout específico, se construye un objeto httpx.Timeout
+        # solo para esta llamada — el cliente compartido y el resto de rutas
+        # siguen usando el FORWARD_TIMEOUT global sin verse afectados.
+        request_kwargs: dict = dict(
             method=request.method,
             url=target_url,
             headers=headers,
             content=body,
         )
+        if timeout is not None:
+            request_kwargs["timeout"] = httpx.Timeout(
+                connect=10.0,      # fallo rápido si no hay red
+                read=timeout,      # tiempo de espera de lectura extendido
+                write=timeout,     # tiempo de escritura extendido (upload)
+                pool=5.0,
+            )
+
+        upstream = await client.request(**request_kwargs)
     except httpx.ConnectError:
         logger.error("Sin conexión al upstream: %s", target_url)
         return Response(

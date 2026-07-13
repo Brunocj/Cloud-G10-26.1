@@ -7,7 +7,7 @@ import hashlib
 import uuid
 import random
 from app.database import SessionLocal
-from app.models import Slice, Vm, Vlan, Image, Worker
+from app.models import Slice, Vm, Vlan, Image, Worker, Flavor
 from sqlalchemy import func
 from app.nats_producer import nats_producer
 
@@ -522,6 +522,18 @@ async def process_placement_worker():
                 if owner_ssh_key:
                     logger.info("[PLACEMENT] 🔑 Llave SSH del dueño encontrada — se inyectará en las VMs")
 
+                # UUID Nova cacheado (si el flavor ya fue materializado — eager
+                # por un admin, o lazy en un deploy previo) para que el CP no
+                # tenga que re-listar/crear en Nova si ya sabemos cuál es.
+                flavor_ids_usados = {vm.flavor_id for vm in vms_de_bd if vm.flavor_id}
+                flavor_provider_map = {}
+                if flavor_ids_usados:
+                    flavor_provider_map = {
+                        f_id: f_provider_id
+                        for f_id, f_provider_id in db.query(Flavor.id, Flavor.provider_flavor_id)
+                            .filter(Flavor.id.in_(flavor_ids_usados)).all()
+                    }
+
                 vms_payload = []
                 for vm in vms_de_bd:
                     logger.info("[PLACEMENT] 🔧 Procesando VM: %s", vm.name)
@@ -565,6 +577,8 @@ async def process_placement_worker():
                         "vcpus":           int(vm.vcore),
                         "ram_mb":          float(vm.ram),
                         "disk_gb":         float(vm.disk),
+                        "provider_flavor_id": flavor_provider_map.get(vm.flavor_id),
+                        "flavor_name":     vm.flavor_name,
                         "image_path":      img_path,
                         "vnc_port":        vm.vnc_port,
                         "vnc_display":     vm.vnc_port - 5900,

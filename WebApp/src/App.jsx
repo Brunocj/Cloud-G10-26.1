@@ -136,6 +136,7 @@ export default function App() {
         }
         else if (mode === "design") navigate("/slice/new");
         else if (mode === "images") confirmOrLeave("/images");
+        else if (mode === "flavors") confirmOrLeave("/flavors");
     }, [nodes, activeId, navigate]);
 
     // ── Navigation handlers ───────────────────────────────────────────────────
@@ -254,6 +255,7 @@ export default function App() {
     const sidebarMode = useMemo(() => {
         if (location.pathname === "/slice/new") return "design";
         if (location.pathname === "/images") return "images";
+        if (location.pathname === "/flavors") return "flavors";
         if (location.pathname.startsWith("/slice/") && activeSlice?.status === "DRAFT") return "design";
         return "browse";
     }, [location.pathname, activeSlice?.status]);
@@ -742,6 +744,15 @@ export default function App() {
 
             {/* Images — RBAC guarded */}
             <Route path="/images" element={
+                isAdmin
+                    ? <AppLayout sidebar={sidebar} toast={toast} themeRev={themeRev}>
+                          <CanvasView {...canvasProps} />
+                      </AppLayout>
+                    : <Navigate to="/" replace />
+            } />
+
+            {/* Flavors — RBAC guarded */}
+            <Route path="/flavors" element={
                 isAdmin
                     ? <AppLayout sidebar={sidebar} toast={toast} themeRev={themeRev}>
                           <CanvasView {...canvasProps} />

@@ -4,7 +4,7 @@ import os
 import uuid
 from datetime import datetime
 from app.database import SessionLocal
-from app.models import Slice, Vlan, Vm, IpPool, Worker
+from app.models import Slice, Vlan, Vm, IpPool, Worker, Flavor
 from app.nats_producer import nats_producer
 from app.services.notification_hub import notification_hub
 
@@ -150,6 +150,7 @@ async def nats_result_listener():
                         vnc_url_map            = {}
                         provider_instance_map  = {}
                         external_ip_map        = {}
+                        flavor_uuid_map        = {}
                         for v in result_vms:
                             vid = v.get("vm_id")
                             if v.get("vnc_url"):
@@ -158,6 +159,8 @@ async def nats_result_listener():
                                 provider_instance_map[vid] = v["provider_instance_id"]
                             if v.get("external_ip"):
                                 external_ip_map[vid] = v["external_ip"]
+                            if v.get("provider_flavor_id"):
+                                flavor_uuid_map[vid] = v["provider_flavor_id"]
 
                         # Actualizar columnas SQL de cada VM
                         db_vms = db.query(Vm).filter(Vm.slice_id == slice_id).all()
@@ -174,6 +177,25 @@ async def nats_result_listener():
                                 db_vm.external_ip = external_ip_map[db_vm.name]
                                 logger.info("[LISTENER] 🌐 external_ip guardado para VM %s: %s",
                                             db_vm.name, external_ip_map[db_vm.name])
+
+                        # Cachear el UUID Nova del flavor lógico (si aún no lo estaba) —
+                        # así el próximo deploy que use el mismo flavor evita re-listar
+                        # y comparar specs en Nova (ver ComputeProvisioner._ensure_flavor_uuid).
+                        flavor_ids_a_cachear = {
+                            db_vm.flavor_id for db_vm in db_vms
+                            if db_vm.flavor_id and db_vm.name in flavor_uuid_map
+                        }
+                        if flavor_ids_a_cachear:
+                            flavors_sin_cache = db.query(Flavor).filter(
+                                Flavor.id.in_(flavor_ids_a_cachear),
+                                Flavor.provider_flavor_id.is_(None),
+                            ).all()
+                            for fl in flavors_sin_cache:
+                                match = next((v for v in db_vms if v.flavor_id == fl.id and v.name in flavor_uuid_map), None)
+                                if match:
+                                    fl.provider_flavor_id = flavor_uuid_map[match.name]
+                                    logger.info("[LISTENER] ☁️  provider_flavor_id cacheado para flavor id=%d: %s",
+                                                fl.id, fl.provider_flavor_id)
 
                         # Actualizar también slice_json["deployed_vms"]
                         s_json = db_slice.slice_json or {}

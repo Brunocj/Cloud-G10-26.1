@@ -33,6 +33,8 @@ class VMSpec(BaseModel):
     vcpus:           int                 = Field(..., ge=1)
     ram_mb:          float               = Field(..., ge=128)
     disk_gb:         float               = Field(...)
+    provider_flavor_id: Optional[str]    = Field(default=None, description="UUID Nova cacheado del flavor lógico usado (si ya fue materializado antes) — evita re-listar/crear en OpenStack")
+    flavor_name:        Optional[str]    = Field(default=None, description="Nombre del flavor lógico elegido en la web (si la VM usa uno) — se usa como nombre del flavor Nova al materializarlo")
     image_path:      str                 = Field(...)
     vnc_port:        Optional[int]       = Field(default=None)
     vnc_display:     Optional[int]       = Field(default=None)
@@ -77,6 +79,7 @@ class VMResult(BaseModel):
     provider_instance_id: Optional[str] = None
     vnc_url:              Optional[str] = None
     external_ip:          Optional[str] = None
+    provider_flavor_id:   Optional[str] = None   # UUID Nova del flavor resuelto — se reporta para cachearlo
 
 
 # ---------------------------------------------------------------------------

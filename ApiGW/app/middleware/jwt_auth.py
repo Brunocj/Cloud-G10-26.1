@@ -9,6 +9,16 @@ Flujo por petición:
   5. Extraer sub (X-User-Id) y rol más alto (X-User-Role).
   6. Eliminar 'Authorization' del request y añadir los headers de identidad.
   7. Hacer pasar la petición mutada al router downstream.
+
+NOTA: Se implementa como middleware ASGI puro (NO como BaseHTTPMiddleware).
+BaseHTTPMiddleware envuelve el body del request en un stream intermedio para
+poder reenviarlo tras ejecutar el dispatch, y ese wrapping puede truncar o
+corromper uploads grandes (imágenes de varios GB hacia OpenStack Glance),
+provocando que el body llegue incompleto al Slice Manager y su parser
+multipart falle con 400 "There was an error parsing the body". Como este
+middleware solo necesita leer headers (nunca el body), un ASGI puro que solo
+muta `scope["headers"]` deja el stream original intacto para el resto de la
+cadena.
 """
 from __future__ import annotations
 
@@ -16,9 +26,9 @@ import logging
 
 import jwt
 from jwt import ExpiredSignatureError, InvalidTokenError, PyJWKClient
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
+from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.config import settings
 
@@ -62,43 +72,58 @@ def build_jwks_client() -> PyJWKClient:
     )
 
 
-class JWTAuthMiddleware(BaseHTTPMiddleware):
+class JWTAuthMiddleware:
     """
-    Middleware que valida el token JWT de Keycloak y muta el request
+    Middleware ASGI puro que valida el token JWT de Keycloak y muta el scope
     añadiendo X-User-Id y X-User-Role antes de reenviarlo al upstream.
+
+    No hereda de BaseHTTPMiddleware ni toca el body del request en ningún
+    momento — solo lee headers y reescribe `scope["headers"]`.
     """
 
-    def __init__(self, app, jwks_client: PyJWKClient) -> None:
-        super().__init__(app)
-        self._jwks = jwks_client
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
 
-    # ── Punto de entrada ──────────────────────────────────────────────────────
-
-    async def dispatch(self, request: Request, call_next):
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
 
         # 1. Rutas públicas → pasar sin verificar
-        if request.method == "OPTIONS":
-            return await call_next(request)
-        if request.url.path in _PUBLIC_EXACT:
-            return await call_next(request)
-        if request.url.path.startswith(_PUBLIC_PREFIX):
-            return await call_next(request)
+        path = scope["path"]
+        if scope["method"] == "OPTIONS" or path in _PUBLIC_EXACT or path.startswith(_PUBLIC_PREFIX):
+            await self.app(scope, receive, send)
+            return
+
+        jwks_client = scope["app"].state.jwks_client
+        if jwks_client is None:
+            # Keycloak no disponible al arrancar — rechazar todas las peticiones
+            response = JSONResponse(
+                {"detail": "Servicio de autenticación no disponible"},
+                status_code=503,
+            )
+            await response(scope, receive, send)
+            return
 
         # 2. Extraer token
-        auth_header = request.headers.get("Authorization", "")
+        headers = Headers(scope=scope)
+        auth_header = headers.get("authorization", "")
         if not auth_header.startswith("Bearer "):
-            return JSONResponse(
+            response = JSONResponse(
                 {"detail": "Autenticación requerida. Incluye 'Authorization: Bearer <token>'."},
                 status_code=401,
                 headers={"WWW-Authenticate": "Bearer"},
             )
+            await response(scope, receive, send)
+            return
 
         token = auth_header.removeprefix("Bearer ").strip()
 
         # 3. Validar token
-        payload = await self._validate(token, request.url.path)
+        payload = self._validate(jwks_client, token, path)
         if isinstance(payload, JSONResponse):
-            return payload   # error de validación
+            await payload(scope, receive, send)
+            return
 
         # 4. Extraer identidad
         user_id = payload.get("sub", "unknown")
@@ -110,30 +135,32 @@ class JWTAuthMiddleware(BaseHTTPMiddleware):
                 "Usuario %s no tiene rol reconocido. Roles en token: %s",
                 user_id[:8], roles,
             )
-            return JSONResponse(
+            response = JSONResponse(
                 {"detail": "El usuario no tiene ningún rol autorizado en esta plataforma."},
                 status_code=403,
             )
+            await response(scope, receive, send)
+            return
 
         # 5. Mutar el scope ASGI: inyectar X-User-* y eliminar Authorization
-        self._mutate_headers(request, user_id, role)
+        self._mutate_headers(scope, user_id, role)
 
         logger.info(
             "JWT OK · user=%s… role=%s · %s %s",
-            user_id[:8], role, request.method, request.url.path,
+            user_id[:8], role, scope["method"], path,
         )
 
-        return await call_next(request)
+        await self.app(scope, receive, send)
 
     # ── Helpers privados ──────────────────────────────────────────────────────
 
-    async def _validate(self, token: str, path: str):
+    def _validate(self, jwks_client: PyJWKClient, token: str, path: str):
         """
         Devuelve el payload decodificado o un JSONResponse de error.
-        Separado del dispatch para mantenerlo legible.
+        Separado del __call__ para mantenerlo legible.
         """
         try:
-            signing_key = self._jwks.get_signing_key_from_jwt(token)
+            signing_key = jwks_client.get_signing_key_from_jwt(token)
 
             decode_options: dict = {"verify_exp": True}
             decode_kwargs: dict = {
@@ -172,20 +199,20 @@ class JWTAuthMiddleware(BaseHTTPMiddleware):
             )
 
     @staticmethod
-    def _mutate_headers(request: Request, user_id: str, role: str) -> None:
+    def _mutate_headers(scope: Scope, user_id: str, role: str) -> None:
         """
-        Modifica el scope ASGI del request en memoria para:
+        Modifica el scope ASGI para:
           • Añadir X-User-Id y X-User-Role
           • Eliminar Authorization (el Slice Manager no debe verlo)
         """
         # Copiar headers actuales eliminando Authorization
         new_headers = [
             (name, value)
-            for name, value in request.scope["headers"]
+            for name, value in scope["headers"]
             if name.lower() != b"authorization"
         ]
         # Añadir headers de identidad
         new_headers.append((b"x-user-id",   user_id.encode()))
         new_headers.append((b"x-user-role", role.encode()))
 
-        request.scope["headers"] = new_headers
+        scope["headers"] = new_headers
