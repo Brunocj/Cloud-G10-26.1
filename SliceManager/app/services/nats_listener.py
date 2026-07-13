@@ -134,6 +134,100 @@ async def nats_result_listener():
                     logger.info("="*70)
                     return
 
+                # ── Resultado de una DESTRUCCIÓN (manual, TTL o Kill Switch) ─
+                # Solo acá se libera la VLAN y se marca TERMINATED — antes se
+                # hacía apenas se publicaba el mensaje, sin esperar confirmación
+                # real, lo que dejaba VLANs "libres" en la BD mientras la
+                # infraestructura seguía físicamente viva en un worker si la
+                # limpieza fallaba en silencio (ver slice_destroyer.py).
+                pending_destroy = _sj.get("pending_destroy")
+                if pending_destroy:
+                    from app.services.notification_hub import notification_hub
+                    from app.services.slice_destroyer import release_external_ips
+                    if status.lower() == "success":
+                        vlans_deleted = db.query(Vlan).filter(Vlan.slice_id == slice_id).delete()
+                        release_external_ips(db, slice_id)
+                        db.query(Vm).filter(Vm.slice_id == slice_id).update({"state": "TERMINATED"})
+                        _sj.pop("pending_destroy", None)
+                        db_slice.slice_json = dict(_sj)
+                        db_slice.status = "TERMINATED"
+                        db_slice.date_destruction = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                        db.commit()
+                        logger.info("[LISTENER] 🧹 Slice %s destruido y confirmado — TERMINATED (%d VLANs liberadas)",
+                                    slice_id, vlans_deleted)
+                        from app.services.audit import audit
+                        audit("system", "system", "Orchestrator", "slice_terminated",
+                              f"Slice '{db_slice.name}' destruido y confirmado por los workers.",
+                              slice_id=slice_id, project_id=db_slice.project_id)
+                        await notification_hub.notify_user(db_slice.creator_id, {
+                            "type": "slice_terminated", "slice_id": slice_id,
+                            "title": "Slice destruido",
+                            "message": f"Tu slice \"{db_slice.name}\" fue destruido correctamente.",
+                        })
+                    else:
+                        # La limpieza física falló — NO liberamos VLANs/IPs (pueden
+                        # seguir físicamente en uso) y volvemos al estado previo
+                        # para que el dueño (o el próximo ciclo del TTL) pueda
+                        # reintentar la destrucción.
+                        prev = pending_destroy.get("previous_status") or "ACTIVE"
+                        logger.error("[LISTENER] ❌ Destrucción del slice %s FALLÓ (status=%s) — "
+                                     "revirtiendo a %s para reintentar", slice_id, status, prev)
+                        _sj.pop("pending_destroy", None)
+                        db_slice.slice_json = dict(_sj)
+                        db_slice.status = prev
+                        db.commit()
+                        from app.services.audit import audit
+                        audit("system", "system", "Orchestrator", "destroy_failed",
+                              f"La destrucción del slice '{db_slice.name}' falló (status={status}). "
+                              "El slice sigue activo — se puede reintentar.",
+                              level="ERROR", slice_id=slice_id, project_id=db_slice.project_id)
+                        await notification_hub.notify_user(db_slice.creator_id, {
+                            "type": "slice_failed", "slice_id": slice_id,
+                            "title": "Destrucción fallida",
+                            "message": f"No se pudo destruir \"{db_slice.name}\" — puedes reintentar.",
+                        })
+                    db.close()
+                    logger.info("="*70)
+                    return
+
+                # ── Resultado del ROLLBACK automático tras un deploy fallido ─
+                # El deploy ya falló — el slice termina en FAILED de todas
+                # formas — pero solo liberamos VLANs/IPs/marcamos las VMs
+                # FAILED si el rollback físico se confirma. Si el rollback
+                # TAMBIÉN falla, el slice igual queda FAILED (no hay a qué
+                # volver: el deploy original ya fracasó) pero los recursos NO
+                # se liberan — pueden seguir físicamente ocupados — y queda
+                # loggeado como ERROR para limpieza manual.
+                pending_rollback = _sj.get("pending_rollback")
+                if pending_rollback:
+                    from app.services.slice_destroyer import release_external_ips
+                    from app.services.audit import audit
+                    _sj.pop("pending_rollback", None)
+                    db_slice.slice_json = dict(_sj)
+                    db_slice.status = "FAILED"
+                    if status.lower() == "success":
+                        vlans_deleted = db.query(Vlan).filter(Vlan.slice_id == slice_id).delete()
+                        release_external_ips(db, slice_id)
+                        db.query(Vm).filter(Vm.slice_id == slice_id).update({"state": "FAILED"})
+                        db.commit()
+                        logger.info("[LISTENER] 🧹 Rollback confirmado para slice %s → FAILED (%d VLANs liberadas)",
+                                    slice_id, vlans_deleted)
+                        audit("system", "system", "Orchestrator", "deploy_failed",
+                              f"Despliegue del slice '{db_slice.name}' falló y se limpió correctamente.",
+                              level="ERROR", slice_id=slice_id, project_id=db_slice.project_id)
+                    else:
+                        db.commit()
+                        logger.error("[LISTENER] 🔥 Rollback del slice %s TAMBIÉN falló (status=%s) — "
+                                     "recursos posiblemente huérfanos, requiere limpieza MANUAL. "
+                                     "VLANs/IPs NO liberadas para evitar colisiones.", slice_id, status)
+                        audit("system", "system", "Orchestrator", "rollback_failed",
+                              f"El rollback del slice '{db_slice.name}' también falló. "
+                              "Puede haber infraestructura huérfana — requiere revisión manual.",
+                              level="ERROR", slice_id=slice_id, project_id=db_slice.project_id)
+                    db.close()
+                    logger.info("="*70)
+                    return
+
                 # Si ya está en estado terminal (por Rollback o Destroy), IGNORAMOS los success tardíos
                 if db_slice.status in ["TERMINATED", "FAILED"]:
                     logger.info("[LISTENER] ⏭️  Ignorando resultado '%s': slice ya en estado %s",
@@ -217,29 +311,13 @@ async def nats_result_listener():
                 else:
                     logger.warning("[LISTENER] ⚠️  Estado '%s' recibido para slice %s. Iniciando Rollback...",
                                    status, slice_id)
-                    db_slice.status = "FAILED"
-                    db.query(Vm).filter(Vm.slice_id == slice_id).update({"state": "FAILED"})
 
-                    # 1. Liberamos las VLANs de la base de datos local
-                    vlans_deleted = db.query(Vlan).filter(Vlan.slice_id == slice_id).delete()
-                    logger.info("[LISTENER]    Rollback: %d VLANs liberadas", vlans_deleted)
-
-                    # 2. Liberamos IPs externas del pool
-                    vms = db.query(Vm).filter(
-                        Vm.slice_id == slice_id,
-                        Vm.external_ip.isnot(None)
-                    ).all()
-                    if vms:
-                        ips = [vm.external_ip for vm in vms if vm.external_ip]
-                        if ips:
-                            ip_records = db.query(IpPool).filter(IpPool.ip_address.in_(ips)).all()
-                            for record in ip_records:
-                                record.is_used = 0
-                                record.vm_id = None
-                            logger.info("[LISTENER]    Rollback: %d IPs externas liberadas", len(ip_records))
-
-                    # 3. Disparamos la orden de destrucción a NATS para limpiar los workers
-                    # Incluimos vms/links con claves SSH para que CP/NO no fallen con puerto 22
+                    # NO liberamos VLANs/IPs ni marcamos las VMs FAILED todavía
+                    # — recién cuando se confirme que el rollback físico realmente
+                    # limpió los workers (branch `pending_rollback` más abajo).
+                    # Mismo motivo que el fix del destroy manual: liberar antes de
+                    # confirmar deja un hueco de Capa 2 (VLAN "libre" en la BD
+                    # mientras sigue físicamente configurada en un worker).
                     s_json = db_slice.slice_json or {}
                     if isinstance(s_json, str):
                         s_json = json.loads(s_json)
@@ -276,8 +354,34 @@ async def nats_result_listener():
                         "vms":                  deployed_vms,
                         "links":                deployed_links,
                     }
+
+                    s_json["pending_rollback"] = {
+                        "reason":       f"Deploy status={status}",
+                        "requested_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+                    db_slice.slice_json = dict(s_json)
+                    db_slice.status = "ROLLING_BACK"
+                    db.commit()
+
                     await nats_producer.publish_destroy(rollback_payload)
-                    logger.info("[LISTENER] 🧹 Orden de limpieza (Rollback) enviada para slice %s → FAILED", slice_id)
+                    logger.info("[LISTENER] 🧹 Orden de limpieza (Rollback) enviada para slice %s → ROLLING_BACK", slice_id)
+
+                    from app.services.audit import audit
+                    audit("system", "system", "Orchestrator", "deploy_failed",
+                          f"Despliegue del slice '{db_slice.name}' falló (status={status}). Limpiando recursos…",
+                          level="ERROR", slice_id=slice_id, project_id=db_slice.project_id)
+                    try:
+                        await notification_hub.notify_user(db_slice.creator_id, {
+                            "type":     "slice_failed",
+                            "slice_id": slice_id,
+                            "title":    "Despliegue fallido",
+                            "message":  f"El despliegue de \"{db_slice.name}\" falló. Revisa los recursos e intenta de nuevo.",
+                        })
+                    except Exception as notify_exc:
+                        logger.warning("[LISTENER] No se pudo notificar por WS: %s", notify_exc)
+                    db.close()
+                    logger.info("="*70)
+                    return
 
                 db.commit()
                 logger.info("[LISTENER] 💾 BD actualizada correctamente")

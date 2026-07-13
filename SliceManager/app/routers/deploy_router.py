@@ -383,6 +383,8 @@ async def request_destroy(
 
     if db_slice.status == "TERMINATED":
         raise HTTPException(status_code=400, detail="El slice ya está destruido.")
+    if db_slice.status == "TERMINATING":
+        raise HTTPException(status_code=409, detail="Ya hay una destrucción en curso para este slice.")
 
     # ── Autorización de negocio ──────────────────────────────────────
     # Dueño, admin/superAdmin, o jefeProyecto del proyecto del slice
@@ -737,6 +739,8 @@ async def force_destroy(
         raise HTTPException(status_code=404, detail="Slice no encontrado")
     if db_slice.status == "TERMINATED":
         raise HTTPException(status_code=400, detail="El slice ya está destruido.")
+    if db_slice.status == "TERMINATING":
+        raise HTTPException(status_code=409, detail="Ya hay una destrucción en curso para este slice.")
 
     # Solo roles con poder de intervención sobre slices ajenos
     if user.role not in ("admin", "superAdmin"):
