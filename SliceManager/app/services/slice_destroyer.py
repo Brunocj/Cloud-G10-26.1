@@ -14,7 +14,7 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
-from app.models import IpPool, Slice, Vlan, Vm, Worker
+from app.models import IpPool, Slice, Vm, Worker
 from app.nats_producer import nats_producer
 
 logger = logging.getLogger("SliceManager.Destroyer")
@@ -44,14 +44,27 @@ def release_external_ips(db: Session, slice_id: int) -> None:
 
 async def destroy_deployed_slice(db: Session, db_slice: Slice) -> bool:
     """
-    Publica la orden de destrucción por NATS y marca el slice TERMINATED.
+    Publica la orden de destrucción por NATS y marca el slice TERMINATING.
+
+    El estado final (TERMINATED — con las VLANs y IPs externas recién ahí
+    liberadas) lo aplica `nats_listener` cuando confirma que la limpieza
+    física en los workers realmente terminó (mismo patrón que ya usan
+    extend/shrink vía `pending_extension`/`pending_shrink`). Antes esta
+    función marcaba TERMINATED y liberaba las VLANs apenas el mensaje se
+    publicaba en NATS — sin esperar a que la destrucción real ocurriera.
+    Si esa destrucción fallaba en silencio (SSH caído, worker inalcanzable,
+    excepción no propagada), la VLAN quedaba "libre" en la BD mientras
+    seguía físicamente configurada en un worker, permitiendo que un slice
+    nuevo la reutilizara y colisionara en Capa 2 con la infraestructura
+    zombie — el mismo bug de aislamiento entre slices, reintroducido por
+    una liberación prematura en vez de por una reserva faltante.
+
     Devuelve True si la orden fue publicada correctamente.
     El caller es responsable de la autorización y de decidir si el slice
     está realmente desplegado (no DRAFT/PENDING).
     """
     slice_id = db_slice.id
-
-    db.query(Vlan).filter(Vlan.slice_id == slice_id).delete()
+    previous_status = db_slice.status
 
     s_json = db_slice.slice_json
     if isinstance(s_json, str):
@@ -107,9 +120,14 @@ async def destroy_deployed_slice(db: Session, db_slice: Slice) -> bool:
     if not published:
         return False
 
-    db_slice.status = "TERMINATED"
-    db_slice.date_destruction = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    db.query(Vm).filter(Vm.slice_id == slice_id).update({"state": "TERMINATED"})
-    release_external_ips(db, slice_id)
+    # No liberamos VLANs/IPs ni marcamos TERMINATED todavía — solo dejamos
+    # constancia de que hay una destrucción pendiente. `nats_listener`
+    # completa la transición cuando confirma el resultado real.
+    s_json["pending_destroy"] = {
+        "previous_status": previous_status,
+        "requested_at":    datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    db_slice.slice_json = dict(s_json)
+    db_slice.status = "TERMINATING"
     db.commit()
     return True
