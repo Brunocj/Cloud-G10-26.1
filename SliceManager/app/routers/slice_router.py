@@ -41,6 +41,68 @@ def _resolve_specs(db: Session, vm_data: dict) -> tuple:
             float(vm_data.get("disk", 5.0)), None, None)
 
 
+def _validate_topology(db: Session, slice_json: dict, availability_zone_id: Optional[int] = None) -> None:
+    """
+    Valida la estructura de la topología antes de persistirla o desplegarla.
+
+    Reglas:
+      - Debe haber al menos 1 nodo.
+      - Slices de una sola VM: SOLO permitidos en la zona "Linux Cluster"
+        (en OpenStack un slice requiere ≥ 2 VMs conectadas).
+      - Multi-VM: NO se permiten VMs huérfanas — todo nodo debe aparecer
+        como extremo de al menos un edge.
+      - Todo edge debe referenciar nodos existentes en la topología.
+
+    Lanza HTTPException 400 con detalle si alguna regla falla.
+    """
+    nodes = slice_json.get("nodes", []) or []
+    edges = slice_json.get("edges", []) or []
+
+    if len(nodes) == 0:
+        raise HTTPException(status_code=400,
+                            detail="La topología debe contener al menos una VM.")
+
+    node_ids = {n.get("id") for n in nodes}
+
+    # Slice de una sola VM: solo Linux Cluster.
+    # Si availability_zone_id es None (p. ej. draft sin AZ aún) se pospone
+    # esta comprobación al momento del despliegue.
+    if len(nodes) == 1:
+        if availability_zone_id is not None:
+            az = db.query(AvailabilityZone).filter(
+                AvailabilityZone.id == availability_zone_id
+            ).first()
+            az_name = (az.name or "").strip().lower() if az else ""
+            if "linux" not in az_name:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Los slices de una sola VM solo son válidos en la zona "
+                           "Linux Cluster; OpenStack requiere al menos 2 VMs conectadas.",
+                )
+        return  # 1 VM: no hay edges que validar
+
+    # Multi-VM: validar edges y detectar huérfanos
+    connected: set = set()
+    for e in edges:
+        a = e.get("from", e.get("source"))
+        b = e.get("to", e.get("target"))
+        if a not in node_ids or b not in node_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=f"El enlace '{e.get('id')}' referencia nodos inexistentes.",
+            )
+        connected.add(a)
+        connected.add(b)
+
+    orphans = node_ids - connected
+    if orphans:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Topología inválida: se detectaron VMs huérfanas (sin enlaces): "
+                   f"{sorted(orphans)}. Toda VM debe estar conectada a al menos otra.",
+        )
+
+
 def _serialize_slice(t: Slice, users_map: dict = None, projects_map: dict = None) -> dict:
     """Serializa un objeto Slice a dict para la respuesta de la API."""
     s_json = t.slice_json if t.slice_json else {}
@@ -170,6 +232,11 @@ def create_draft(
     user:    CurrentUser = Depends(get_current_user),
 ):
     """Crea un borrador de slice. Cualquier rol autenticado puede crear slices."""
+    # Validación estructural de la topología (huérfanos, edges rotos, vacío).
+    # La regla de "1 VM ⇒ Linux Cluster" se re-valida al desplegar (aquí no
+    # hay AZ todavía).
+    _validate_topology(db, request.slice_json, availability_zone_id=None)
+
     try:
         slice_creado = SliceRepository.save_draft(
             db=db,
@@ -266,6 +333,12 @@ def update_draft(
 
     # ── Autorización de negocio ────────────────────────────────────
     _assert_owner_or_admin(db_slice, user, db)
+
+    # Validación estructural de la topología. Si el draft ya tiene AZ asignada
+    # (poco habitual en DRAFT, pero por si el flujo la fija), aplicamos también
+    # la regla de "1 VM ⇒ Linux Cluster".
+    _validate_topology(db, request.slice_json,
+                       availability_zone_id=db_slice.availability_zone_id)
 
     # Liberar IPs antes de destruir VMs viejas
     vms_antiguas = db.query(Vm).filter(Vm.slice_id == slice_id).all()

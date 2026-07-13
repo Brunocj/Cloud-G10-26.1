@@ -259,15 +259,70 @@ class OpenStackComputeExecutor:
                 networks=networks,
             )
 
-            # Llave pública del dueño (REQ-US-02): inyectada vía cloud-init
-            # user_data. Solo surte efecto en imágenes con soporte cloud-init
+            # Cloud-init user_data (REQ-US-02): inyecta credenciales de la VM
+            # (vm_user / vm_password) y la llave SSH del dueño del slice.
+            # Replica la lógica de qemu_executor._prepare_cloud_init para que la
+            # UX sea consistente entre zonas Linux Cluster y OpenStack.
+            # Solo surte efecto en imágenes con soporte cloud-init
             # (CirrOS la ignora sin romper el arranque).
-            owner_key = getattr(vm, "owner_ssh_public_key", None)
+            import base64
+            owner_key   = getattr(vm, "owner_ssh_public_key", None) or ""
+            vm_user     = getattr(vm, "vm_user", None) or "ubuntu"
+            vm_password = getattr(vm, "vm_password", None) or "pucp2026"
+
+            # Usuario por defecto de la imagen base
+            default_image_user = "cirros" if "cirros" in (vm.image_path or "").lower() else "ubuntu"
+
+            # Bloque users: siempre el default de la imagen; si el custom es
+            # distinto, se agrega como usuario adicional con sudo NOPASSWD.
+            users_block = "users:\n  - default\n"
+            if vm_user != default_image_user:
+                # lock_passwd: false es CLAVE — sin esto cloud-init crea el
+                # usuario bloqueado y no acepta login por password en la
+                # consola noVNC/tty, aunque chpasswd le haya seteado el pwd
+                # y ssh_pwauth esté activo (ssh_pwauth solo aplica a SSH).
+                users_block += (
+                    f"  - name: {vm_user}\n"
+                    f"    lock_passwd: false\n"
+                    f"    sudo: ['ALL=(ALL) NOPASSWD:ALL']\n"
+                    f"    groups: sudo\n"
+                    f"    shell: /bin/bash\n"
+                )
+                if owner_key:
+                    users_block += (
+                        f"    ssh_authorized_keys:\n"
+                        f"      - {owner_key}\n"
+                    )
+
+            # Llave del dueño también para el usuario default de la imagen
+            owner_keys_block = ""
             if owner_key:
-                import base64
-                cloud_cfg = f"#cloud-config\nssh_authorized_keys:\n  - {owner_key}\n"
-                create_kwargs["user_data"] = base64.b64encode(cloud_cfg.encode()).decode()
-                logger.info(f"[OpenStack] VM {vm.vm_id}: llave SSH del dueño inyectada vía user_data")
+                owner_keys_block = (
+                    f"ssh_authorized_keys:\n"
+                    f"  - {owner_key}\n"
+                )
+
+            # chpasswd: password para el usuario default y para el custom si aplica
+            chpasswd_list = f"{default_image_user}:{vm_password}"
+            if vm_user != default_image_user:
+                chpasswd_list += f"\n    {vm_user}:{vm_password}"
+
+            cloud_cfg = (
+                "#cloud-config\n"
+                "ssh_pwauth: true\n"
+                f"{users_block}"
+                f"{owner_keys_block}"
+                "chpasswd:\n"
+                "  list: |\n"
+                f"    {chpasswd_list}\n"
+                "  expire: False\n"
+            )
+            create_kwargs["user_data"] = base64.b64encode(cloud_cfg.encode()).decode()
+            logger.info(
+                f"[OpenStack] VM {vm.vm_id}: cloud-init inyectado "
+                f"(user='{vm_user}', default_image_user='{default_image_user}', "
+                f"owner_key={'sí' if owner_key else 'no'})"
+            )
 
             byos_enabled = os.getenv("OS_BYOS_FORCE_HOST", "true").lower() in ("1", "true", "yes")
             if vm.selected_host and byos_enabled:

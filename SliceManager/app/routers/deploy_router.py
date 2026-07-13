@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models import Image, Slice, Vm, Vlan, IpPool, Worker
+from app.models import Image, Slice, Vm, Vlan, IpPool, Worker, AvailabilityZone
+from app.routers.slice_router import _validate_topology
 from app.schemas import DeployRequest, BulkDeployRequest, DraftSaveRequest
 from app.auth import CurrentUser, get_current_user
 from app.services.placement_worker import placement_queue
@@ -129,6 +130,19 @@ async def request_deploy(
         db_slice.project_id = project_id
     else:
         db_slice.project_id = None
+
+    # ── Validación estructural de la topología ──────────────────────────────
+    # Reglas: sin VMs huérfanas; slices de 1 VM solo en Linux Cluster; edges
+    # deben referenciar nodos existentes. Se ejecuta ANTES de tocar el bus.
+    _sj = db_slice.slice_json or {}
+    if isinstance(_sj, str):
+        _sj = json.loads(_sj)
+    # slice_json en DRAFT puede no traer "nodes" (el repo solo persiste edges).
+    # Reconstruimos los nodos a partir de las VMs de la BD para validar.
+    if not _sj.get("nodes"):
+        _sj = dict(_sj)
+        _sj["nodes"] = [{"id": v.name} for v in db.query(Vm).filter(Vm.slice_id == slice_id).all()]
+    _validate_topology(db, _sj, availability_zone_id=request.availability_zone_id)
 
     # ── Validación Fail-Fast: compatibilidad de imágenes con la AZ ──────────
     # Principio: verificar ANTES de emitir cualquier evento al bus de mensajes.
@@ -266,6 +280,10 @@ async def bulk_deploy(
         raise HTTPException(status_code=400, detail="No hay otros miembros en el proyecto para desplegar")
 
     logger.info("[BULK] 👥 %d miembros encontrados (excluyendo al solicitante)", len(member_ids))
+
+    # ── Validación estructural de la topología (fail-fast una sola vez) ─────
+    _validate_topology(db, request.slice_json,
+                       availability_zone_id=request.availability_zone_id)
 
     # ── Validar imágenes vs. zona (fail-fast una sola vez) ──────────────────
     nodes_template = request.slice_json.get("nodes", [])
@@ -609,6 +627,15 @@ async def modify_active_slice(
 
     if not added_nodes and not added_edges and not removed_nodes and not removed_edges:
         raise HTTPException(status_code=400, detail="No hay cambios que aplicar.")
+
+    # ── Validación estructural de la topología resultante ────────────────────
+    # La topología final (post-modificación) no debe dejar VMs huérfanas ni
+    # infringir la regla de 1-VM solo en Linux Cluster.
+    _validate_topology(
+        db,
+        {"nodes": new_nodes_all, "edges": new_edges_all},
+        availability_zone_id=zone_id,
+    )
 
     # ── ELIMINACIÓN (shrink): destruir VMs/enlaces sin tocar el resto ────────
     if removed_nodes or removed_edges:
