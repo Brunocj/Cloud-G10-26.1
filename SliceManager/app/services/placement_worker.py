@@ -428,6 +428,24 @@ async def process_placement_worker():
                 mac_prefix         = f"52:54:00:{slice_hash[:2]}:{slice_hash[2:4]}"
                 network_links      = []
 
+                # Reglas de seguridad (firewall) por VM: viven en cada nodo del
+                # slice_json (`firewall_rules`, del NodeEditor) y hay que adjuntarlas
+                # a cada extremo del enlace como vmN_security_rules, o el Network
+                # Orchestrator las recibe vacías y no aplica nada.
+                def _security_rules_for(vm_name: str) -> list:
+                    node = next((n for n in slice_json.get("nodes", []) if n.get("id") == vm_name), {})
+                    out = []
+                    for r in node.get("firewall_rules", []) or []:
+                        proto = str(r.get("protocol", "tcp")).lower()
+                        if proto == "icmp":
+                            out.append({"allow_port": 0, "protocol": "icmp"})
+                            continue
+                        try:
+                            out.append({"allow_port": int(r.get("port")), "protocol": proto})
+                        except (TypeError, ValueError):
+                            continue  # regla sin puerto válido → se ignora
+                    return out
+
                 # ── Q-in-Q (802.1ad): S-VID por slice + C-VID reutilizable ────
                 # El C-VID de cada enlace es el tag interno; el S-VID aísla el
                 # slice. Con Q-in-Q los C-VIDs se REUTILIZAN entre slices (únicos
@@ -596,12 +614,14 @@ async def process_placement_worker():
                         "vm1_tap":             tap1,
                         "vm1_ssh_user":        worker1.get("user", "ubuntu"),
                         "vm1_ssh_private_key": get_ssh_key(worker1.get("key_path", "")),
+                        "vm1_security_rules":  _security_rules_for(vm1_id),
                         "vm2_id":              vm2_id,
                         "vm2_worker_ip":       worker2.get("ip", "0.0.0.0"),
                         "vm2_worker_port":     worker2.get("port", 22),
                         "vm2_tap":             tap2,
                         "vm2_ssh_user":        worker2.get("user", "ubuntu"),
-                        "vm2_ssh_private_key": get_ssh_key(worker2.get("key_path", ""))
+                        "vm2_ssh_private_key": get_ssh_key(worker2.get("key_path", "")),
+                        "vm2_security_rules":  _security_rules_for(vm2_id),
                     })
 
                     # C-VID en `vlan_number` (id auto-incremental) para OpenStack
