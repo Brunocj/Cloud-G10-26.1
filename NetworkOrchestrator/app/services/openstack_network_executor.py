@@ -171,6 +171,18 @@ async def _purge_slice_networking(conn, slice_id: str, link_vlans: list) -> None
             except Exception as e:
                 logger.warning(f"[OpenStack][PURGE] no se pudo borrar SG {sg.id}: {e}")
 
+    # 3.b Security groups por VM (secgroup-slice-{slice}-vm-*): se listan todos
+    # y se filtran por prefijo, ya que los vm_id no se conocen a priori en purge.
+    sg_vm_prefix = f"secgroup-slice-{slice_id}-vm-"
+    all_sgs = await asyncio.to_thread(_list, lambda: conn.network.security_groups())
+    for sg in all_sgs:
+        if getattr(sg, "name", "").startswith(sg_vm_prefix):
+            try:
+                await asyncio.to_thread(conn.network.delete_security_group, sg.id)
+                logger.info(f"[OpenStack][PURGE] SG por VM {sg.name} ({sg.id}) eliminado")
+            except Exception as e:
+                logger.warning(f"[OpenStack][PURGE] no se pudo borrar SG por VM {sg.id}: {e}")
+
 class OpenStackNetworkExecutor:
     """Implementa el aprovisionamiento de red para la zona OpenStack (Strategy Pattern)."""
 
@@ -192,6 +204,9 @@ class OpenStackNetworkExecutor:
         _created_ports     = []
         _created_link_networks = []
         _created_link_subnets = []
+        # SGs por VM creados a partir de las reglas del usuario (R5 / prueba 5.4.1).
+        # Se registran para rollback y luego se limpian en destroy vía prefijo.
+        _created_sec_group_per_vm = []
 
         async def _rollback(conn):
             """Best-effort cleanup of resources created so far.
@@ -248,6 +263,12 @@ class OpenStackNetworkExecutor:
                     await asyncio.to_thread(conn.network.delete_security_group, _created_sec_group_no_internet.id)
                 except Exception as e:
                     logger.warning(f"[OpenStack] Rollback: error al borrar security group no-internet: {e}")
+            # SGs por VM (reglas del usuario)
+            for sg in _created_sec_group_per_vm:
+                try:
+                    await asyncio.to_thread(conn.network.delete_security_group, sg.id)
+                except Exception as e:
+                    logger.warning(f"[OpenStack] Rollback: error al borrar SG por VM {sg.name}: {e}")
 
         is_extend = getattr(request, "mode", "deploy") == "extend"
 
@@ -439,6 +460,8 @@ class OpenStackNetworkExecutor:
 
             # 5. Crear puerto Neutron para cada VM (red interna del slice + opcional Floating IP)
             port_map = {}
+            # vm_id → lista de puertos Neutron (mgmt + enlaces) para asignar SGs per-VM más abajo
+            vm_ports_map: dict = {}
             for vm in request.vms:
                 # Modo extend: las VMs ya desplegadas no reciben puerto de gestión
                 # nuevo; solo entradas para registrar sus puertos de enlace.
@@ -466,6 +489,7 @@ class OpenStackNetworkExecutor:
                     security_groups=[sg_id]
                 )
                 _created_ports.append(port)
+                vm_ports_map.setdefault(vm.vm_id, []).append(port)
                 logger.info(f"[OpenStack] Puerto Neutron creado para VM {vm.vm_id} con IP fija: {vm.internal_ip}")
 
                 external_ip = None
@@ -562,6 +586,9 @@ class OpenStackNetworkExecutor:
                         port_map[vm1_id]["link_ports"].append(port1.id)
                     if vm2_id in port_map:
                         port_map[vm2_id]["link_ports"].append(port2.id)
+                    # Registrar objetos de puerto por-VM para posterior aplicación de SG per-VM
+                    vm_ports_map.setdefault(vm1_id, []).append(port1)
+                    vm_ports_map.setdefault(vm2_id, []).append(port2)
 
                     # Q-in-Q: el C-VID real es el segmentation_id que Neutron
                     # asignó a la red del enlace (no el vlan_id lógico). Se
@@ -580,6 +607,83 @@ class OpenStackNetworkExecutor:
                 except Exception as e:
                     logger.error(f"[OpenStack] Error creando enlace {link.connection_id}: {e}")
                     raise e
+
+            # 6.a Security Groups por VM (R5 / prueba 5.4.1 NETWORK_SECURITY_RULES)
+            # ─────────────────────────────────────────────────────────────────
+            # Se agregan las reglas del usuario (vm1_security_rules /
+            # vm2_security_rules de cada NetworkLink) por vm_id. Si una VM
+            # aparece con reglas, se crea un SG dedicado con SOLO esas reglas
+            # (más ICMP para diagnóstico), se activa port_security en TODOS
+            # sus puertos (mgmt + enlaces) y se les asigna ese SG.
+            # Sin esto, la prueba falla porque:
+            #  · el SG por defecto del slice hardcodea ICMP+SSH, ignorando
+            #    lo que el usuario configuró en el WebApp;
+            #  · los puertos de enlace se crean con port_security=False,
+            #    permitiendo que `nc -vz <ip> 80` pase entre VMs del slice.
+            vm_rules_map: dict = {}  # vm_id → list[SecurityRule]
+            for link in request.links:
+                if link.vm1_security_rules:
+                    vm_rules_map.setdefault(link.vm1_id, []).extend(link.vm1_security_rules)
+                if link.vm2_security_rules:
+                    vm_rules_map.setdefault(link.vm2_id, []).extend(link.vm2_security_rules)
+
+            for vm_id, rules in vm_rules_map.items():
+                # De-duplicar (protocol, allow_port)
+                seen = set()
+                unique_rules = []
+                for r in rules:
+                    key = (r.protocol.lower(), int(r.allow_port))
+                    if key not in seen:
+                        seen.add(key)
+                        unique_rules.append(r)
+
+                sg_name = f"secgroup-slice-{slice_id}-vm-{vm_id}"
+                try:
+                    vm_sg = await asyncio.to_thread(
+                        conn.network.create_security_group,
+                        name=sg_name,
+                        description=f"User-defined rules for slice {slice_id} VM {vm_id}"
+                    )
+                    _created_sec_group_per_vm.append(vm_sg)
+                    logger.info(f"[OpenStack] SG por VM creado: {sg_name} ({vm_sg.id})")
+
+                    # ICMP siempre permitido (diagnóstico / ping entre VMs del slice)
+                    await asyncio.to_thread(
+                        conn.network.create_security_group_rule,
+                        security_group_id=vm_sg.id,
+                        direction="ingress", protocol="icmp", ethertype="IPv4"
+                    )
+                    # Reglas del usuario
+                    for r in unique_rules:
+                        await asyncio.to_thread(
+                            conn.network.create_security_group_rule,
+                            security_group_id=vm_sg.id,
+                            direction="ingress",
+                            protocol=r.protocol.lower(),
+                            port_range_min=int(r.allow_port),
+                            port_range_max=int(r.allow_port),
+                            ethertype="IPv4",
+                        )
+                        logger.info(f"[OpenStack]  ↳ ingress {r.protocol}/{r.allow_port} (VM {vm_id})")
+
+                    # Aplicar el SG a TODOS los puertos de la VM. Requiere
+                    # port_security_enabled=True en cada puerto (los de enlace
+                    # se crearon con False; los actualizamos aquí).
+                    for p in vm_ports_map.get(vm_id, []):
+                        try:
+                            await asyncio.to_thread(
+                                conn.network.update_port,
+                                p.id,
+                                port_security_enabled=True,
+                                security_group_ids=[vm_sg.id],
+                            )
+                            logger.info(f"[OpenStack]  ↳ puerto {p.name} ({p.id}) → SG {sg_name}")
+                        except Exception as e:
+                            logger.error(f"[OpenStack] No se pudo asignar SG {sg_name} al puerto {p.id}: {e}")
+                            raise
+                except Exception as e:
+                    logger.error(f"[OpenStack] Error creando/aplicando SG por VM {vm_id}: {e}")
+                    raise
 
             # 6.b Q-in-Q (802.1ad): interponer el dot1q-tunnel en cada compute
             # del slice ANTES de que Compute cree las VMs (pre-compute, como Linux).
@@ -820,6 +924,20 @@ class OpenStackNetworkExecutor:
                     await asyncio.to_thread(conn.network.delete_security_group, sec_group_no_int.id)
             except Exception as e:
                 logger.warning(f"[OpenStack] No se pudo eliminar Security Group No-Internet: {e}")
+
+            # Security Groups por VM (secgroup-slice-{slice_id}-vm-*)
+            try:
+                sg_vm_prefix = f"secgroup-slice-{slice_id}-vm-"
+                all_sgs = list(await asyncio.to_thread(conn.network.security_groups))
+                for sg in all_sgs:
+                    if getattr(sg, "name", "").startswith(sg_vm_prefix):
+                        try:
+                            await asyncio.to_thread(conn.network.delete_security_group, sg.id)
+                            logger.info(f"[OpenStack] SG por VM eliminado: {sg.name}")
+                        except Exception as e:
+                            logger.warning(f"[OpenStack] No se pudo eliminar SG por VM {sg.name}: {e}")
+            except Exception as e:
+                logger.warning(f"[OpenStack] Error listando SGs por VM: {e}")
                 
             logger.info(f"[OpenStack] Destrucción de red completada para slice {slice_id}")
             return DestroyNetworkResponse(

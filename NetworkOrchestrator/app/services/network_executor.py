@@ -105,24 +105,82 @@ class NetworkExecutor:
         self.configure_taps_batch(ssh, [(tap_interface, vlan_id)])
 
     def apply_security_groups(self, ssh: SSHClient, tap_interface: str, rules: list[SecurityRule]) -> None:
-        """Aplica el firewall básico usando iptables."""
+        """Aplica firewall deny-by-default por TAP usando iptables + conntrack.
+
+        Semántica (R5 / prueba 5.4.1 NETWORK_SECURITY_RULES):
+          - Solo se aceptan los (protocolo, puerto) declarados por el usuario
+            en el sentido de INGRESO a la VM (--physdev-out {tap}).
+          - Todo lo demás que entre a la VM se DROPPEA.
+          - Se permite tráfico de retorno (ESTABLISHED,RELATED) para que las
+            conexiones que la propia VM inicia sigan funcionando.
+          - Idempotente: se limpian reglas previas del mismo TAP antes de
+            reinsertarlas (permite re-deploy sin acumular).
+        """
+        # 1) Limpieza idempotente: borrar TODA regla FORWARD previa que apunte a
+        #    este TAP (tanto --physdev-out como --physdev-in). Se hace vía awk
+        #    sobre `iptables -S` para no depender de conocer las reglas exactas.
+        cleanup = (
+            f"sudo iptables -S FORWARD | "
+            f"grep -E -- '--physdev-(in|out) {tap_interface}( |$)' | "
+            f"sed 's/^-A /-D /' | "
+            f"while read r; do sudo iptables $r || true; done"
+        )
+        ssh.exec(f"bash -c \"{cleanup}\"")
+
+        # Si no hay reglas de usuario, no instalamos firewall (VM totalmente
+        # abierta a nivel L3, mismo comportamiento previo).
         if not rules:
+            logger.debug(f"[{self.worker_ip}] Sin reglas de seguridad para {tap_interface} — firewall abierto")
             return
 
-        # (Opcional) Limpiar reglas previas si fuera necesario para este TAP
-        # ssh.exec(f"sudo iptables -D FORWARD -m physdev --physdev-out {tap_interface} ...")
+        # 2) DROP por defecto al final de FORWARD para tráfico HACIA la VM.
+        #    Se hace con -A (append) para que quede DESPUÉS de los ACCEPTs
+        #    que insertaremos con -I (top).
+        drop_cmd = (
+            f"sudo iptables -A FORWARD "
+            f"-m physdev --physdev-out {tap_interface} -j DROP"
+        )
+        ssh.exec(drop_cmd)
 
+        # 3) ACCEPT de conntrack para respuestas de conexiones que la VM inició.
+        #    Insertado en pos 1 para evaluarse antes del DROP.
+        ct_cmd = (
+            f"sudo iptables -I FORWARD 1 "
+            f"-m physdev --physdev-out {tap_interface} "
+            f"-m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
+        )
+        ssh.exec(ct_cmd)
+
+        # 4) ACCEPT explícito por cada regla del usuario (INGRESO a la VM).
         for rule in rules:
-            cmd = (f"sudo iptables -I FORWARD 1 -m physdev --physdev-out {tap_interface} "
-                   f"-p {rule.protocol} --dport {rule.allow_port} -j ACCEPT")
+            cmd = (
+                f"sudo iptables -I FORWARD 1 "
+                f"-m physdev --physdev-out {tap_interface} "
+                f"-p {rule.protocol} --dport {rule.allow_port} -j ACCEPT"
+            )
             exit_code, _, err = ssh.exec(cmd)
             if exit_code != 0:
                 logger.warning(f"[{self.worker_ip}] Fallo al aplicar firewall {rule}: {err}")
             else:
-                logger.debug(f"[{self.worker_ip}] FW Permitido: {rule.protocol}/{rule.allow_port} -> {tap_interface}")
+                logger.info(f"[{self.worker_ip}] FW ACCEPT {rule.protocol}/{rule.allow_port} -> {tap_interface}")
+
+        logger.info(
+            f"[{self.worker_ip}] Firewall deny-by-default aplicado en {tap_interface} "
+            f"({len(rules)} regla(s) permitida(s))"
+        )
 
     def destroy_port(self, ssh: SSHClient, tap_interface: str) -> None:
         """Desconecta el TAP del switch virtual y lo elimina del OS durante la destrucción del slice."""
+        # Limpiar reglas de firewall (SecurityRule) aplicadas por apply_security_groups
+        # sobre este TAP, para no dejar reglas huérfanas en el kernel al recrear.
+        cleanup_fw = (
+            f"sudo iptables -S FORWARD | "
+            f"grep -E -- '--physdev-(in|out) {tap_interface}( |$)' | "
+            f"sed 's/^-A /-D /' | "
+            f"while read r; do sudo iptables $r || true; done"
+        )
+        ssh.exec(f"bash -c \"{cleanup_fw}\"")
+
         exit_code, _, err = ssh.exec(f"sudo ovs-vsctl --if-exists del-port br-int {tap_interface}")
         if exit_code == 0:
             logger.info(f"[{self.worker_ip}] Puerto {tap_interface} eliminado de OVS")
