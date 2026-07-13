@@ -64,6 +64,14 @@ OC_CPU_DEFAULT   = 2.0
 OC_RAM_DEFAULT   = 1.54   # 1/0.65
 OC_DISCO_DEFAULT = 1.0    # sin overcommit
 
+# Rango de VLANs válido en OpenStack (debe COINCIDIR con network_vlan_ranges
+# del physnet en ml2_conf.ini, ej. physnet1:11:900). En OpenStack forzamos el
+# segmentation_id de Neutron a estos números (opción 1: la tabla `vlans` = el
+# tag real del cable), así que TODO (mgmt, C-VID, S-VID) debe caber aquí y ser
+# único global. Linux Cluster usa su propio esquema (no toca estas variables).
+OS_VLAN_MIN = int(os.getenv("OS_VLAN_MIN", "11"))
+OS_VLAN_MAX = int(os.getenv("OS_VLAN_MAX", "900"))
+
 
 async def fetch_worker_usage() -> dict:
     """
@@ -413,6 +421,27 @@ async def process_placement_worker():
                 # solo DENTRO del slice); el S-VID es único global. Sin Q-in-Q,
                 # los C-VIDs siguen siendo únicos globales (single-tag, legado).
                 qinq_enabled = os.getenv("QINQ_ENABLED", "false").lower() in ("1", "true", "yes")
+                is_openstack = (zone_id == 2)
+
+                # OpenStack (opción 1 — forzar segmentation_id en Neutron): mgmt,
+                # C-VID y S-VID salen de un ÚNICO pool global [OS_VLAN_MIN,
+                # OS_VLAN_MAX] (= network_vlan_ranges del physnet), todos únicos
+                # entre sí, para que Neutron los acepte forzados y la tabla
+                # `vlans` coincida 1:1 con el tag real del cable. Linux Cluster
+                # conserva su esquema legado (no toca este pool).
+                os_used = set()
+                if is_openstack:
+                    os_used = {r[0] for r in db.query(Vlan.vlan_number).filter(
+                        Vlan.vlan_number.isnot(None)).all()}
+
+                def _alloc_os_vlan():
+                    for v in range(OS_VLAN_MIN, OS_VLAN_MAX + 1):
+                        if v not in os_used:
+                            os_used.add(v)
+                            return v
+                    raise RuntimeError(
+                        f"Sin VLANs libres en el rango physnet [{OS_VLAN_MIN},{OS_VLAN_MAX}] (OpenStack)")
+
                 s_vlan_id = 0
                 if qinq_enabled:
                     # S-VID: reusar el del slice si ya existe (Modo Edición), o
@@ -423,24 +452,22 @@ async def process_placement_worker():
                     ).first()
                     if existing_s:
                         s_vlan_id = existing_s[0]
+                    elif is_openstack:
+                        s_vlan_id = _alloc_os_vlan()
+                        db.add(Vlan(vlan_number=s_vlan_id, slice_id=slice_id, type="S")); db.flush()
                     else:
                         s_base  = int(os.getenv("QINQ_SVID_BASE", "2"))
                         s_range = int(os.getenv("QINQ_SVID_RANGE", "4000"))
                         used_s  = {r[0] for r in db.query(Vlan.vlan_number).filter(
                             Vlan.type == "S", Vlan.vlan_number.isnot(None)).all()}
                         s_vlan_id = next((v for v in range(s_base, s_base + s_range) if v not in used_s), s_base)
-                        db.add(Vlan(vlan_number=s_vlan_id, slice_id=slice_id, type="S"))
-                        db.flush()
+                        db.add(Vlan(vlan_number=s_vlan_id, slice_id=slice_id, type="S")); db.flush()
                     logger.info("[PLACEMENT] 🏷️  Q-in-Q ACTIVO — S-VID del slice %s = %d", slice_id, s_vlan_id)
 
-                # VLANs de gestión (type='M', ver más abajo) SIEMPRE ocupan el
-                # espacio numérico global, sea o no Q-in-Q: el tap de gestión
-                # de cada VM y el gateway/NAT/DHCP del slice (mgmt_vlan =
-                # 1000+slice_id, ver NetworkOrchestrator/provisioner.py) nunca
-                # viajan envueltos en el túnel S-VID ("no la gestión"), así
-                # que un enlace de OTRO slice que sortee ese mismo número
-                # terminaría en la misma VLAN que TODAS las VMs y el gateway
-                # de ese slice — bridge completo entre tenants distintos.
+                # Ocupación para C-VIDs (Linux). Las VLANs de gestión (type='M')
+                # SIEMPRE ocupan el espacio global: el mgmt nunca viaja envuelto
+                # en el túnel S-VID, así que un enlace de otro slice no debe
+                # sortear ese número.
                 vlans_ocupadas_mgmt = {r[0] for r in db.query(Vlan.vlan_number).filter(
                     Vlan.type == "M", Vlan.vlan_number.isnot(None)).all()}
 
@@ -453,29 +480,34 @@ async def process_placement_worker():
                     vlans_ocupadas = list(vlans_ocupadas_mgmt | {v[0] for v in db.query(Vlan.id).all()})
 
                 def obtener_vlan_libre():
+                    # OpenStack: del pool global forzable en Neutron [OS_VLAN_MIN, OS_VLAN_MAX].
+                    if is_openstack:
+                        return _alloc_os_vlan()
+                    # Linux: esquema legado (aleatorio 100-4000).
                     while True:
                         vid = random.randint(100, 4000)
                         if vid not in vlans_ocupadas:
                             vlans_ocupadas.append(vid)
                             return vid
 
-                # Reservar (idempotente) la VLAN de gestión del slice ANTES de
-                # sortear las de los enlaces, para que ningún enlace — de este
-                # slice o de cualquier otro que se despliegue después — pueda
-                # chocar con ella. Se mantiene la fórmula determinística
-                # 1000+slice_id (compat: slices ya desplegados antes de este
-                # fix ya tienen ese tag configurado físicamente en los
-                # workers — no se puede cambiar sin re-taggear VMs corriendo).
-                # Lo que cambia es que ahora SÍ queda reservada en `vlans` y
-                # viaja explícita en el mensaje (mgmt_vlan) hacia
-                # NetworkOrchestrator, que dejó de recalcularla por su cuenta.
-                mgmt_vlan = 1000 + int(slice_id)
-                existing_m = db.query(Vlan.id).filter(
-                    Vlan.slice_id == slice_id, Vlan.type == "M",
-                    Vlan.vlan_number == mgmt_vlan).first()
-                if not existing_m:
-                    db.add(Vlan(vlan_number=mgmt_vlan, slice_id=slice_id, type="M"))
-                    db.flush()
+                # VLAN de gestión del slice. OpenStack: del pool (se FUERZA como
+                # segmentation_id del net-slice en Neutron). Linux: fórmula
+                # determinística 1000+slice_id (ya configurada físicamente en los
+                # workers de slices activos — no se puede cambiar en caliente).
+                if is_openstack:
+                    existing_m = db.query(Vlan.vlan_number).filter(
+                        Vlan.slice_id == slice_id, Vlan.type == "M",
+                        Vlan.vlan_number.isnot(None)).first()
+                    mgmt_vlan = existing_m[0] if existing_m else _alloc_os_vlan()
+                    if not existing_m:
+                        db.add(Vlan(vlan_number=mgmt_vlan, slice_id=slice_id, type="M")); db.flush()
+                else:
+                    mgmt_vlan = 1000 + int(slice_id)
+                    existing_m = db.query(Vlan.id).filter(
+                        Vlan.slice_id == slice_id, Vlan.type == "M",
+                        Vlan.vlan_number == mgmt_vlan).first()
+                    if not existing_m:
+                        db.add(Vlan(vlan_number=mgmt_vlan, slice_id=slice_id, type="M")); db.flush()
                 if mgmt_vlan not in vlans_ocupadas:
                     vlans_ocupadas.append(mgmt_vlan)
 
@@ -554,9 +586,11 @@ async def process_placement_worker():
                         "vm2_ssh_private_key": get_ssh_key(worker2.get("key_path", ""))
                     })
 
-                    # Q-in-Q: guardar como C-VID con id auto-incremental (permite
-                    # reuso del número entre slices). Legado: número en la PK.
-                    if qinq_enabled:
+                    # C-VID en `vlan_number` (id auto-incremental) para OpenStack
+                    # (es el segid REAL forzado en Neutron) y para Q-in-Q (permite
+                    # reuso entre slices). Solo el Linux single-tag legado guarda
+                    # el número en la PK (type='p2p').
+                    if is_openstack or qinq_enabled:
                         db.add(Vlan(vlan_number=vlan_actual, slice_id=slice_id, type="C"))
                     else:
                         db.add(Vlan(id=vlan_actual, slice_id=slice_id, type="p2p"))
