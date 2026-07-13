@@ -319,7 +319,14 @@ class OpenStackNetworkExecutor:
                     network_id=_created_network.id,
                     ip_version=4,
                     cidr=cidr,
-                    gateway_ip=gateway_ip
+                    gateway_ip=gateway_ip,
+                    # DHCP no es alcanzable en este cluster (mismo problema que ya
+                    # tuvimos con el servicio de metadata) — con DHCP habilitado,
+                    # cloud-init confía en que la VM va a pedir la IP por DHCP en
+                    # vez de tomarla estática desde network_data.json (config-drive),
+                    # y como nunca llega respuesta, la interfaz de gestión queda sin
+                    # IP. Deshabilitarlo fuerza el fixed_ip del puerto como estático.
+                    enable_dhcp=False,
                 )
                 logger.info(f"[OpenStack] Subnet creada: {_created_subnet.name} (CIDR: {cidr}, GW: {gateway_ip})")
 

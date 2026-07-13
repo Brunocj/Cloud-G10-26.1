@@ -257,6 +257,13 @@ class OpenStackComputeExecutor:
                 image_id=image_uuid,
                 flavor_id=flavor_uuid,
                 networks=networks,
+                # config_drive fuerza a Nova a adjuntar el user_data como un
+                # volumen local en vez de depender del servicio de metadata
+                # por red (169.254.169.254) — en este cluster ese servicio no
+                # es alcanzable desde la red del slice y cloud-init caía a
+                # DataSourceNone (ninguna fuente de datos), ignorando por
+                # completo credenciales y llave SSH sin importar su contenido.
+                config_drive=True,
             )
 
             # Cloud-init user_data (REQ-US-02): inyecta credenciales de la VM

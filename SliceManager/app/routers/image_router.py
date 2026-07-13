@@ -496,7 +496,7 @@ def delete_image(image_id: int, db: Session = Depends(get_db), current_user: Cur
             detail="No tiene permisos para eliminar esta imagen de otro usuario.",
         )
 
-    if img.is_general == 1:
+    if img.is_general == 1 and not current_user.can_manage_all():
         raise HTTPException(
             status_code=403,
             detail="Las imágenes base del sistema no pueden eliminarse.",

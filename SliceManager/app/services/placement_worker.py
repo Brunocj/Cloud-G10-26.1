@@ -456,7 +456,12 @@ async def process_placement_worker():
                         f"Sin VLANs libres en el rango physnet [{OS_VLAN_MIN},{OS_VLAN_MAX}] (OpenStack)")
 
                 s_vlan_id = 0
-                if qinq_enabled:
+                # Q-in-Q SOLO en Linux Cluster. En OpenStack el apply del túnel
+                # secuestra el uplink compartido (ens4) del compute y descarta el
+                # tráfico de gestión/otros slices (rompe internet/floating y la
+                # multi-tenancy) → OpenStack usa provider VLAN single-tag, que
+                # ya cumple R5 y cruza workers por el trunking normal de Neutron.
+                if qinq_enabled and not is_openstack:
                     # S-VID: reusar el del slice si ya existe (Modo Edición), o
                     # asignar uno nuevo único global.
                     existing_s = db.query(Vlan.vlan_number).filter(
@@ -466,18 +471,15 @@ async def process_placement_worker():
                     if existing_s:
                         s_vlan_id = existing_s[0]
                     else:
-                        if is_openstack:
-                            s_vlan_id = _alloc_os_vlan()
-                        else:
-                            s_base  = int(os.getenv("QINQ_SVID_BASE", "2"))
-                            s_range = int(os.getenv("QINQ_SVID_RANGE", "4000"))
-                            used_s  = {r[0] for r in db.query(Vlan.vlan_number).filter(
-                                Vlan.type == "S", Vlan.vlan_number.isnot(None)).all()}
-                            s_vlan_id = next((v for v in range(s_base, s_base + s_range) if v not in used_s), s_base)
+                        s_base  = int(os.getenv("QINQ_SVID_BASE", "2"))
+                        s_range = int(os.getenv("QINQ_SVID_RANGE", "4000"))
+                        used_s  = {r[0] for r in db.query(Vlan.vlan_number).filter(
+                            Vlan.type == "S", Vlan.vlan_number.isnot(None)).all()}
+                        s_vlan_id = next((v for v in range(s_base, s_base + s_range) if v not in used_s), s_base)
                         # `vlans.id` no es AUTO_INCREMENT → id explícito con _next_vlan_id.
                         db.add(Vlan(id=_next_vlan_id(db), vlan_number=s_vlan_id, slice_id=slice_id, type="S"))
                         db.flush()
-                    logger.info("[PLACEMENT] 🏷️  Q-in-Q ACTIVO — S-VID del slice %s = %d", slice_id, s_vlan_id)
+                    logger.info("[PLACEMENT] 🏷️  Q-in-Q ACTIVO (Linux) — S-VID del slice %s = %d", slice_id, s_vlan_id)
 
                 # Ocupación para C-VIDs (Linux). Las VLANs de gestión (type='M')
                 # SIEMPRE ocupan el espacio global: el mgmt nunca viaja envuelto

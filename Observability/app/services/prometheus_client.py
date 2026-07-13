@@ -48,7 +48,7 @@ async def get_worker_cpu_usage(instance: str) -> Optional[float]:
     """
     promql = (
         f'1 - avg(rate(node_cpu_seconds_total'
-        f'{{mode="idle",instance="{instance}"}}[5m]))'
+        f'{{mode="idle",instance="{instance}"}}[1m]))'
     )
     results = await query_instant(promql)
     if results:
@@ -80,7 +80,7 @@ async def get_worker_cpu_cores_used(instance: str) -> Optional[float]:
     """
     promql = (
         f'count(node_cpu_seconds_total{{mode="idle",instance="{instance}"}}) '
-        f'* (1 - avg(rate(node_cpu_seconds_total{{mode="idle",instance="{instance}"}}[5m])))'
+        f'* (1 - avg(rate(node_cpu_seconds_total{{mode="idle",instance="{instance}"}}[1m])))'
     )
     results = await query_instant(promql)
     if results:

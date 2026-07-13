@@ -1,6 +1,6 @@
 global:
-  scrape_interval:     1m
-  evaluation_interval: 1m
+  scrape_interval:     1s
+  evaluation_interval: 1s
 
 scrape_configs:
   # libvirt_exporter por worker — puerto 9177 via tunnels autossh (191XX en host)

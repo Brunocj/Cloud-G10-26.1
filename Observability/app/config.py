@@ -4,7 +4,7 @@ import os
 PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://prometheus:9090")
 
 # Scheduler interval
-OC_UPDATE_INTERVAL = int(os.getenv("OC_UPDATE_INTERVAL", "900"))   # 15 min = 1 ciclo
+OC_UPDATE_INTERVAL = int(os.getenv("OC_UPDATE_INTERVAL", "10"))   # 15 min = 1 ciclo
 
 # Sliding window — 15 días a razón de 1 ciclo cada 15 min
 # 15 días × 24h × 4 ciclos/h = 1440 muestras
@@ -18,10 +18,10 @@ K_RAM  = float(os.getenv("K_RAM",  "2.0"))   # 97.7% confidence
 
 # OC bounds
 OC_CPU_DEFAULT  = float(os.getenv("OC_CPU_DEFAULT",  "2.0"))
-OC_RAM_DEFAULT  = float(os.getenv("OC_RAM_DEFAULT",  "1.54"))
+OC_RAM_DEFAULT  = float(os.getenv("OC_RAM_DEFAULT",  "2.0"))
 OC_DISK_DEFAULT = 1.0
-OC_RAM_MAX      = float(os.getenv("OC_RAM_MAX", "1.6"))
-OC_CPU_MAX      = float(os.getenv("OC_CPU_MAX", "4.0"))
+OC_RAM_MAX      = float(os.getenv("OC_RAM_MAX", "10.0"))
+OC_CPU_MAX      = float(os.getenv("OC_CPU_MAX", "10.0"))
 
 # VM activation thresholds
 VM_ACTIVATION_HOURS = int(os.getenv("VM_ACTIVATION_HOURS", "36"))

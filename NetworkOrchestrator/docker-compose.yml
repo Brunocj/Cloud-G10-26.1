@@ -7,7 +7,7 @@ services:
     restart: unless-stopped
     environment:
       NATS_URL:        nats://nats:4222
-      LOG_LEVEL:       DEBUG
+      LOG_LEVEL:       INFO
       SSH_TIMEOUT: "60"
       # ── OpenStack (Neutron — redes, puertos, security groups) ──
       OS_AUTH_URL:              "http://192.168.202.1:5000/v3"

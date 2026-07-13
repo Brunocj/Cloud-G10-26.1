@@ -27,6 +27,11 @@ services:
       - OS_IDENTITY_API_VERSION=3
       - OS_IMAGE_API_VERSION=2
       - OPENSTACK_AZ_ID=2
+      # ── Q-in-Q (802.1ad) ──
+      - QINQ_ENABLED=true
+      # Rango VLAN del physnet (debe coincidir con network_vlan_ranges de ML2)
+      - OS_VLAN_MIN=11
+      - OS_VLAN_MAX=900
       # ── SOCKS5 Proxy para OpenStack ──
       - HTTP_PROXY=socks5h://openstack-proxy:1080
       - HTTPS_PROXY=socks5h://openstack-proxy:1080
