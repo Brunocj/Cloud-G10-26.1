@@ -526,7 +526,11 @@ class OpenStackNetworkExecutor:
                     )
                     _created_link_subnets.append(sub_link.id)
 
-                    # Crear puerto para VM1 (IP .1) - Port Security desactivado para permitir routing/IPs libres
+                    # Crear puerto para VM1 (IP .1) - Port Security desactivado para permitir routing/IPs libres.
+                    # Nova exige un FixedIP en todo puerto adjuntado al boot ("Port ... requires a
+                    # FixedIP in order to be used") — fixed_ips=[] hace fallar create_server con 400,
+                    # así que el puerto SIEMPRE lleva IP asignada por Neutron/cloud-init; si el usuario
+                    # quiere otra, la reconfigura a mano dentro de la VM sobre esta base.
                     port1 = await asyncio.to_thread(
                         conn.network.create_port,
                         name=f"port-link-{vlan_id}-{vm1_id}",
