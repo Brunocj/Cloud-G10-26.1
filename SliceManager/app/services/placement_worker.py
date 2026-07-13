@@ -465,16 +465,16 @@ async def process_placement_worker():
                     ).first()
                     if existing_s:
                         s_vlan_id = existing_s[0]
-                    elif is_openstack:
-                        s_vlan_id = _alloc_os_vlan()
-                        db.add(Vlan(vlan_number=s_vlan_id, slice_id=slice_id, type="S")); db.flush()
                     else:
-                        s_base  = int(os.getenv("QINQ_SVID_BASE", "2"))
-                        s_range = int(os.getenv("QINQ_SVID_RANGE", "4000"))
-                        used_s  = {r[0] for r in db.query(Vlan.vlan_number).filter(
-                            Vlan.type == "S", Vlan.vlan_number.isnot(None)).all()}
-                        s_vlan_id = next((v for v in range(s_base, s_base + s_range) if v not in used_s), s_base)
-                        db.add(Vlan(vlan_number=s_vlan_id, slice_id=slice_id, type="S")); db.flush()
+                        if is_openstack:
+                            s_vlan_id = _alloc_os_vlan()
+                        else:
+                            s_base  = int(os.getenv("QINQ_SVID_BASE", "2"))
+                            s_range = int(os.getenv("QINQ_SVID_RANGE", "4000"))
+                            used_s  = {r[0] for r in db.query(Vlan.vlan_number).filter(
+                                Vlan.type == "S", Vlan.vlan_number.isnot(None)).all()}
+                            s_vlan_id = next((v for v in range(s_base, s_base + s_range) if v not in used_s), s_base)
+                        # `vlans.id` no es AUTO_INCREMENT → id explícito con _next_vlan_id.
                         db.add(Vlan(id=_next_vlan_id(db), vlan_number=s_vlan_id, slice_id=slice_id, type="S"))
                         db.flush()
                     logger.info("[PLACEMENT] 🏷️  Q-in-Q ACTIVO — S-VID del slice %s = %d", slice_id, s_vlan_id)
@@ -505,39 +505,23 @@ async def process_placement_worker():
                             vlans_ocupadas.append(vid)
                             return vid
 
-                # VLAN de gestión del slice. OpenStack: del pool (se FUERZA como
-                # segmentation_id del net-slice en Neutron). Linux: fórmula
-                # determinística 1000+slice_id (ya configurada físicamente en los
-                # workers de slices activos — no se puede cambiar en caliente).
+                # VLAN de gestión del slice, reservada (idempotente) ANTES de
+                # sortear los enlaces para que ningún otro slice choque con ella.
+                # OpenStack: del pool (se FUERZA como segmentation_id del net-slice
+                # en Neutron → tabla `vlans` = tag real). Linux: fórmula legado
+                # 1000+slice_id (ya configurada físicamente en workers activos).
                 if is_openstack:
                     existing_m = db.query(Vlan.vlan_number).filter(
                         Vlan.slice_id == slice_id, Vlan.type == "M",
                         Vlan.vlan_number.isnot(None)).first()
                     mgmt_vlan = existing_m[0] if existing_m else _alloc_os_vlan()
-                    if not existing_m:
-                        db.add(Vlan(vlan_number=mgmt_vlan, slice_id=slice_id, type="M")); db.flush()
                 else:
                     mgmt_vlan = 1000 + int(slice_id)
                     existing_m = db.query(Vlan.id).filter(
                         Vlan.slice_id == slice_id, Vlan.type == "M",
                         Vlan.vlan_number == mgmt_vlan).first()
-                    if not existing_m:
-                        db.add(Vlan(vlan_number=mgmt_vlan, slice_id=slice_id, type="M")); db.flush()
-                # Reservar (idempotente) la VLAN de gestión del slice ANTES de
-                # sortear las de los enlaces, para que ningún enlace — de este
-                # slice o de cualquier otro que se despliegue después — pueda
-                # chocar con ella. Se mantiene la fórmula determinística
-                # 1000+slice_id (compat: slices ya desplegados antes de este
-                # fix ya tienen ese tag configurado físicamente en los
-                # workers — no se puede cambiar sin re-taggear VMs corriendo).
-                # Lo que cambia es que ahora SÍ queda reservada en `vlans` y
-                # viaja explícita en el mensaje (mgmt_vlan) hacia
-                # NetworkOrchestrator, que dejó de recalcularla por su cuenta.
-                mgmt_vlan = 1000 + int(slice_id)
-                existing_m = db.query(Vlan.id).filter(
-                    Vlan.slice_id == slice_id, Vlan.type == "M",
-                    Vlan.vlan_number == mgmt_vlan).first()
                 if not existing_m:
+                    # `vlans.id` no es AUTO_INCREMENT → id explícito con _next_vlan_id.
                     db.add(Vlan(id=_next_vlan_id(db), vlan_number=mgmt_vlan, slice_id=slice_id, type="M"))
                     db.flush()
                 if mgmt_vlan not in vlans_ocupadas:
@@ -622,15 +606,15 @@ async def process_placement_worker():
                     # (es el segid REAL forzado en Neutron) y para Q-in-Q (permite
                     # reuso entre slices). Solo el Linux single-tag legado guarda
                     # el número en la PK (type='p2p').
+                    # C-VID en `vlan_number` para OpenStack (es el segid REAL
+                    # forzado en Neutron) y para Q-in-Q (permite reuso del número
+                    # entre slices). `vlan_number` es el C-VID real; `id` es un PK
+                    # sin significado — hay que asignarlo a mano (`vlans.id` no es
+                    # AUTO_INCREMENT). Solo el Linux single-tag legado guarda el
+                    # número real en la PK (type='p2p').
                     if is_openstack or qinq_enabled:
-                        db.add(Vlan(vlan_number=vlan_actual, slice_id=slice_id, type="C"))
-                    # Q-in-Q: guardar como C-VID (permite reuso del número entre
-                    # slices; `vlan_number` es el C-VID real, `id` es solo un
-                    # PK sin significado — hay que asignarlo a mano, ver
-                    # `_next_vlan_id`). Legado: el número real va en la PK.
-                    if qinq_enabled:
                         db.add(Vlan(id=_next_vlan_id(db), vlan_number=vlan_actual, slice_id=slice_id, type="C"))
-                        db.flush()   # siguiente edge del loop necesita ver este id
+                        db.flush()   # el siguiente edge del loop necesita ver este id
                     else:
                         db.add(Vlan(id=vlan_actual, slice_id=slice_id, type="p2p"))
                     logger.info(
