@@ -288,11 +288,19 @@ class OpenStackNetworkExecutor:
                 prov_phys = os.getenv("OS_PROVIDER_PHYSICAL_NETWORK")
                 if prov_phys:
                     network_args["provider_physical_network"] = prov_phys
-                prov_seg = os.getenv("OS_PROVIDER_SEGMENTATION_ID")
-                if prov_seg:
-                    network_args["provider_segmentation_id"] = int(prov_seg)
+                # segmentation_id: se FUERZA al mgmt_vlan reservado por el
+                # SliceManager (opción 1 → la tabla `vlans` = el tag real de
+                # Neutron). Si no viene o falta physnet, cae al env legado.
+                _mgmt_vlan = getattr(request, "mgmt_vlan", None)
+                if _mgmt_vlan and prov_phys:
+                    network_args["provider_network_type"] = "vlan"
+                    network_args["provider_segmentation_id"] = int(_mgmt_vlan)
+                elif os.getenv("OS_PROVIDER_SEGMENTATION_ID"):
+                    network_args["provider_segmentation_id"] = int(os.getenv("OS_PROVIDER_SEGMENTATION_ID"))
 
                 _created_network = await asyncio.to_thread(conn.network.create_network, **network_args)
+                logger.info(f"[OpenStack] net-slice creada con segmentation_id={getattr(_created_network,'provider_segmentation_id',None)} "
+                            f"(mgmt_vlan solicitado={_mgmt_vlan})")
                 logger.info(f"[OpenStack] Red Provider creada: {_created_network.name} (ID: {_created_network.id})")
 
                 # 2. Crear Subnet asociada con CIDR dinámico
@@ -491,10 +499,17 @@ class OpenStackNetworkExecutor:
                 logger.info(f"[OpenStack] Configurando enlace {link.connection_id} (VLAN {vlan_id}) entre {vm1_id} y {vm2_id}")
 
                 try:
-                    # Crear red para el enlace
+                    # Crear red para el enlace. Se FUERZA el segmentation_id al
+                    # C-VID que reservó el SliceManager (opción 1 → `vlans` = tag
+                    # real). Requiere physnet configurado; si no, cae a tenant.
+                    link_net_args = {"name": f"net-link-{vlan_id}"}
+                    _lprov_phys = os.getenv("OS_PROVIDER_PHYSICAL_NETWORK")
+                    if _lprov_phys:
+                        link_net_args["provider_network_type"] = "vlan"
+                        link_net_args["provider_physical_network"] = _lprov_phys
+                        link_net_args["provider_segmentation_id"] = int(vlan_id)
                     net_link = await asyncio.to_thread(
-                        conn.network.create_network,
-                        name=f"net-link-{vlan_id}"
+                        conn.network.create_network, **link_net_args
                     )
                     _created_link_networks.append(net_link.id)
 
