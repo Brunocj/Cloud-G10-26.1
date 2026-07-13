@@ -75,7 +75,7 @@ class NetworkProvisioner:
                 
                 is_gateway_leader = (worker_key == worker_keys[0]) 
 
-                futures[pool.submit(self._deploy_on_worker, worker_ip, worker_port, endpoints, vms_list, request.slice_id, is_gateway_leader)] = worker_key
+                futures[pool.submit(self._deploy_on_worker, worker_ip, worker_port, endpoints, vms_list, request.slice_id, is_gateway_leader, request.mgmt_vlan)] = worker_key
 
             for future in as_completed(futures):
                 worker_key = futures[future]
@@ -105,17 +105,24 @@ class NetworkProvisioner:
             status=status, links_ok=links_ok, links_failed=links_failed
         )
 
-    def _deploy_on_worker(self, worker_ip: str, worker_port: int, endpoints: List[dict], vms_list: list, slice_id: str, is_gateway_leader: bool) -> Tuple[List[dict], List[Tuple[dict, str]]]:
+    def _deploy_on_worker(self, worker_ip: str, worker_port: int, endpoints: List[dict], vms_list: list, slice_id: str, is_gateway_leader: bool, mgmt_vlan: int = None) -> Tuple[List[dict], List[Tuple[dict, str]]]:
         ok_eps, fail_eps = [], []
         executor = NetworkExecutor(worker_ip)
-        
+
         try:
             user = endpoints[0]["user"] if endpoints else vms_list[0].ssh_user
             key = endpoints[0]["key"] if endpoints else vms_list[0].ssh_private_key
             port = endpoints[0].get("port", worker_port) if endpoints else getattr(vms_list[0], 'worker_port', worker_port)
 
             with SSHClient(worker_ip, user, key, port=port) as ssh:
-                mgmt_vlan = 1000 + int(slice_id)
+                # mgmt_vlan viene reservado por SliceManager en la tabla `vlans`
+                # (único global, coordinado con las VLANs de los enlaces) —
+                # evita que un enlace de OTRO slice sortee el mismo número y
+                # termine bridged con TODAS las VMs y el gateway de este slice.
+                # Fallback a la fórmula legado solo por compat con mensajes viejos.
+                if mgmt_vlan is None:
+                    mgmt_vlan = 1000 + int(slice_id)
+                    logger.warning(f"[slice={slice_id}] mgmt_vlan no vino en el mensaje — usando fórmula legado (sin garantía de unicidad).")
 
                 # A. Batch: configurar TODOS los TAPs de este worker en 2 SSH calls
                 #    (TAPs de enlace L2 + TAPs de gestión de VMs en una sola pasada)

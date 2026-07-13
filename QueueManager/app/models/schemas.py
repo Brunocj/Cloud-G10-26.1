@@ -128,6 +128,10 @@ class DeploySliceRequest(BaseModel):
     workers:              List[dict] = Field(default_factory=list)
     # Q-in-Q OpenStack: {host_de_nova: {ip,port,user,key}} — lo usa el NetworkOrchestrator
     compute_ssh_map:      Optional[dict] = Field(default=None)
+    # VLAN de gestión del slice, reservada por SliceManager en la tabla `vlans`
+    # (única global, coordinada con las VLANs de los enlaces). Si viene vacía,
+    # el NetworkOrchestrator cae a la fórmula legado 1000+slice_id.
+    mgmt_vlan:             Optional[int] = Field(default=None)
 
 class DestroySliceRequest(BaseModel):
     """

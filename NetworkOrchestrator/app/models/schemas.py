@@ -75,6 +75,9 @@ class DeployNetworkRequest(BaseModel):
     host_map:             dict = Field(default_factory=dict, description="vm_id → selected_host (del VMPlacement)")
     # Q-in-Q OpenStack: {host_de_nova: {ip,port,user,key}} para SSH a los computes
     compute_ssh_map:      Optional[dict] = Field(default=None)
+    # VLAN de gestión del slice, ya reservada por SliceManager (única global).
+    # Si viene None, se cae a la fórmula legado 1000+slice_id (compat).
+    mgmt_vlan:            Optional[int] = Field(default=None)
     links:                List[NetworkLink]
     vms:                  List[VMNetworkSpec] = Field(default_factory=list)
 
