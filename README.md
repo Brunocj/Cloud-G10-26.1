@@ -2,7 +2,7 @@
 
 Plataforma cloud basada en microservicios que orquesta recursos sobre clústeres Linux y OpenStack.
 
-📖 [English version below](#english-version)
+📖 [English version below]
 
 ---
 
