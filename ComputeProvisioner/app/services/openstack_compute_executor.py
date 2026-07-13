@@ -270,17 +270,31 @@ class OpenStackComputeExecutor:
             vm_user     = getattr(vm, "vm_user", None) or "ubuntu"
             vm_password = getattr(vm, "vm_password", None) or "pucp2026"
 
-            # Usuario por defecto de la imagen base
-            default_image_user = "cirros" if "cirros" in (vm.image_path or "").lower() else "ubuntu"
+            # Usuario real por defecto de la imagen: prioriza el valor
+            # registrado al subir la imagen (Image.default_username) sobre el
+            # heurístico por ruta de archivo — el heurístico solo distingue
+            # "cirros" y asume "ubuntu" para todo lo demás, lo que rompe
+            # imágenes Debian (usuario real "debian") u otras distros.
+            default_image_user = (
+                getattr(vm, "image_default_username", None)
+                or ("cirros" if "cirros" in (vm.image_path or "").lower() else "ubuntu")
+            )
 
-            # Bloque users: siempre el default de la imagen; si el custom es
-            # distinto, se agrega como usuario adicional con sudo NOPASSWD.
-            users_block = "users:\n  - default\n"
+            # Bloque users: el usuario por defecto se declara explícito (no
+            # con el sentinela `default`) porque es la única forma de forzar
+            # lock_passwd: false sobre él — sin esto cloud-init hereda el
+            # lock_passwd: true que trae el datasource de la imagen y el
+            # login por password sigue rechazado aunque chpasswd le haya
+            # seteado el hash y ssh_pwauth esté activo.
+            users_block = (
+                f"users:\n"
+                f"  - name: {default_image_user}\n"
+                f"    lock_passwd: false\n"
+                f"    sudo: ['ALL=(ALL) NOPASSWD:ALL']\n"
+                f"    groups: sudo\n"
+                f"    shell: /bin/bash\n"
+            )
             if vm_user != default_image_user:
-                # lock_passwd: false es CLAVE — sin esto cloud-init crea el
-                # usuario bloqueado y no acepta login por password en la
-                # consola noVNC/tty, aunque chpasswd le haya seteado el pwd
-                # y ssh_pwauth esté activo (ssh_pwauth solo aplica a SSH).
                 users_block += (
                     f"  - name: {vm_user}\n"
                     f"    lock_passwd: false\n"

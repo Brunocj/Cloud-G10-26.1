@@ -57,6 +57,7 @@ class VMSpec(BaseModel):
     vm_user:     Optional[str] = Field(default=None, description="Usuario a crear en la VM (default: nombre de imagen)")
     vm_password: Optional[str] = Field(default=None, description="Contraseña de la VM (default: pucp2026)")
     owner_ssh_public_key: Optional[str] = Field(default=None, description="Llave pública SSH del dueño del slice (REQ-US-02)")
+    image_default_username: Optional[str] = Field(default=None, description="Usuario real de cloud-init de la imagen (Image.default_username) — fuente de verdad sobre el heurístico por nombre de archivo")
 
     # Modo Edición (REQ-US-14): VM ya desplegada — no lanzarla, solo conectar
     # en caliente las NICs de tap_interfaces (QMP en Linux / Nova en OpenStack).

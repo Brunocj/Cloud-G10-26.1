@@ -98,7 +98,7 @@ class QEMUExecutor:
 
 
 
-    def _prepare_cloud_init(self, vm_id: str, image_path: str, vm_user: str = "ubuntu", vm_password: str = "pucp2026", public_key_path: str = "keys/worker_key.pub", owner_ssh_key: str = "") -> str:
+    def _prepare_cloud_init(self, vm_id: str, image_path: str, vm_user: str = "ubuntu", vm_password: str = "pucp2026", public_key_path: str = "keys/worker_key.pub", owner_ssh_key: str = "", image_default_username: str = "") -> str:
         """Genera el ISO de cloud-init en el worker fisico para inyectar la llave SSH y credenciales."""
 
         try:
@@ -107,17 +107,30 @@ class QEMUExecutor:
         except Exception:
             pub_key = ""
 
-        # Construimos las entradas de usuarios:
-        # - Siempre incluimos el usuario por defecto de la imagen (ubuntu/alpine/etc)
-        # - Si el usuario custom es distinto al default, lo agregamos como adicional
-        default_image_user = "cirros" if "cirros" in image_path.lower() else "ubuntu"
+        # Usuario real por defecto de la imagen: prioriza el valor registrado
+        # al subir la imagen (Image.default_username) sobre el heurístico por
+        # ruta de archivo — el heurístico solo distingue "cirros" y asume
+        # "ubuntu" para todo lo demás, lo que rompe imágenes Debian (usuario
+        # real "debian") u otras distros con un default_username distinto.
+        default_image_user = image_default_username or ("cirros" if "cirros" in image_path.lower() else "ubuntu")
 
+        # Construimos las entradas de usuarios. El usuario por defecto se
+        # declara explícito (no con el sentinela `default`) porque es la
+        # única forma de forzar `lock_passwd: false` sobre él — sin esto,
+        # cloud-init hereda el `lock_passwd: true` que trae el datasource de
+        # la imagen y el login por password sigue rechazado aunque chpasswd
+        # ya le haya seteado el hash.
         users_block = f"""users:
-  - default
+  - name: {default_image_user}
+    lock_passwd: false
+    sudo: ['ALL=(ALL) NOPASSWD:ALL']
+    groups: sudo
+    shell: /bin/bash
 """
         # Si el usuario custom es diferente al de la imagen base, agregarlo como usuario adicional
         if vm_user != default_image_user:
             users_block += f"""  - name: {vm_user}
+    lock_passwd: false
     ssh-authorized-keys:
       - {pub_key}
 """
@@ -179,6 +192,7 @@ chpasswd:
         vm_password:    str = "pucp2026",
         priority:       int = 0,
         owner_ssh_key:  str = "",
+        image_default_username: str = "",
     ) -> int:
         """
         Lanza el proceso QEMU/KVM en el worker.
@@ -188,9 +202,9 @@ chpasswd:
         net_args = _build_net_args(tap_interfaces)
 
         linux_nice = priority - 20
-        
+
         # Generamos el cloud-init ISO con usuario y contraseña configurados
-        seed_iso_path = self._prepare_cloud_init(vm_id, image_path, vm_user=vm_user, vm_password=vm_password, owner_ssh_key=owner_ssh_key)
+        seed_iso_path = self._prepare_cloud_init(vm_id, image_path, vm_user=vm_user, vm_password=vm_password, owner_ssh_key=owner_ssh_key, image_default_username=image_default_username)
         
         cmd = (
             f"sudo nice -n {linux_nice} "

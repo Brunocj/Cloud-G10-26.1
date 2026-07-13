@@ -143,6 +143,7 @@ class Provisioner:
                         vm_password=vm.vm_password or "pucp2026",
                         priority=vm.priority,
                         owner_ssh_key=getattr(vm, "owner_ssh_public_key", None) or "",
+                        image_default_username=getattr(vm, "image_default_username", None) or "",
                     )
                     logger.info("[CP] ✅ VM %s activa en worker=%s  PID=%s  VNC=:%d (port %d)",
                                 vm.vm_id, vm.worker_ip, pid, vnc_display, vnc_port)

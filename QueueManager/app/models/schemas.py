@@ -62,6 +62,7 @@ class VMSpec(BaseModel):
     vm_user:     Optional[str] = None   # Si None → se usa el nombre de la imagen
     vm_password: Optional[str] = None   # Si None → se usa "pucp2026"
     owner_ssh_public_key: Optional[str] = None   # Llave pública del dueño (REQ-US-02)
+    image_default_username: Optional[str] = None   # Usuario real de cloud-init de la imagen (Image.default_username)
 
     # Modo Edición (REQ-US-14): VM ya desplegada que solo recibe NICs en caliente
     already_deployed:     bool = False

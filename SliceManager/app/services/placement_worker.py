@@ -690,6 +690,7 @@ async def process_placement_worker():
                         "vm_user":         vm_user,
                         "vm_password":     vm_password,
                         "owner_ssh_public_key": owner_ssh_key,
+                        "image_default_username": image_obj.default_username if image_obj else None,
                     })
 
                 # ── 3.5 STUBS DE HOT-PLUG (modo extend) ────────────────────────
