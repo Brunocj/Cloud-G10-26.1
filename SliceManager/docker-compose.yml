@@ -28,7 +28,9 @@ services:
       - OS_IMAGE_API_VERSION=2
       - OPENSTACK_AZ_ID=2
       # ── Q-in-Q (802.1ad) ──
-      - QINQ_ENABLED=true
+      # Desactivado: en Linux choca con el trunk ens4 en br-int (rompe internet);
+      # en OpenStack secuestra el uplink compartido. No es requisito de rúbrica.
+      - QINQ_ENABLED=false
       # Rango VLAN del physnet (debe coincidir con network_vlan_ranges de ML2)
       - OS_VLAN_MIN=11
       - OS_VLAN_MAX=900
