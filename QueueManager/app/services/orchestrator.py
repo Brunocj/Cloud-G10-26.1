@@ -310,6 +310,7 @@ class WorkflowOrchestrator:
             "mode":                 getattr(request, "mode", "deploy"),
             "host_map":             host_map,           # vm_id → selected_host
             "compute_ssh_map":      getattr(request, "compute_ssh_map", None),  # Q-in-Q OpenStack
+            "mgmt_vlan":            getattr(request, "mgmt_vlan", None),
             "links":  [link.model_dump() for link in request.links],
             "vms":    [vm.model_dump()   for vm   in request.vms],
         }

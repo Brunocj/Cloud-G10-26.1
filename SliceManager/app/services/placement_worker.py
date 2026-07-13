@@ -12,6 +12,44 @@ from sqlalchemy import func
 from app.nats_producer import nats_producer
 
 logger = logging.getLogger("SliceManager.Worker")
+
+
+def backfill_mgmt_vlans() -> None:
+    """
+    Migración en caliente (idempotente): registra en `vlans` (type='M') la
+    VLAN de gestión de los slices Linux Cluster que ya estaban ACTIVE o
+    PROVISIONING antes de este fix — su mgmt_vlan=1000+slice_id ya está
+    configurado físicamente en los workers pero nunca quedó reservado en la
+    BD, así que un enlace nuevo de OTRO slice podía chocar con él (bug de
+    aislamiento entre slices que comparten worker/trunk). Se corre una vez
+    al arranque del servicio, antes de procesar la cola de deploys.
+    """
+    db = SessionLocal()
+    try:
+        slices = db.query(Slice).filter(
+            Slice.availability_zone_id == 1,   # Linux Cluster — OpenStack no usa mgmt_vlan
+            Slice.status.in_(("ACTIVE", "PROVISIONING")),
+        ).all()
+        added = 0
+        for sl in slices:
+            mgmt_vlan = 1000 + int(sl.id)
+            exists = db.query(Vlan.id).filter(
+                Vlan.slice_id == sl.id, Vlan.type == "M",
+                Vlan.vlan_number == mgmt_vlan).first()
+            if not exists:
+                db.add(Vlan(vlan_number=mgmt_vlan, slice_id=sl.id, type="M"))
+                added += 1
+        if added:
+            db.commit()
+        logger.info("[PLACEMENT] 🔒 Backfill de VLANs de gestión: %d reservada(s) para slices ya activos (%d revisados)",
+                     added, len(slices))
+    except Exception as exc:
+        logger.error("[PLACEMENT] ❌ Backfill de VLANs de gestión falló: %s", exc, exc_info=True)
+        db.rollback()
+    finally:
+        db.close()
+
+
 VM_PLACEMENT_URL  = os.getenv("VM_PLACEMENT_URL",  "http://vm-placement:8080/placement")
 OBSERVABILITY_URL = os.getenv("OBSERVABILITY_URL", "http://observability:8006")
 
@@ -395,13 +433,24 @@ async def process_placement_worker():
                         db.flush()
                     logger.info("[PLACEMENT] 🏷️  Q-in-Q ACTIVO — S-VID del slice %s = %d", slice_id, s_vlan_id)
 
+                # VLANs de gestión (type='M', ver más abajo) SIEMPRE ocupan el
+                # espacio numérico global, sea o no Q-in-Q: el tap de gestión
+                # de cada VM y el gateway/NAT/DHCP del slice (mgmt_vlan =
+                # 1000+slice_id, ver NetworkOrchestrator/provisioner.py) nunca
+                # viajan envueltos en el túnel S-VID ("no la gestión"), así
+                # que un enlace de OTRO slice que sortee ese mismo número
+                # terminaría en la misma VLAN que TODAS las VMs y el gateway
+                # de ese slice — bridge completo entre tenants distintos.
+                vlans_ocupadas_mgmt = {r[0] for r in db.query(Vlan.vlan_number).filter(
+                    Vlan.type == "M", Vlan.vlan_number.isnot(None)).all()}
+
                 # C-VIDs ocupados: por-slice si Q-in-Q (reutilizables), global si no.
                 if qinq_enabled:
-                    vlans_ocupadas = [r[0] for r in db.query(Vlan.vlan_number).filter(
+                    vlans_ocupadas = list(vlans_ocupadas_mgmt | {r[0] for r in db.query(Vlan.vlan_number).filter(
                         Vlan.slice_id == slice_id, Vlan.type == "C",
-                        Vlan.vlan_number.isnot(None)).all()]
+                        Vlan.vlan_number.isnot(None)).all()})
                 else:
-                    vlans_ocupadas = [v[0] for v in db.query(Vlan.id).all()]
+                    vlans_ocupadas = list(vlans_ocupadas_mgmt | {v[0] for v in db.query(Vlan.id).all()})
 
                 def obtener_vlan_libre():
                     while True:
@@ -409,6 +458,26 @@ async def process_placement_worker():
                         if vid not in vlans_ocupadas:
                             vlans_ocupadas.append(vid)
                             return vid
+
+                # Reservar (idempotente) la VLAN de gestión del slice ANTES de
+                # sortear las de los enlaces, para que ningún enlace — de este
+                # slice o de cualquier otro que se despliegue después — pueda
+                # chocar con ella. Se mantiene la fórmula determinística
+                # 1000+slice_id (compat: slices ya desplegados antes de este
+                # fix ya tienen ese tag configurado físicamente en los
+                # workers — no se puede cambiar sin re-taggear VMs corriendo).
+                # Lo que cambia es que ahora SÍ queda reservada en `vlans` y
+                # viaja explícita en el mensaje (mgmt_vlan) hacia
+                # NetworkOrchestrator, que dejó de recalcularla por su cuenta.
+                mgmt_vlan = 1000 + int(slice_id)
+                existing_m = db.query(Vlan.id).filter(
+                    Vlan.slice_id == slice_id, Vlan.type == "M",
+                    Vlan.vlan_number == mgmt_vlan).first()
+                if not existing_m:
+                    db.add(Vlan(vlan_number=mgmt_vlan, slice_id=slice_id, type="M"))
+                    db.flush()
+                if mgmt_vlan not in vlans_ocupadas:
+                    vlans_ocupadas.append(mgmt_vlan)
 
                 vms_payload_data   = {vm.name: {"tap_interfaces": []} for vm in vms_de_bd}
 
@@ -634,7 +703,8 @@ async def process_placement_worker():
                     "mode":                 "extend" if extend_info else "deploy",
                     "vms":                  vms_payload,
                     "links":                network_links,
-                    "workers":              servers_state
+                    "workers":              servers_state,
+                    "mgmt_vlan":            mgmt_vlan,
                 }
 
                 # Q-in-Q en OpenStack: mapa SSH de los computes (keyed por

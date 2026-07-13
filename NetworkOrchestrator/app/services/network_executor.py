@@ -150,6 +150,30 @@ class NetworkExecutor:
         gw_ip = f"{subred_interna}.1/24"
         
         try:
+            # 0. Aislamiento entre slices: bloquear el forwarding IP entre
+            #    CUALQUIER PAR de gateways gw_* de este worker.
+            #
+            #    Cada gw_XXX vive en el namespace de red por defecto del host
+            #    (no hay `ip netns`), y net.ipv4.ip_forward se activa GLOBAL
+            #    (no por interfaz). Cuando dos o más slices tienen VMs en el
+            #    mismo worker, sus subredes (10.0.<slice>.0/24) quedan todas
+            #    directamente conectadas en la tabla de ruteo del kernel — sin
+            #    esta regla, el propio worker enruta tráfico de un slice hacia
+            #    otro por IP, sin pasar nunca por el aislamiento de VLAN de
+            #    OVS (que es por donde SÍ se filtra correctamente el tráfico
+            #    L2 entre slices que NO comparten worker).
+            #
+            #    `-i gw_+ -o gw_+` solo hace match cuando AMBAS interfaces son
+            #    gateways (gw_123, gw_124, ...) — el tráfico WAN (SNAT/egress)
+            #    y el DNAT de IPs externas usan como interfaz al otro lado
+            #    WAN_INTERFACE/EXTERNAL_INTERFACE, así que no se ven afectados.
+            #    Se instala una sola vez por worker (idempotente vía -C).
+            check_cmd = "sudo iptables -C FORWARD -i gw_+ -o gw_+ -j DROP"
+            exit_code, _, _ = ssh.exec(check_cmd)
+            if exit_code != 0:
+                ssh.exec("sudo iptables -I FORWARD 1 -i gw_+ -o gw_+ -j DROP")
+                logger.info(f"[{self.worker_ip}] 🔒 Regla de aislamiento inter-slice instalada (gw_* ⇄ gw_*)")
+
             # 1. Crear el puerto Gateway con la VLAN ÚNICA del slice
             ssh.exec(f"sudo ovs-vsctl --may-exist add-port br-int {gw_name} tag={mgmt_vlan} -- set interface {gw_name} type=internal")
             ssh.exec(f"sudo ip addr add {gw_ip} dev {gw_name} || true")

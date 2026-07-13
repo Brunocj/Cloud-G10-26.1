@@ -19,7 +19,7 @@ from app.routers import approval_router, notification_router
 from app.routers import audit_router, infra_router
 from app.routers import flavor_router
 from app.nats_producer import nats_producer
-from app.services.placement_worker import process_placement_worker
+from app.services.placement_worker import process_placement_worker, backfill_mgmt_vlans
 from app.services.nats_listener import nats_result_listener
 from app.services.gc_scheduler import gc_scheduler_task
 from app.services.ttl_scheduler import ttl_scheduler_task
@@ -31,7 +31,11 @@ Base.metadata.create_all(bind=engine)
 async def lifespan(app: FastAPI):
     # 1. Conectamos al bus NATS
     await nats_producer.connect()
-    
+
+    # 1.5. Migración en caliente: reservar mgmt_vlan de slices ya activos
+    #      (fix de aislamiento entre slices — ver placement_worker.py)
+    backfill_mgmt_vlans()
+
     # 2. Levantamos los workers asíncronos en background
     placement_task = asyncio.create_task(process_placement_worker())
     result_task = asyncio.create_task(nats_result_listener())
