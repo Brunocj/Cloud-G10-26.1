@@ -14,6 +14,18 @@ from app.nats_producer import nats_producer
 logger = logging.getLogger("SliceManager.Worker")
 
 
+def _next_vlan_id(db) -> int:
+    """
+    `vlans.id` NO tiene AUTO_INCREMENT en el esquema real de la BD — el modo
+    legado la usa a propósito como el propio número de VLAN para type='p2p'
+    (ver comentario en el modelo `Vlan`), así que la columna nunca tuvo
+    default y siempre requiere un valor explícito en el INSERT. Para filas
+    type='M'/'C'/'S' (que guardan el número real en `vlan_number`, no en
+    `id`) alcanza con cualquier entero libre — se calcula MAX(id)+1.
+    """
+    return (db.query(func.max(Vlan.id)).scalar() or 0) + 1
+
+
 def backfill_mgmt_vlans() -> None:
     """
     Migración en caliente (idempotente): registra en `vlans` (type='M') la
@@ -37,7 +49,8 @@ def backfill_mgmt_vlans() -> None:
                 Vlan.slice_id == sl.id, Vlan.type == "M",
                 Vlan.vlan_number == mgmt_vlan).first()
             if not exists:
-                db.add(Vlan(vlan_number=mgmt_vlan, slice_id=sl.id, type="M"))
+                db.add(Vlan(id=_next_vlan_id(db), vlan_number=mgmt_vlan, slice_id=sl.id, type="M"))
+                db.flush()   # el próximo slice del loop necesita ver este id
                 added += 1
         if added:
             db.commit()
@@ -429,7 +442,7 @@ async def process_placement_worker():
                         used_s  = {r[0] for r in db.query(Vlan.vlan_number).filter(
                             Vlan.type == "S", Vlan.vlan_number.isnot(None)).all()}
                         s_vlan_id = next((v for v in range(s_base, s_base + s_range) if v not in used_s), s_base)
-                        db.add(Vlan(vlan_number=s_vlan_id, slice_id=slice_id, type="S"))
+                        db.add(Vlan(id=_next_vlan_id(db), vlan_number=s_vlan_id, slice_id=slice_id, type="S"))
                         db.flush()
                     logger.info("[PLACEMENT] 🏷️  Q-in-Q ACTIVO — S-VID del slice %s = %d", slice_id, s_vlan_id)
 
@@ -474,7 +487,7 @@ async def process_placement_worker():
                     Vlan.slice_id == slice_id, Vlan.type == "M",
                     Vlan.vlan_number == mgmt_vlan).first()
                 if not existing_m:
-                    db.add(Vlan(vlan_number=mgmt_vlan, slice_id=slice_id, type="M"))
+                    db.add(Vlan(id=_next_vlan_id(db), vlan_number=mgmt_vlan, slice_id=slice_id, type="M"))
                     db.flush()
                 if mgmt_vlan not in vlans_ocupadas:
                     vlans_ocupadas.append(mgmt_vlan)
@@ -554,10 +567,13 @@ async def process_placement_worker():
                         "vm2_ssh_private_key": get_ssh_key(worker2.get("key_path", ""))
                     })
 
-                    # Q-in-Q: guardar como C-VID con id auto-incremental (permite
-                    # reuso del número entre slices). Legado: número en la PK.
+                    # Q-in-Q: guardar como C-VID (permite reuso del número entre
+                    # slices; `vlan_number` es el C-VID real, `id` es solo un
+                    # PK sin significado — hay que asignarlo a mano, ver
+                    # `_next_vlan_id`). Legado: el número real va en la PK.
                     if qinq_enabled:
-                        db.add(Vlan(vlan_number=vlan_actual, slice_id=slice_id, type="C"))
+                        db.add(Vlan(id=_next_vlan_id(db), vlan_number=vlan_actual, slice_id=slice_id, type="C"))
+                        db.flush()   # siguiente edge del loop necesita ver este id
                     else:
                         db.add(Vlan(id=vlan_actual, slice_id=slice_id, type="p2p"))
                     logger.info(
@@ -568,11 +584,18 @@ async def process_placement_worker():
 
                 logger.info("[PLACEMENT] ✅ %d enlace(s) procesados: MACs y VLANs asignados", len(edges))
 
+                # Solo cuentan como "ocupados" los puertos de VMs de slices
+                # todavía vivos — el destroy nunca limpia `vnc_port` (solo
+                # cambia `state`), así que sin este filtro cada VM que alguna
+                # vez pasó por el worker bloquea su puerto para siempre. Con
+                # solo 99 puertos (5901-5999) esto termina agotando el pool
+                # y dejando `obtener_vnc_libre` sin ninguno disponible.
                 vnc_por_worker = {}
                 for w_id in server_inventory.keys():
                     vnc_ocupados_bd = db.query(Vm.vnc_port).filter(
                         Vm.worker_id == w_id,
-                        Vm.vnc_port.isnot(None)
+                        Vm.vnc_port.isnot(None),
+                        Vm.state.notin_(("TERMINATED", "FAILED")),
                     ).all()
                     vnc_por_worker[w_id] = set(v[0] for v in vnc_ocupados_bd)
 
@@ -611,14 +634,23 @@ async def process_placement_worker():
                     vm.worker_id = worker_id
 
                     if not vm.vnc_port:
-                        while True:
+                        # Límite de intentos: sin esto, si el rango (99 puertos)
+                        # llegara a agotarse de verdad, este bucle gira para
+                        # siempre sin ningún `await` — bloquea el event loop
+                        # completo del proceso, no solo esta tarea.
+                        ocupados = vnc_por_worker.setdefault(worker_id, set())
+                        for _ in range(500):
                             candidato = random.randint(5901, 5999)
-                            if candidato not in vnc_por_worker.get(worker_id, set()):
+                            if candidato not in ocupados:
                                 vm.vnc_port = candidato
-                                vnc_por_worker.setdefault(worker_id, set()).add(candidato)
+                                ocupados.add(candidato)
                                 logger.info("[PLACEMENT]    VNC asignado: VM %-20s → Worker-%d puerto %d",
                                             vm.name, worker_id, candidato)
                                 break
+                        else:
+                            raise RuntimeError(
+                                f"Sin puertos VNC libres en Worker-{worker_id} (rango 5901-5999 agotado)."
+                            )
 
                     image_obj = db.query(Image).filter(Image.id == vm.image_id).first()
                     img_path  = image_obj.path if image_obj and image_obj.path else ""
