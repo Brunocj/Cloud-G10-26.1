@@ -255,7 +255,7 @@ export const ImagePanel = ({ fullImages, onRefresh, flash, refreshImageList, api
                                     </div>
                                     <div style={{ fontSize: 9, color: T.textFaint, marginTop: 2, fontFamily: "monospace" }}>{img.path}</div>
                                 </div>
-                                {img.is_general !== 1 && (
+                                {(img.is_general !== 1 || user?.role === "admin" || user?.role === "superAdmin") && (
                                     <button
                                         onClick={() => handleDelete(img)}
                                         disabled={img.in_use}
