@@ -23,7 +23,7 @@ const Tab = ({ label, icon: Icon, active, onClick }) => (
     </button>
 );
 
-export const NodeEditor = ({ node, availableImages, sliceStatus, editMode = false, sliceId, zoneId, onSave, onDelete, onClose, onOpenConsole, apiFetch }) => {
+export const NodeEditor = ({ node, availableImages, sliceStatus, editMode = false, sliceId, zoneId, edges = [], ifaceMap = {}, onSave, onDelete, onClose, onOpenConsole, apiFetch }) => {
     const defaultImg = availableImages?.[0];
 
     const initForm = (n) => ({
@@ -34,6 +34,7 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, editMode = fals
         external_ip:     n.external_ip     || "",
         firewall_rules:  n.firewall_rules  || [],
         ingress_rules:   n.ingress_rules   || [],
+        link_ips:        n.link_ips        || {},
     });
 
     const [activeTab, setActiveTab] = useState("props");
@@ -47,6 +48,17 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, editMode = fals
     const [pickedCustom, setPickedCustom] = useState(false);
     const [telemetry,    setTelemetry]    = useState(null);   // null=no pedida, {loading}, o el resultado
     const u = (k, v) => setF(p => ({ ...p, [k]: v }));
+
+    // ── IPs manuales por interfaz de enlace ──────────────────────────────
+    const CIDR_RE = /^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/;
+    const myEdges = (edges || []).filter(e => e.from === node.id || e.to === node.id);
+    const setLinkIp = (edgeId, val) =>
+        setF(p => ({ ...p, link_ips: { ...(p.link_ips || {}), [edgeId]: val } }));
+    const ifaceLabelFor = (e) => {
+        const mine = e.from === node.id;
+        const im = ifaceMap[e.id] || {};
+        return mine ? (e.fromIface || im.fromIface || "ens?") : (e.toIface || im.toIface || "ens?");
+    };
 
     const loadTelemetry = async () => {
         if (!apiFetch || !sliceId) return;
@@ -371,6 +383,58 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, editMode = fals
                                 <Info size={10} style={{ flexShrink: 0, marginTop: 1 }} />
                                 El tráfico no listado es bloqueado por defecto.
                             </div>
+                        </div>
+
+                        {/* Direcciones IP de interfaces de enlace — requiere cloud-init con network-config v2 */}
+                        <div style={{ background: T.surfaceElevated, borderRadius: 9, padding: "11px 12px", border: `1px solid ${T.border}` }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10 }}>
+                                <Network size={13} color={T.accent} />
+                                <Label style={{ marginBottom: 0 }}>Direcciones IP de enlaces</Label>
+                            </div>
+
+                            {selectedImage && !selectedImage.cloud_init_support ? (
+                                <div style={{ fontSize: 10, color: T.textFaint, background: T.surface, border: `1px dashed ${T.border}`, borderRadius: 6, padding: "8px 10px", lineHeight: 1.5, display: "flex", gap: 6, alignItems: "flex-start" }}>
+                                    <Info size={11} style={{ flexShrink: 0, marginTop: 1 }} />
+                                    <span>
+                                        Esta imagen no soporta configuración automática de red por cloud-init.
+                                        Las interfaces de enlace quedarán sin IP; configúralas dentro de la VM
+                                        con <span style={{ fontFamily: "monospace", color: T.accent }}>sudo ip addr add …</span>.
+                                    </span>
+                                </div>
+                            ) : (
+                                <>
+                                    {myEdges.length === 0 && (
+                                        <div style={{ fontSize: 11, color: T.textFaint, textAlign: "center", padding: "10px 0" }}>
+                                            Esta VM no tiene enlaces conectados.
+                                        </div>
+                                    )}
+
+                                    {myEdges.map(e => {
+                                        const val = (f.link_ips || {})[e.id] || "";
+                                        const invalid = val.trim() !== "" && !CIDR_RE.test(val.trim());
+                                        return (
+                                            <div key={e.id} style={{ display: "grid", gridTemplateColumns: "64px 1fr", gap: 8, alignItems: "center", marginBottom: 7 }}>
+                                                <div style={{ fontSize: 11, fontWeight: 800, color: T.accent, fontFamily: "monospace" }}>{ifaceLabelFor(e)}</div>
+                                                <input
+                                                    type="text"
+                                                    value={val}
+                                                    disabled={isReadOnly}
+                                                    placeholder="sin IP (ej. 192.168.10.1/24)"
+                                                    onChange={ev => setLinkIp(e.id, ev.target.value)}
+                                                    style={{ ...inp, fontSize: 12, borderColor: invalid ? T.red : undefined }}
+                                                />
+                                            </div>
+                                        );
+                                    })}
+
+                                    {myEdges.length > 0 && (
+                                        <div style={{ fontSize: 9, color: T.textFaint, marginTop: 6, lineHeight: 1.5, display: "flex", gap: 5 }}>
+                                            <Info size={10} style={{ flexShrink: 0, marginTop: 1 }} />
+                                            Vacío = la interfaz queda sin IP (solo capa 2). La IP se aplica al desplegar; en enlaces añadidos a una VM ya activa, configúrala dentro de la VM.
+                                        </div>
+                                    )}
+                                </>
+                            )}
                         </div>
 
                         {/* Acceso de Red */}

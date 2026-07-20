@@ -33,6 +33,10 @@ class TapInterface(BaseModel):
     pci_slot: Optional[int] = Field(
         None, description="Slot PCI explícito (ensN real) — reenviado tal cual al Compute Provisioner."
     )
+    ip_cidr: Optional[str] = Field(
+        None, description="IP/prefijo manual para esta interfaz de enlace (ej: 192.168.10.1/24). "
+                          "None = sin IP (comportamiento L2 actual). La gestión nunca la usa."
+    )
 
 
 class SecurityRule(BaseModel):

@@ -27,6 +27,11 @@ class TapInterface(BaseModel):
                     "SliceManager — determinístico y nunca reusado, para que el "
                     "nombre de interfaz que ve el frontend coincida con el real.",
     )
+    ip_cidr: Optional[str] = Field(
+        None,
+        description="IP/prefijo manual para esta interfaz de enlace (ej: 192.168.10.1/24). "
+                    "None = sin IP (solo capa 2, comportamiento actual).",
+    )
 
 
 class VMSpec(BaseModel):

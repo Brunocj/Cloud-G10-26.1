@@ -706,6 +706,8 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                         editMode={editMode}
                         sliceId={activeSlice ? activeSlice.id : null}
                         zoneId={effectiveZoneId}
+                        edges={edges}
+                        ifaceMap={ifaceMap}
                         apiFetch={apiFetch}
                         onSave={updated => setNodes(prev => prev.map(n => n.id === updated.id ? updated : n))}
                         onDelete={id => {

@@ -98,7 +98,7 @@ class QEMUExecutor:
 
 
 
-    def _prepare_cloud_init(self, vm_id: str, image_path: str, vm_user: str = "ubuntu", vm_password: str = "pucp2026", public_key_path: str = "keys/worker_key.pub", owner_ssh_key: str = "", image_default_username: str = "") -> str:
+    def _prepare_cloud_init(self, vm_id: str, image_path: str, vm_user: str = "ubuntu", vm_password: str = "pucp2026", public_key_path: str = "keys/worker_key.pub", owner_ssh_key: str = "", image_default_username: str = "", tap_interfaces=None) -> str:
         """Genera el ISO de cloud-init en el worker fisico para inyectar la llave SSH y credenciales."""
 
         try:
@@ -167,14 +167,27 @@ chpasswd:
         user_data_escaped = user_data.replace("'", "'\\''")
         meta_data_escaped = meta_data.replace("'", "'\\''")
 
+        # Network-config opcional: IPs manuales por interfaz de enlace.
+        # Solo se genera si alguna TAP trae ip_cidr -> si no, no se escribe
+        # network-config y el comportamiento es idéntico al actual (la gestión
+        # toma DHCP del gateway y los enlaces quedan sin IP, solo capa 2).
+        network_config = _build_network_config(tap_interfaces)
+        write_netcfg = ""
+        netcfg_flag = ""
+        if network_config:
+            network_config_escaped = network_config.replace("'", "'\\''")
+            write_netcfg = f"printf '%s' '{network_config_escaped}' > /tmp/{vm_id}_network-config && "
+            netcfg_flag = f"--network-config /tmp/{vm_id}_network-config "
+
         cmd_cloud_init = (
             f"printf '%s' '{user_data_escaped}' > /tmp/{vm_id}_user-data && "
             f"printf '%s' '{meta_data_escaped}' > /tmp/{vm_id}_meta-data && "
-            f"sudo cloud-localds /vms/{vm_id}_seed.iso /tmp/{vm_id}_user-data /tmp/{vm_id}_meta-data"
+            f"{write_netcfg}"
+            f"sudo cloud-localds {netcfg_flag}/vms/{vm_id}_seed.iso /tmp/{vm_id}_user-data /tmp/{vm_id}_meta-data"
         )
 
         self._ssh.exec(cmd_cloud_init)
-        logger.info("cloud-init ISO generado para VM %s (usuario: %s, default: %s)", vm_id, vm_user, default_image_user)
+        logger.info("cloud-init ISO generado para VM %s (usuario: %s, default: %s, net_manual: %s)", vm_id, vm_user, default_image_user, bool(network_config))
         return f"/vms/{vm_id}_seed.iso"
 
 
@@ -204,7 +217,7 @@ chpasswd:
         linux_nice = priority - 20
 
         # Generamos el cloud-init ISO con usuario y contraseña configurados
-        seed_iso_path = self._prepare_cloud_init(vm_id, image_path, vm_user=vm_user, vm_password=vm_password, owner_ssh_key=owner_ssh_key, image_default_username=image_default_username)
+        seed_iso_path = self._prepare_cloud_init(vm_id, image_path, vm_user=vm_user, vm_password=vm_password, owner_ssh_key=owner_ssh_key, image_default_username=image_default_username, tap_interfaces=tap_interfaces)
         
         cmd = (
             f"sudo nice -n {linux_nice} "
@@ -421,3 +434,49 @@ def _build_net_args(tap_interfaces: List[TapInterface]) -> str:
             f"-device virtio-net-pci,netdev={netdev_id},mac={iface.mac},id={dev_id}{addr} "
         )
     return "".join(parts)
+
+
+def _build_network_config(tap_interfaces) -> str | None:
+    """
+    Genera un cloud-init network-config v2 (netplan) SOLO si alguna interfaz
+    de enlace trae `ip_cidr` (IP manual del usuario). Si ninguna la trae,
+    devuelve None -> no se escribe network-config y se conserva el
+    comportamiento actual (gestión por DHCP, enlaces sin IP).
+
+    El match es por MAC (no por nombre ensN): determinístico e independiente
+    de cómo el guest nombre la interfaz.
+      · IP definida  -> estática (dhcp4: false + addresses).
+      · Gestión      -> dhcp4: true (la sirve el dnsmasq del gateway).
+      · Enlace vacío -> dhcp4: false, sin dirección (solo capa 2, como hoy).
+
+    Acepta objetos TapInterface o dicts, por robustez.
+    """
+    taps = tap_interfaces or []
+
+    def _g(t, k):
+        return t.get(k) if isinstance(t, dict) else getattr(t, k, None)
+
+    if not any(_g(t, "ip_cidr") for t in taps):
+        return None
+
+    lines = ["version: 2", "ethernets:"]
+    for idx, t in enumerate(taps):
+        mac = (_g(t, "mac") or "").lower()
+        if not mac:
+            continue
+        ip = _g(t, "ip_cidr")
+        # Gestión = pci_slot 3 (convención SliceManager) o, en su defecto, la
+        # primera NIC. Siempre DHCP para no perder el acceso por el gateway.
+        is_mgmt = (_g(t, "pci_slot") == 3) or (idx == 0)
+        lines.append(f"  nic{idx}:")
+        lines.append(f"    match:")
+        lines.append(f"      macaddress: \"{mac}\"")
+        if ip:
+            lines.append(f"    dhcp4: false")
+            lines.append(f"    addresses:")
+            lines.append(f"      - \"{ip}\"")
+        elif is_mgmt:
+            lines.append(f"    dhcp4: true")
+        else:
+            lines.append(f"    dhcp4: false")
+    return "\n".join(lines) + "\n"

@@ -449,6 +449,19 @@ async def process_placement_worker():
                     node = next((n for n in slice_json.get("nodes", []) if n.get("id") == vm_name), {})
                     return _rules_from(node, "firewall_rules")
 
+                # IP manual por interfaz de enlace: vive en cada nodo del
+                # slice_json como `link_ips[edge_id]` (definida en el NodeEditor
+                # del frontend) y se adjunta al tap del enlace correspondiente
+                # como `ip_cidr`. None = sin IP → comportamiento L2 actual, sin
+                # regresión (el Compute solo genera network-config si hay IP).
+                def _link_ip_for(vm_name, edge_id):
+                    if not edge_id:
+                        return None
+                    node = next((n for n in slice_json.get("nodes", []) if n.get("id") == vm_name), {})
+                    val = (node.get("link_ips") or {}).get(edge_id)
+                    val = (val or "").strip()
+                    return val or None
+
                 # Reglas de entrada desde Internet (AWS-style, REQ nuevo): a
                 # diferencia de firewall_rules (VM↔VM dentro del slice, se
                 # adjunta a cada TAP de enlace), estas viajan por VM en
@@ -637,9 +650,14 @@ async def process_placement_worker():
                     iface1 = f"ens{slot1}"
                     iface2 = f"ens{slot2}"
 
+                    # IP manual por interfaz (si el usuario la definió en el NodeEditor)
+                    _edge_id = edge.get("id")
+                    ip1 = _link_ip_for(vm1_id, _edge_id)
+                    ip2 = _link_ip_for(vm2_id, _edge_id)
+
                     # VM nueva → tap al arranque; VM existente → hot-plug vía QMP/Nova
-                    for _vid, _tap in ((vm1_id, {"tap_name": tap1, "mac": mac1, "pci_slot": slot1}),
-                                       (vm2_id, {"tap_name": tap2, "mac": mac2, "pci_slot": slot2})):
+                    for _vid, _tap in ((vm1_id, {"tap_name": tap1, "mac": mac1, "pci_slot": slot1, "ip_cidr": ip1}),
+                                       (vm2_id, {"tap_name": tap2, "mac": mac2, "pci_slot": slot2, "ip_cidr": ip2})):
                         if _vid in vms_payload_data:
                             vms_payload_data[_vid]["tap_interfaces"].append(_tap)
                         else:
