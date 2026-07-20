@@ -6,7 +6,8 @@ import { Upload, RefreshCcw, Trash2, CheckCircle, Circle, Lock, Package, Loader 
 export const ImagePanel = ({ fullImages, onRefresh, flash, refreshImageList, apiFetch, user }) => {
     const [uploading,      setUploading]      = useState(false);
     const [gcRunning,      setGcRunning]      = useState(false);
-    const [uploadForm,     setUploadForm]     = useState({ name: "", file: null, isGeneral: false, azId: 1, cloudInit: true, defaultUsername: "", defaultPassword: "" });
+    const [uploadForm,     setUploadForm]     = useState({ name: "", file: null, icon: null, isGeneral: false, azId: 1, cloudInit: true, defaultUsername: "", defaultPassword: "" });
+    const [iconUploadingId, setIconUploadingId] = useState(null); // id de la imagen a la que se le está subiendo el ícono
     const [showUpload,     setShowUpload]     = useState(false);
     const [azList,         setAzList]         = useState([{ id: 1, name: "Linux Cluster" }, { id: 2, name: "OpenStack" }]);
     const [uploadProgress, setUploadProgress] = useState(null); // null=idle, 0-100=subiendo
@@ -45,6 +46,7 @@ export const ImagePanel = ({ fullImages, onRefresh, flash, refreshImageList, api
             fd.append("default_password", uploadForm.defaultPassword.trim());
         }
         fd.append("file", uploadForm.file);
+        if (uploadForm.icon) fd.append("icon", uploadForm.icon);
 
         try {
             const res = await apiFetch("/slices/utils/images/upload", {
@@ -58,7 +60,7 @@ export const ImagePanel = ({ fullImages, onRefresh, flash, refreshImageList, api
             if (!res.ok) throw new Error(data.detail || "Error al subir");
             flash(`Imagen '${uploadForm.name}' subida correctamente.`);
             setShowUpload(false);
-            setUploadForm({ name: "", file: null, isGeneral: false, azId: 1, cloudInit: true, defaultUsername: "", defaultPassword: "" });
+            setUploadForm({ name: "", file: null, icon: null, isGeneral: false, azId: 1, cloudInit: true, defaultUsername: "", defaultPassword: "" });
             onRefresh();
             if (refreshImageList) refreshImageList();
         } catch (e) {
@@ -83,6 +85,22 @@ export const ImagePanel = ({ fullImages, onRefresh, flash, refreshImageList, api
             flash(data.message);
             onRefresh();
         } catch (e) { flash(e.message, "error"); }
+    };
+
+    const handleIconUpload = async (img, file) => {
+        if (!file) return;
+        setIconUploadingId(img.id);
+        try {
+            const fd = new FormData();
+            fd.append("icon", file);
+            const res  = await apiFetch(`/slices/utils/images/${img.id}/icon`, { method: "POST", body: fd });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || "Error al subir el ícono");
+            flash(`Ícono de '${img.name}' actualizado.`);
+            onRefresh();
+            if (refreshImageList) refreshImageList();
+        } catch (e) { flash(e.message, "error"); }
+        finally { setIconUploadingId(null); }
     };
 
     const handleGC = async () => {
@@ -130,7 +148,16 @@ export const ImagePanel = ({ fullImages, onRefresh, flash, refreshImageList, api
                         <input type="file" accept=".qcow2,.img,.iso" ref={fileRef}
                             onChange={e => setUploadForm(p => ({ ...p, file: e.target.files[0] }))}
                             style={{ fontSize: 11, color: T.text, marginBottom: 8, width: "100%" }} />
-                        
+
+                        <Label>Ícono (opcional — PNG/SVG/JPEG/WEBP, máx 150 KB)</Label>
+                        <input type="file" accept=".png,.jpg,.jpeg,.svg,.webp"
+                            onChange={e => setUploadForm(p => ({ ...p, icon: e.target.files[0] || null }))}
+                            style={{ fontSize: 11, color: T.text, marginBottom: 8, width: "100%" }} />
+                        <div style={{ fontSize: 9.5, color: T.textFaint, marginBottom: 8 }}>
+                            Se muestra como logo de la VM en el canvas. Si no subes uno, queda sin ícono
+                            (o el genérico si el nombre contiene "ubuntu"/"win").
+                        </div>
+
                         <Label>Zona de Disponibilidad</Label>
                         <select value={uploadForm.azId}
                             onChange={e => setUploadForm(p => ({ ...p, azId: Number(e.target.value) }))}
@@ -227,9 +254,11 @@ export const ImagePanel = ({ fullImages, onRefresh, flash, refreshImageList, api
                                 <div style={{ flex: 1, minWidth: 0 }}>
                                     <div style={{ fontSize: 12, fontWeight: 700, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
                                             display: "flex", alignItems: "center", gap: 5 }}>
-                                        {img.is_general
-                                            ? <Lock size={11} color={T.textMuted} />
-                                            : <Package size={11} color={T.accent} />}
+                                        {img.icon_data
+                                            ? <img src={img.icon_data} alt="" width={13} height={13} style={{ borderRadius: 3, flexShrink: 0, objectFit: "contain" }} />
+                                            : (img.is_general
+                                                ? <Lock size={11} color={T.textMuted} />
+                                                : <Package size={11} color={T.accent} />)}
                                         {img.name}
                                         {/* Badge de Zona de Disponibilidad */}
                                         {img.az_name && (
@@ -256,17 +285,30 @@ export const ImagePanel = ({ fullImages, onRefresh, flash, refreshImageList, api
                                     <div style={{ fontSize: 9, color: T.textFaint, marginTop: 2, fontFamily: "monospace" }}>{img.path}</div>
                                 </div>
                                 {(img.is_general !== 1 || user?.role === "admin" || user?.role === "superAdmin") && (
-                                    <button
-                                        onClick={() => handleDelete(img)}
-                                        disabled={img.in_use}
-                                        title={img.in_use ? "No se puede eliminar: tiene VMs activas" : "Eliminar imagen"}
-                                        style={btnBase({ padding: "4px 8px", fontSize: 13, marginLeft: 6, flexShrink: 0, cursor: img.in_use ? "not-allowed" : "pointer",
-                                            background: img.in_use ? T.surfaceElevated : T.redLight,
-                                            color: img.in_use ? T.textFaint : T.red,
-                                            border: `1px solid ${img.in_use ? T.border : T.red + "44"}`,
-                                            display: "flex", alignItems: "center" })}>
-                                        <Trash2 size={13} />
-                                    </button>
+                                    <div style={{ display: "flex", gap: 4, marginLeft: 6, flexShrink: 0 }}>
+                                        <label title="Subir/cambiar ícono"
+                                            style={btnBase({ padding: "4px 8px", fontSize: 13, cursor: iconUploadingId === img.id ? "wait" : "pointer",
+                                                background: T.surfaceElevated, color: T.accent, border: `1px solid ${T.border}`,
+                                                display: "flex", alignItems: "center", opacity: iconUploadingId === img.id ? 0.6 : 1 })}>
+                                            {iconUploadingId === img.id
+                                                ? <Loader size={13} style={{ animation: "spin 0.8s linear infinite" }} />
+                                                : <Upload size={13} />}
+                                            <input type="file" accept=".png,.jpg,.jpeg,.svg,.webp" style={{ display: "none" }}
+                                                disabled={iconUploadingId === img.id}
+                                                onChange={e => { const f = e.target.files[0]; e.target.value = ""; handleIconUpload(img, f); }} />
+                                        </label>
+                                        <button
+                                            onClick={() => handleDelete(img)}
+                                            disabled={img.in_use}
+                                            title={img.in_use ? "No se puede eliminar: tiene VMs activas" : "Eliminar imagen"}
+                                            style={btnBase({ padding: "4px 8px", fontSize: 13, cursor: img.in_use ? "not-allowed" : "pointer",
+                                                background: img.in_use ? T.surfaceElevated : T.redLight,
+                                                color: img.in_use ? T.textFaint : T.red,
+                                                border: `1px solid ${img.in_use ? T.border : T.red + "44"}`,
+                                                display: "flex", alignItems: "center" })}>
+                                            <Trash2 size={13} />
+                                        </button>
+                                    </div>
                                 )}
                             </div>
                         </div>

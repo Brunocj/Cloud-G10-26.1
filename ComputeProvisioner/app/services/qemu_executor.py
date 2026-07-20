@@ -262,7 +262,8 @@ chpasswd:
         else:
             logger.warning("Disco no encontrado (ya eliminado): %s", disk_path)
 
-    def hotplug_nic(self, vm_id: str, slice_id: str, tap_name: str, mac: str) -> None:
+    def hotplug_nic(self, vm_id: str, slice_id: str, tap_name: str, mac: str,
+                     pci_slot: int | None = None) -> None:
         """
         Conecta una NIC en caliente a una VM QEMU en ejecución vía QMP
         (Modo Edición, REQ-US-14). El TAP ya debe existir en el worker
@@ -271,10 +272,15 @@ chpasswd:
         Requiere que la VM haya sido lanzada con el socket QMP
         (/tmp/qmp-{vm_id}-{slice_id}.sock). Las VMs desplegadas antes de
         esta versión no lo tienen: hay que redesplegar el slice una vez.
+
+        `pci_slot`, si viene dado, fija el `addr=` del device — así el ensN
+        real dentro del guest queda determinado por SliceManager (que lo
+        calcula y persiste) en vez de dejarlo a elección de QEMU, que podría
+        reusar un slot recién liberado por un unplug anterior.
         """
         qmp_path  = f"/tmp/qmp-{vm_id}-{slice_id}.sock"
-        netdev_id = f"hp-{tap_name[-12:]}"
-        dev_id    = f"nic-{tap_name[-12:]}"
+        netdev_id, dev_id = net_qmp_ids(tap_name)
+        addr_arg = f",'addr':{hex(pci_slot)!r}" if pci_slot is not None else ""
 
         # Script QMP ejecutado EN el worker (el socket es local a él).
         # Handshake → netdev_add(tap) → device_add(virtio-net-pci).
@@ -294,7 +300,7 @@ chpasswd:
             f"'ifname':{tap_name!r},'script':'no','downscript':'no'}}}})\n"
             "if 'error' in r1: print('NETDEV_ERR:'+r1['error'].get('desc','?')); sys.exit(1)\n"
             f"r2=cmd({{'execute':'device_add','arguments':{{'driver':'virtio-net-pci',"
-            f"'netdev':{netdev_id!r},'mac':{mac!r},'id':{dev_id!r}}}}})\n"
+            f"'netdev':{netdev_id!r},'mac':{mac!r},'id':{dev_id!r}{addr_arg}}}}})\n"
             "if 'error' in r2: print('DEVICE_ERR:'+r2['error'].get('desc','?')); sys.exit(1)\n"
             "print('HOTPLUG_OK')\n"
         )
@@ -319,8 +325,7 @@ chpasswd:
         Best-effort: no lanza si la VM/tap ya no existen.
         """
         qmp_path  = f"/tmp/qmp-{vm_id}-{slice_id}.sock"
-        netdev_id = f"hp-{tap_name[-12:]}"
-        dev_id    = f"nic-{tap_name[-12:]}"
+        netdev_id, dev_id = net_qmp_ids(tap_name)
 
         qmp_script = (
             "import socket,json,sys\n"
@@ -336,17 +341,30 @@ chpasswd:
             "        r=json.loads(f.readline())\n"
             "        if 'return' in r or 'error' in r: return r\n"
             "cmd({'execute':'qmp_capabilities'})\n"
-            f"cmd({{'execute':'device_del','arguments':{{'id':{dev_id!r}}}}})\n"
+            f"r1=cmd({{'execute':'device_del','arguments':{{'id':{dev_id!r}}}}})\n"
+            "if 'error' in r1: print('DEVICE_DEL_ERR:'+r1['error'].get('desc','?')); sys.exit(0)\n"
             "import time; time.sleep(1)\n"
-            f"cmd({{'execute':'netdev_del','arguments':{{'id':{netdev_id!r}}}}})\n"
+            f"r2=cmd({{'execute':'netdev_del','arguments':{{'id':{netdev_id!r}}}}})\n"
+            "if 'error' in r2: print('NETDEV_DEL_ERR:'+r2['error'].get('desc','?')); sys.exit(0)\n"
             "print('UNPLUG_OK')\n"
         )
         script_b64 = __import__("base64").b64encode(qmp_script.encode()).decode()
-        self._ssh.exec(f"echo {script_b64} | base64 -d | sudo python3 -")
-        # Limpiar el TAP del OVS y del kernel (ya sin peer)
+        exit_code, out, err = self._ssh.exec(f"echo {script_b64} | base64 -d | sudo python3 -")
+        output = (out or "") + (err or "")
+        # Limpiar el TAP del OVS y del kernel (ya sin peer). Se hace incluso si
+        # el QMP falló (best-effort del lado del host), pero el resultado real
+        # del device_del SÍ se loguea — antes esto reportaba "Unplug OK"
+        # incondicionalmente aunque QMP hubiera fallado en silencio.
         self._ssh.exec(f"sudo ovs-vsctl --if-exists del-port br-int {tap_name}")
         self._ssh.exec(f"sudo ip link del {tap_name} 2>/dev/null || true")
-        logger.info("Unplug OK: VM %s ✂ NIC %s", vm_id, tap_name)
+        if "UNPLUG_OK" not in output:
+            logger.warning(
+                "Unplug QMP incompleto para VM %s (tap=%s, dev_id=%s): %s — "
+                "el TAP del host se borró igual, pero la NIC pudo quedar viva dentro de la VM.",
+                vm_id, tap_name, dev_id, output.strip() or "sin salida"
+            )
+        else:
+            logger.info("Unplug OK: VM %s ✂ NIC %s", vm_id, tap_name)
 
     def delete_seed_iso(self, vm_id: str) -> None:
         """Elimina el ISO de cloud-init generado al arrancar la VM."""
@@ -365,27 +383,41 @@ chpasswd:
 # Helpers privados
 # ------------------------------------------------------------------
 
+def net_qmp_ids(tap_name: str) -> tuple[str, str]:
+    """IDs QMP determinísticos derivados del tap_name.
+
+    Deben coincidir SIEMPRE entre el lanzamiento inicial (_build_net_args) y
+    hotplug_nic/unplug_nic — si una NIC original se lanza con un id distinto
+    (p.ej. posicional 'net0'/'net1'), unplug_nic no la encuentra: QMP responde
+    error, el script lo ignora y de todos modos reporta éxito, así que el TAP
+    del host se borra pero la interfaz sigue viva dentro de la VM.
+    """
+    return f"hp-{tap_name[-12:]}", f"nic-{tap_name[-12:]}"
+
+
 def _build_net_args(tap_interfaces: List[TapInterface]) -> str:
     """
     Construye los argumentos -netdev/-device para QEMU.
 
     Ejemplo con 2 TAPs:
-      -netdev tap,id=net0,ifname=tap-vm1-0,script=no,downscript=no
-      -device virtio-net-pci,netdev=net0,mac=52:54:00:A3:C7:00
-      -netdev tap,id=net1,ifname=tap-vm1-1,script=no,downscript=no
-      -device virtio-net-pci,netdev=net1,mac=52:54:00:A3:C7:01
+      -netdev tap,id=hp-tap-vm1-0,ifname=tap-vm1-0,script=no,downscript=no
+      -device virtio-net-pci,netdev=hp-tap-vm1-0,mac=52:54:00:A3:C7:00,id=nic-tap-vm1-0
+      -netdev tap,id=hp-tap-vm1-1,ifname=tap-vm1-1,script=no,downscript=no
+      -device virtio-net-pci,netdev=hp-tap-vm1-1,mac=52:54:00:A3:C7:01,id=nic-tap-vm1-1
     """
     if not tap_interfaces:
         return "-netdev user,id=net0 -device virtio-net-pci,netdev=net0 "
 
     parts = []
-    for i, iface in enumerate(tap_interfaces):
-        net_id = f"net{i}"
+    for iface in tap_interfaces:
+        netdev_id, dev_id = net_qmp_ids(iface.tap_name)
+        slot = getattr(iface, "pci_slot", None)
+        addr = f",addr={hex(slot)}" if slot is not None else ""
         parts.append(
-            f"-netdev tap,id={net_id},ifname={iface.tap_name},"
+            f"-netdev tap,id={netdev_id},ifname={iface.tap_name},"
             f"script=no,downscript=no "
         )
         parts.append(
-            f"-device virtio-net-pci,netdev={net_id},mac={iface.mac} "
+            f"-device virtio-net-pci,netdev={netdev_id},mac={iface.mac},id={dev_id}{addr} "
         )
     return "".join(parts)

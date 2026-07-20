@@ -556,6 +556,27 @@ async def process_placement_worker():
                 # El contador de MACs continúa después de las ya usadas por el slice
                 global_mac_counter = sum(len(dv.get("tap_interfaces", [])) for dv in existing_deployed)
 
+                # ── Slots PCI determinísticos (ensN real dentro del guest) ───────
+                # ens3 = gestión, ens4/ens5/... = enlaces, en el orden real de
+                # conexión. Se fijan acá (nunca los elige QEMU) para que el
+                # frontend pueda mostrar el nombre real en vez de adivinarlo
+                # contando enlaces en el array actual (drifting cuando se borra
+                # uno). Nunca se reusa un slot ya asignado, ni siquiera si el
+                # enlace que lo usaba se borró después — así no hay ambigüedad
+                # posible entre lo persistido y lo que QEMU realmente asignó.
+                existing_by_id = {dv.get("vm_id"): dv for dv in existing_deployed}
+                _hotplug_slot_counters: dict = {}
+
+                def _next_slot(_vid: str) -> int:
+                    if _vid in vms_payload_data:
+                        return 3 + len(vms_payload_data[_vid]["tap_interfaces"])
+                    if _vid not in _hotplug_slot_counters:
+                        base = len(existing_by_id.get(_vid, {}).get("tap_interfaces", []))
+                        _hotplug_slot_counters[_vid] = 3 + base
+                    slot = _hotplug_slot_counters[_vid]
+                    _hotplug_slot_counters[_vid] += 1
+                    return slot
+
                 # TAP de gestión para cada VM.
                 # OJO: el nombre debe ser ÚNICO y ≤15 chars (IFNAMSIZ). Usamos el
                 # id de BD de la VM (único global), NO el prefijo del vm_id — que
@@ -566,7 +587,7 @@ async def process_placement_worker():
                     mac_mgmt = f"{mac_prefix}:{global_mac_counter:02x}".upper()
                     global_mac_counter += 1
                     vms_payload_data[vm.name]["tap_interfaces"].append(
-                        {"tap_name": tap_mgmt, "mac": mac_mgmt}
+                        {"tap_name": tap_mgmt, "mac": mac_mgmt, "pci_slot": 3}
                     )
 
                 # Generamos los enlaces
@@ -596,9 +617,17 @@ async def process_placement_worker():
                     mac1 = f"{mac_prefix}:{global_mac_counter:02x}".upper(); global_mac_counter += 1
                     mac2 = f"{mac_prefix}:{global_mac_counter:02x}".upper(); global_mac_counter += 1
 
+                    # Slots (ensN real) — calculados ANTES de tocar vms_payload_data
+                    # o el contador de hot-plug, para reflejar el estado justo
+                    # previo a agregar este enlace.
+                    slot1 = _next_slot(vm1_id)
+                    slot2 = _next_slot(vm2_id)
+                    iface1 = f"ens{slot1}"
+                    iface2 = f"ens{slot2}"
+
                     # VM nueva → tap al arranque; VM existente → hot-plug vía QMP/Nova
-                    for _vid, _tap in ((vm1_id, {"tap_name": tap1, "mac": mac1}),
-                                       (vm2_id, {"tap_name": tap2, "mac": mac2})):
+                    for _vid, _tap in ((vm1_id, {"tap_name": tap1, "mac": mac1, "pci_slot": slot1}),
+                                       (vm2_id, {"tap_name": tap2, "mac": mac2, "pci_slot": slot2})):
                         if _vid in vms_payload_data:
                             vms_payload_data[_vid]["tap_interfaces"].append(_tap)
                         else:
@@ -612,6 +641,7 @@ async def process_placement_worker():
                         "vm1_worker_ip":       worker1.get("ip", "0.0.0.0"),
                         "vm1_worker_port":     worker1.get("port", 22),
                         "vm1_tap":             tap1,
+                        "vm1_iface":           iface1,   # ensN real dentro del guest (REQ display fix)
                         "vm1_ssh_user":        worker1.get("user", "ubuntu"),
                         "vm1_ssh_private_key": get_ssh_key(worker1.get("key_path", "")),
                         "vm1_security_rules":  _security_rules_for(vm1_id),
@@ -619,6 +649,7 @@ async def process_placement_worker():
                         "vm2_worker_ip":       worker2.get("ip", "0.0.0.0"),
                         "vm2_worker_port":     worker2.get("port", 22),
                         "vm2_tap":             tap2,
+                        "vm2_iface":           iface2,   # ensN real dentro del guest (REQ display fix)
                         "vm2_ssh_user":        worker2.get("user", "ubuntu"),
                         "vm2_ssh_private_key": get_ssh_key(worker2.get("key_path", "")),
                         "vm2_security_rules":  _security_rules_for(vm2_id),

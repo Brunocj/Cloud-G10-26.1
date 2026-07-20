@@ -39,7 +39,26 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, editMode = fals
     const [f, setF]                 = useState(() => initForm(node));
     const [availableIps, setIps]    = useState([]);
     const [flavors, setFlavors]     = useState([]);
+    // Distingue "todavía no elegiste nada" (muestra el placeholder) de "elegiste
+    // Personalizado a propósito" (muestra esa opción) — ambos casos guardan
+    // flavor_id=null en el backend, así que esta distinción es solo de UI y se
+    // reinicia al abrir el editor de nuevo.
+    const [pickedCustom, setPickedCustom] = useState(false);
+    const [telemetry,    setTelemetry]    = useState(null);   // null=no pedida, {loading}, o el resultado
     const u = (k, v) => setF(p => ({ ...p, [k]: v }));
+
+    const loadTelemetry = async () => {
+        if (!apiFetch || !sliceId) return;
+        setTelemetry({ loading: true });
+        try {
+            const res  = await apiFetch(`/slices/${sliceId}/vms/${node.id}/telemetry`);
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || "Error al consultar telemetría");
+            setTelemetry(data);
+        } catch (e) {
+            setTelemetry({ available: false, reason: e.message });
+        }
+    };
 
     // Una VM está "desplegada" si trae campos que solo el servidor inyecta.
     // En Modo Edición, las VMs NUEVAS (aún no desplegadas) son totalmente
@@ -50,7 +69,7 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, editMode = fals
     const selectedImage = availableImages?.find(i => i.id === f.image_id);
     const zoneIdNum = zoneId ? Number(zoneId) : null;
 
-    useEffect(() => { setF(initForm(node)); setActiveTab("props"); }, [node.id]);
+    useEffect(() => { setF(initForm(node)); setActiveTab("props"); setPickedCustom(false); setTelemetry(null); }, [node.id]);
 
     useEffect(() => {
         if (f.internet_access !== 1 || !apiFetch) return;
@@ -227,16 +246,21 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, editMode = fals
                             {!isReadOnly && (
                                 <div style={{ marginBottom: 9 }}>
                                     <div style={{ fontSize: 9, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 3 }}>Flavor</div>
-                                    <select value={f.flavor_id || ""}
-                                        onChange={e => applyFlavor(e.target.value ? flavors.find(x => x.id === Number(e.target.value)) : null)}
+                                    <select value={f.flavor_id || (pickedCustom ? "custom" : "")}
+                                        onChange={e => {
+                                            const v = e.target.value;
+                                            setPickedCustom(v === "custom");
+                                            applyFlavor(v && v !== "custom" ? flavors.find(x => x.id === Number(v)) : null);
+                                        }}
                                         style={{ ...inp, fontSize: 12, cursor: "pointer" }}>
-                                        <option value="">⚙ Personalizado (recursos libres)</option>
+                                        <option value="" disabled hidden>Selecciona un flavor…</option>
                                         {flavors.map(fl => (
                                             <option key={fl.id} value={fl.id}>
                                                 {fl.name} — {fl.vcpus}c / {Math.round(fl.ram_mb)}MB / {Math.round(fl.disk_gb)}GB
                                                 {fl.visibility === "global" ? " 🌐" : fl.visibility === "project" ? " 👥" : ""}
                                             </option>
                                         ))}
+                                        <option value="custom">⚙ Personalizado (recursos libres)</option>
                                     </select>
                                 </div>
                             )}
@@ -418,10 +442,51 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, editMode = fals
                                 display: "flex", alignItems: "center", justifyContent: "center", gap: 6 })}>
                             <Terminal size={14} color="#ffffff" /> Abrir Consola Web
                         </button>
-                        <button style={btnBase({ width: "100%", background: T.surface, color: T.accent, border: `1px solid ${T.accent}`,
-                            display: "flex", alignItems: "center", justifyContent: "center", gap: 6 })}>
-                            <BarChart2 size={14} /> Ver Telemetría
+                        <button onClick={loadTelemetry}
+                            disabled={sliceStatus !== "ACTIVE" || telemetry?.loading}
+                            style={btnBase({ width: "100%", background: T.surface, color: T.accent, border: `1px solid ${T.accent}`,
+                                opacity: sliceStatus === "ACTIVE" ? 1 : 0.45,
+                                display: "flex", alignItems: "center", justifyContent: "center", gap: 6 })}>
+                            <BarChart2 size={14} /> {telemetry?.loading ? "Consultando…" : "Ver Telemetría"}
                         </button>
+
+                        {telemetry && !telemetry.loading && (
+                            <div style={{
+                                fontSize: 11, borderRadius: 8, padding: "8px 10px",
+                                background: telemetry.available ? T.accentLight : T.redLight,
+                                border: `1px solid ${telemetry.available ? T.accent + "33" : T.red + "33"}`,
+                                color: telemetry.available ? T.text : T.red,
+                            }}>
+                                {telemetry.available ? (
+                                    <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                                        {telemetry.cpu_pct != null && (
+                                            <div><b>CPU:</b> {telemetry.cpu_pct}%</div>
+                                        )}
+                                        {telemetry.ram_pct != null && (
+                                            <div><b>RAM:</b> {telemetry.ram_pct}%{telemetry.ram_used_mb != null ? ` (${telemetry.ram_used_mb} MB)` : ""}
+                                                {telemetry.ram_max_mb != null ? ` / ${telemetry.ram_max_mb} MB` : ""}</div>
+                                        )}
+                                        {telemetry.cpu_pct == null && telemetry.num_cpus != null && (
+                                            <div style={{ fontSize: 9.5, color: T.textFaint }}>
+                                                Nova no reporta %CPU instantáneo, solo tiempo acumulado ({telemetry.num_cpus} vCPU).
+                                            </div>
+                                        )}
+                                        {telemetry.uptime_seconds != null && (
+                                            <div><b>Uptime:</b> {Math.floor(telemetry.uptime_seconds / 3600)}h {Math.floor((telemetry.uptime_seconds % 3600) / 60)}m</div>
+                                        )}
+                                        <div style={{ fontSize: 9, color: T.textFaint, marginTop: 2 }}>
+                                            Fuente: {telemetry.source === "nova_diagnostics" ? "Nova (OpenStack)" : "QEMU vía SSH"}
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <div style={{ display: "flex", gap: 5 }}>
+                                        <AlertTriangle size={11} style={{ flexShrink: 0, marginTop: 1 }} />
+                                        <span>{telemetry.reason || "Telemetría no disponible para esta VM."}</span>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
                         {/* En Modo Edición: permitir eliminar esta VM ya desplegada (REQ-US-14) */}
                         {editMode && (
                             <button onClick={() => { onDelete(node.id); onClose(); }}

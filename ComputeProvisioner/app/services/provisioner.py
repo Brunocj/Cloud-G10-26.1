@@ -184,7 +184,10 @@ class Provisioner:
                 for tap in taps:
                     tap_name = getattr(tap, "tap_name", None) or tap.get("tap_name")
                     mac      = getattr(tap, "mac", None) or tap.get("mac")
-                    executor.hotplug_nic(vm.vm_id, slice_id, tap_name, mac)
+                    pci_slot = getattr(tap, "pci_slot", None)
+                    if pci_slot is None and isinstance(tap, dict):
+                        pci_slot = tap.get("pci_slot")
+                    executor.hotplug_nic(vm.vm_id, slice_id, tap_name, mac, pci_slot=pci_slot)
             logger.info("[CP] ✅ Hot-plug completado para VM %s", vm.vm_id)
             return VMResult(vm_id=vm.vm_id, worker_ip=vm.worker_ip, vnc_port=vm.vnc_port)
         except Exception as exc:

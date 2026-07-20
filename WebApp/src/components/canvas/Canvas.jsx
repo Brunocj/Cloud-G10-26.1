@@ -7,7 +7,13 @@ import { AzureVm, AzureNetwork, UbuntuLogo, WindowsLogo } from "../ui/AzureIcons
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/** Build interface label map: ens3 = management; data links start at ens4. */
+/**
+ * Adivina el label ens3=gestión/ens4+=enlaces contando posiciones en el array
+ * de edges actual. SOLO es un fallback para topologías en modo diseño (aún no
+ * desplegadas) — para un slice ya desplegado, el nombre real viene persistido
+ * desde el backend (ed.fromIface/ed.toIface) y ese se usa en su lugar, porque
+ * este conteo se desincroniza apenas se agrega o borra un enlace.
+ */
 const buildIfaceMap = (edges) => {
     const cnt = {}, map = {};
     edges.forEach(ed => {
@@ -299,6 +305,7 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
     // ── Edge delete (inside edge's onPointerDown) ─────────────────────────────
 
     const onEdgePointerDown = (e, edgeId) => {
+        if (!isDesignMode) return; // solo se puede borrar un enlace en modo diseño/edición
         if (e.button !== 0) return;
         e.preventDefault();
         const world = toWorld(e);
@@ -551,7 +558,14 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                             const A = nodes.find(n => n.id === ed.from);
                             const B = nodes.find(n => n.id === ed.to);
                             if (!A || !B) return null;
-                            const iface = ifaceMap[ed.id] || {};
+                            // El backend persiste el ensN real (calculado al desplegar/
+                            // extender, ver SliceManager placement_worker) — se usa ese
+                            // si existe. El mapa contado localmente (ifaceMap) es solo un
+                            // fallback para topologías aún no desplegadas (modo diseño),
+                            // donde no hay una interfaz real todavía que mostrar.
+                            const iface = (ed.fromIface || ed.toIface)
+                                ? { fromIface: ed.fromIface, toIface: ed.toIface }
+                                : (ifaceMap[ed.id] || {});
                             const fx = A.x + 0.28 * (B.x - A.x), fy = A.y + 0.28 * (B.y - A.y);
                             const tx = A.x + 0.72 * (B.x - A.x), ty = A.y + 0.72 * (B.y - A.y);
                             return (
@@ -561,11 +575,11 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                                         data-edge-id={ed.id} data-from={ed.from} data-to={ed.to}
                                         stroke={T.accentMid} strokeWidth="2.5" opacity="0.5" strokeLinecap="round"
                                         style={{ pointerEvents: "none" }} />
-                                    {/* Wide invisible hit area for delete */}
+                                    {/* Wide invisible hit area for delete — solo interactivo en modo diseño/edición */}
                                     <line x1={A.x} y1={A.y} x2={B.x} y2={B.y}
                                         data-edge-id={ed.id} data-from={ed.from} data-to={ed.to}
                                         stroke="transparent" strokeWidth="18" strokeLinecap="round"
-                                        style={{ cursor: "pointer" }}
+                                        style={{ cursor: isDesignMode ? "pointer" : "default" }}
                                         onPointerDown={ev => onEdgePointerDown(ev, ed.id)} />
                                     {/* Interface labels */}
                                     <g id={`edge-labels-${ed.id}`} style={{ pointerEvents: "none" }}>
@@ -600,6 +614,9 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                             const isEditing    = editId   === node.id;
                             const isLinkTarget = mode === "link" && linkFrom && linkFrom !== node.id;
                             const ram = node.ram >= 1024 ? `${node.ram / 1024}GB` : `${node.ram}MB`;
+                            // Ícono real subido para esta imagen (ver ImagePanel) — si no hay uno
+                            // cargado todavía, cae al match por nombre como antes.
+                            const nodeImage = imageList?.find(i => i.id === node.image_id);
                             const isUbuntu = node.image?.toLowerCase().includes("ubuntu");
                             const isWindows = node.image?.toLowerCase().includes("win");
 
@@ -627,7 +644,12 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
 
                                     {/* Operating System Badge Logo inside node card */}
                                     <g transform="translate(22, -18)" style={{ pointerEvents: "none" }}>
-                                        {isUbuntu ? (
+                                        {nodeImage?.icon_data ? (
+                                            <foreignObject x="-6" y="-6" width="12" height="12" style={{ overflow: "visible" }}>
+                                                <img src={nodeImage.icon_data} alt="" width={12} height={12}
+                                                    style={{ borderRadius: 2, objectFit: "contain" }} />
+                                            </foreignObject>
+                                        ) : isUbuntu ? (
                                             <UbuntuLogo size={11} />
                                         ) : isWindows ? (
                                             <WindowsLogo size={11} />

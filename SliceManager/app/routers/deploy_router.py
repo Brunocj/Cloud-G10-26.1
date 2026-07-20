@@ -819,3 +819,36 @@ async def force_destroy(
         "message":  f"Tu slice \"{slice_name}\" fue destruido forzosamente. Motivo: {reason}",
     })
     return result
+
+
+# ── Telemetría por VM (REQ: "Ver Telemetría" en el NodeEditor) ────────────────
+
+@router.get("/{slice_id}/vms/{vm_name}/telemetry", status_code=200)
+def get_vm_telemetry_endpoint(
+    slice_id: int,
+    vm_name:  str,
+    db:       Session     = Depends(get_db),
+    user:     CurrentUser = Depends(get_current_user),
+):
+    """
+    Uso en vivo (CPU/RAM) de una VM puntual.
+
+    Sin fuente común entre zonas: OpenStack usa el diagnóstico de Nova por
+    instancia; Linux Cluster consulta el proceso QEMU vía SSH+ps (no hay
+    métricas por VM en el libvirt_exporter actual — solo reporta un conteo
+    de dominios por worker, no series por VM).
+    """
+    from app.services.telemetry_service import get_vm_telemetry
+
+    db_slice = db.query(Slice).filter(Slice.id == slice_id).first()
+    if not db_slice:
+        raise HTTPException(status_code=404, detail="Slice no encontrado")
+    if not can_operate_slice(db, user, db_slice):
+        raise HTTPException(status_code=403, detail="No tienes permiso para ver este slice.")
+
+    vm = db.query(Vm).filter(Vm.slice_id == slice_id, Vm.name == vm_name).first()
+    if not vm:
+        raise HTTPException(status_code=404, detail="VM no encontrada en este slice.")
+
+    worker = db.query(Worker).filter(Worker.id == vm.worker_id).first() if vm.worker_id else None
+    return get_vm_telemetry(vm, worker)

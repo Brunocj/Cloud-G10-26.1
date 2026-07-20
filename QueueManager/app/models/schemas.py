@@ -30,6 +30,9 @@ class TapInterface(BaseModel):
     """
     tap_name: str = Field(..., description="Nombre de la interfaz TAP, ej: tap-vm1-0")
     mac:      str = Field(..., description="Dirección MAC, ej: 52:54:00:A3:C7:00")
+    pci_slot: Optional[int] = Field(
+        None, description="Slot PCI explícito (ensN real) — reenviado tal cual al Compute Provisioner."
+    )
 
 
 class VMSpec(BaseModel):

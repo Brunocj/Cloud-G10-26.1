@@ -17,6 +17,7 @@ class ImageResponse(BaseModel):
     cloud_init_support: int = 0
     default_username: Optional[str] = None
     default_password: Optional[str] = None
+    icon_data: Optional[str] = None   # data URI del ícono (ej. "data:image/png;base64,...")
 
     class Config:
         from_attributes = True

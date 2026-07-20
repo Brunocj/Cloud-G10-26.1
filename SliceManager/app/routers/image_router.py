@@ -49,6 +49,49 @@ _ACTIVE_VM_STATES = ("DRAFT", "PROVISIONING", "ACTIVE", "PENDING_APPROVAL")
 OPENSTACK_AZ_ID = int(os.getenv("OPENSTACK_AZ_ID", "2"))
 
 
+# ── Helper de ícono ──────────────────────────────────────────────────────────
+
+ICON_MAX_BYTES = 150 * 1024  # 150 KB crudos — de sobra para un logo PNG/SVG
+ICON_CONTENT_TYPES = {
+    "image/png":     "image/png",
+    "image/jpeg":     "image/jpeg",
+    "image/svg+xml": "image/svg+xml",
+    "image/webp":    "image/webp",
+}
+
+
+async def _encode_icon(icon: UploadFile) -> str:
+    """
+    Valida y codifica un ícono subido como data URI (base64), listo para
+    guardar en Image.icon_data y servir directo desde la fila — sin depender
+    de un file server estático ni del NFS (que ya está casi lleno).
+    """
+    import base64
+
+    content_type = ICON_CONTENT_TYPES.get((icon.content_type or "").lower())
+    if not content_type:
+        ext = os.path.splitext(icon.filename or "")[1].lower()
+        content_type = {
+            ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".svg": "image/svg+xml", ".webp": "image/webp",
+        }.get(ext)
+    if not content_type:
+        raise HTTPException(
+            status_code=400,
+            detail="Formato de ícono no soportado. Use PNG, JPEG, SVG o WEBP.",
+        )
+
+    raw = await icon.read()
+    if len(raw) > ICON_MAX_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"El ícono pesa {len(raw)//1024} KB — el máximo permitido es {ICON_MAX_BYTES//1024} KB.",
+        )
+
+    encoded = base64.b64encode(raw).decode("ascii")
+    return f"data:{content_type};base64,{encoded}"
+
+
 # ── Helpers SSH ──────────────────────────────────────────────────────────────
 
 def _ssh_exec(worker: dict, command: str) -> tuple:
@@ -252,6 +295,7 @@ def list_images(db: Session = Depends(get_db), current_user: CurrentUser = Depen
             cloud_init_support=img.cloud_init_support or 0,
             default_username=img.default_username,
             default_password=img.default_password,
+            icon_data=img.icon_data,
         ))
         db_image_names.add(img.name)
 
@@ -357,10 +401,12 @@ async def upload_image(
     default_username: Optional[str] = Form(None),
     default_password: Optional[str] = Form(None),
     file: UploadFile = File(...),
+    icon: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Sube un archivo de imagen al NFS y lo registra en BD, asociado a una AZ."""
+    icon_data = await _encode_icon(icon) if icon is not None else None
     # Si la imagen no soporta cloud-init, las credenciales son fijas y deben registrarse
     if not cloud_init_support and not (default_username and default_password):
         raise HTTPException(
@@ -445,6 +491,8 @@ async def upload_image(
         existing.cloud_init_support = cloud_init_support
         existing.default_username = default_username
         existing.default_password = default_password
+        if icon_data is not None:
+            existing.icon_data = icon_data
         db.commit()
         db.refresh(existing)
         logger.info("Imagen '%s' reactivada → %s", name, final_path)
@@ -465,6 +513,7 @@ async def upload_image(
         cloud_init_support=cloud_init_support,
         default_username=default_username,
         default_password=default_password,
+        icon_data=icon_data,
     )
     db.add(nueva_imagen)
     db.commit()
@@ -477,6 +526,36 @@ async def upload_image(
         "path": final_path,
         "message": f"Imagen '{name}' registrada correctamente.",
     }
+
+
+@router.post("/{image_id}/icon", status_code=200)
+async def set_image_icon(
+    image_id: int,
+    icon: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """
+    Sube/reemplaza SOLO el ícono de una imagen ya existente (Cirros, Ubuntu,
+    la que sea) sin tener que volver a subir el disco entero. Se guarda como
+    data URI en Image.icon_data — no toca el NFS ni requiere un file server
+    estático nuevo.
+    """
+    img = db.query(Image).filter(Image.id == image_id).first()
+    if not img:
+        raise HTTPException(status_code=404, detail="Imagen no encontrada")
+
+    # Misma regla de propiedad que el resto de operaciones sobre imágenes.
+    if img.user_id != current_user.user_id and not current_user.can_manage_all():
+        raise HTTPException(
+            status_code=403,
+            detail="No tiene permisos para modificar el ícono de esta imagen.",
+        )
+
+    img.icon_data = await _encode_icon(icon)
+    db.commit()
+    logger.info("Ícono actualizado para imagen '%s' (id=%d)", img.name, img.id)
+    return {"id": img.id, "icon_data": img.icon_data, "message": "Ícono actualizado correctamente."}
 
 
 @router.delete("/{image_id}", status_code=200)

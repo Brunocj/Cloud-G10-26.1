@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import defaultdict
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -123,6 +124,26 @@ def _serialize_slice(t: Slice, users_map: dict = None, projects_map: dict = None
                     node["vnc_port"]    = d_vm.get("vnc_port")
                     node["vnc_url"]     = d_vm.get("vnc_url")       # token VNC de OpenStack (None en Linux Cluster)
                     node["external_ip"] = d_vm.get("external_ip")   # IP externa asignada (Linux Cluster o puerto provider de OpenStack)
+
+    # Interfaz real (ensN) de cada extremo del enlace, calculada y persistida
+    # por placement_worker al desplegar/extender — reemplaza la adivinanza
+    # que hacía el frontend contando posiciones en el array de edges actual
+    # (se desincronizaba apenas se borraba un enlace). Match por par de VMs,
+    # no por id, porque connection_id no coincide con el id de edge del front.
+    deployed_links = s_json.get("deployed_links", [])
+    if deployed_links:
+        links_by_pair = defaultdict(list)
+        for dl in deployed_links:
+            links_by_pair[frozenset((dl.get("vm1_id"), dl.get("vm2_id")))].append(dl)
+        for edge in edges:
+            e_vm1 = edge.get("from", edge.get("source"))
+            e_vm2 = edge.get("to",   edge.get("target"))
+            bucket = links_by_pair.get(frozenset((e_vm1, e_vm2)))
+            if bucket:
+                dl = bucket.pop(0)
+                same_order = dl.get("vm1_id") == e_vm1
+                edge["fromIface"] = dl.get("vm1_iface") if same_order else dl.get("vm2_iface")
+                edge["toIface"]   = dl.get("vm2_iface") if same_order else dl.get("vm1_iface")
 
     review = s_json.get("review")
 

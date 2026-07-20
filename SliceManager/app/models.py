@@ -2,7 +2,7 @@
 from sqlalchemy import Boolean, Column, Float, ForeignKey, Integer, JSON, String
 from sqlalchemy.ext.mutable import MutableDict
 from sqlalchemy.orm import relationship
-from sqlalchemy.dialects.mysql import TINYINT
+from sqlalchemy.dialects.mysql import TINYINT, MEDIUMTEXT
 from sqlalchemy.ext.declarative import declarative_base
 
 Base = declarative_base()
@@ -95,6 +95,10 @@ class Image(Base):
     cloud_init_support = Column(TINYINT, default=0)
     default_username = Column(String(50), nullable=True)
     default_password = Column(String(100), nullable=True)
+    # Ícono de la VM en el canvas, como data URI (ej. "data:image/png;base64,...").
+    # Subido por separado del disco de la imagen — no depende del NFS ni de
+    # ningún servidor de archivos estático, se sirve directo desde la fila.
+    icon_data = Column(MEDIUMTEXT, nullable=True)
 
     availability_zone = relationship('AvailabilityZone')
 

@@ -5,8 +5,8 @@ Basado en conexiones (enlaces lógicos) para soportar cualquier topología.
 """
 
 from enum import Enum
-from typing import List, Optional
-from pydantic import BaseModel, Field
+from typing import List, Literal, Optional
+from pydantic import BaseModel, Field, field_validator
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -20,8 +20,20 @@ class ProvisioningStatus(str, Enum):
 # Sub-modelos de entrada
 # ---------------------------------------------------------------------------
 class SecurityRule(BaseModel):
-    allow_port: int
-    protocol: str = "tcp"
+    """
+    Regla de firewall de una VM. `protocol`/`allow_port` terminan interpolados
+    directo en un comando `iptables` vía SSH (network_executor.py) para el
+    Linux Cluster — sin este allowlist + rango, un valor arbitrario (el
+    frontend restringe el <select>, pero nada impide pegarle directo a la API)
+    permitía inyección de comandos con privilegios root en el worker.
+    """
+    allow_port: int = Field(..., ge=1, le=65535)
+    protocol: Literal["tcp", "udp", "icmp"] = "tcp"
+
+    @field_validator("protocol", mode="before")
+    @classmethod
+    def _normalize_protocol(cls, v):
+        return v.lower() if isinstance(v, str) else v
 
 class NetworkLink(BaseModel):
     """Representa un 'cable' (Capa 2) entre dos VMs en la infraestructura."""
