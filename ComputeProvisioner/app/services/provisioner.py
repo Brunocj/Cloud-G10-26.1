@@ -203,16 +203,22 @@ class Provisioner:
         """
         logger.info("Destroy slice=%s, vms=%d, AZ=%d", request.slice_id, len(vm_records), request.availability_zone_id)
 
-        if not vm_records:
-            logger.warning("No hay VMs registradas para slice=%s", request.slice_id)
+        unplugs = getattr(request, "unplugs", []) or []
+        is_shrink = getattr(request, "mode", "full") == "shrink"
+
+        if not vm_records and not (is_shrink and unplugs):
+            # Shrink de SOLO un enlace (sin VMs eliminadas) llega con vms=[] pero
+            # unplugs=[...] — antes esto retornaba SUCCESS acá mismo sin llegar
+            # nunca al bloque de abajo, así que el QMP device_del/netdev_del de
+            # la NIC en la VM viva nunca se ejecutaba (el TAP del host sí se
+            # borraba desde NetworkOrchestrator, pero la interfaz quedaba viva
+            # dentro del QEMU en ejecución).
+            logger.warning("No hay VMs ni unplugs para slice=%s", request.slice_id)
             return DestroyReply(
                 slice_id=request.slice_id,
                 request_id=request.request_id,
                 status=DeployStatus.SUCCESS,
             )
-
-        unplugs = getattr(request, "unplugs", []) or []
-        is_shrink = getattr(request, "mode", "full") == "shrink"
 
         if request.availability_zone_id == 2:
             # Estrategia: OpenStack Nova API

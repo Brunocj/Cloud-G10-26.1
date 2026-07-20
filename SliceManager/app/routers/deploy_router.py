@@ -546,6 +546,8 @@ async def _shrink_slice(db, user, db_slice, zone_id, s_json,
         "new_nodes":        new_nodes_all,
         "new_edges":        new_edges_all,
         "external_ips":     [d.get("external_ip") for d in vms_to_destroy if d.get("external_ip")],
+        "requested_by":     user.user_id,
+        "requested_at":     datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
     }
     db_slice.slice_json = dict(s_json)
     db_slice.status = "PROVISIONING"

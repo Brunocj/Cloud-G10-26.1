@@ -59,12 +59,17 @@ class WorkflowOrchestrator:
         Orquesta el despliegue de un slice siguiendo la nueva Saga.
 
         Orden ESTRICTO: Placement → Network → Compute → StateUpdate
+
+        Cualquier excepción no controlada durante los pasos (no solo los
+        fallos "esperados" como timeout o status != success) se captura acá
+        y se notifica como ERROR al Slice Manager. Antes, una excepción
+        inesperada se perdía silenciosamente en el handler de NATS (que solo
+        la logueaba tras el ack), dejando el slice trabado en PROVISIONING
+        para siempre y sus VMs nuevas en DRAFT reteniendo el vnc_port
+        asignado indefinidamente (agotando el pool de 99 puertos/worker).
         """
         slice_id = request.slice_id
         az_id    = request.availability_zone_id
-
-        logger.info("=" * 70)
-        logger.info("[SAGA][%s] Iniciando deploy — az_id=%d", slice_id, az_id)
 
         state = OperationState(
             slice_id=slice_id,
@@ -73,6 +78,23 @@ class WorkflowOrchestrator:
             vms=request.vms,
         )
         await self._save_state(state)
+
+        try:
+            return await self._run_deploy_steps(request, state, slice_id, az_id)
+        except Exception as exc:
+            logger.error("[SAGA][%s] Excepción no controlada en deploy: %s",
+                         slice_id, exc, exc_info=True)
+            return await self._fail_deploy(state, f"Excepción no controlada: {exc}")
+
+    async def _run_deploy_steps(
+        self,
+        request: DeploySliceRequest,
+        state: OperationState,
+        slice_id: str,
+        az_id: int,
+    ) -> DeploySliceResponse:
+        logger.info("=" * 70)
+        logger.info("[SAGA][%s] Iniciando deploy — az_id=%d", slice_id, az_id)
 
         # ── Paso 1: PLACEMENT ─────────────────────────────────────────────────
         logger.info("[SAGA][%s] Paso 1/4 — PLACEMENT (slice.placement.process) …", slice_id)
@@ -206,11 +228,13 @@ class WorkflowOrchestrator:
         Pasos:
             0. Network destroy  (VLANs, TAPs, OVS, puertos Neutron)
             1. Compute destroy  (terminar instancias)
+
+        Cualquier excepción no controlada se notifica como ERROR al Slice
+        Manager (ver comentario equivalente en deploy()) en vez de perderse
+        silenciosamente.
         """
         slice_id = request.slice_id
         az_id    = getattr(request, "availability_zone_id", AZ_ID_LINUX)
-
-        logger.info("[SAGA][%s] Iniciando destroy — az_id=%d", slice_id, az_id)
 
         state = OperationState(
             slice_id=slice_id,
@@ -218,6 +242,22 @@ class WorkflowOrchestrator:
             operation="destroy",
         )
         await self._save_state(state)
+
+        try:
+            return await self._run_destroy_steps(request, state, slice_id, az_id)
+        except Exception as exc:
+            logger.error("[SAGA][%s] Excepción no controlada en destroy: %s",
+                         slice_id, exc, exc_info=True)
+            return await self._fail_destroy(state, f"Excepción no controlada: {exc}")
+
+    async def _run_destroy_steps(
+        self,
+        request: DestroySliceRequest,
+        state: OperationState,
+        slice_id: str,
+        az_id: int,
+    ) -> DestroySliceResponse:
+        logger.info("[SAGA][%s] Iniciando destroy — az_id=%d", slice_id, az_id)
 
         # ── Paso 0: Compute (terminar instancias) ─────────────────────────────
         logger.info("[SAGA][%s] Paso 0: Destruyendo instancias/VMs …", slice_id)

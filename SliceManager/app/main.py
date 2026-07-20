@@ -23,6 +23,7 @@ from app.services.placement_worker import process_placement_worker, backfill_mgm
 from app.services.nats_listener import nats_result_listener
 from app.services.gc_scheduler import gc_scheduler_task
 from app.services.ttl_scheduler import ttl_scheduler_task
+from app.services.stuck_ops_scheduler import stuck_ops_scheduler_task
 
 # Creamos las tablas si no existen
 Base.metadata.create_all(bind=engine)
@@ -41,6 +42,7 @@ async def lifespan(app: FastAPI):
     result_task = asyncio.create_task(nats_result_listener())
     gc_task = asyncio.create_task(gc_scheduler_task())
     ttl_task = asyncio.create_task(ttl_scheduler_task())
+    stuck_ops_task = asyncio.create_task(stuck_ops_scheduler_task())
 
     yield
 
@@ -49,6 +51,7 @@ async def lifespan(app: FastAPI):
     result_task.cancel()
     gc_task.cancel()
     ttl_task.cancel()
+    stuck_ops_task.cancel()
     await nats_producer.disconnect()
 
 app = FastAPI(title="Slice Manager Orchestrator", lifespan=lifespan)
