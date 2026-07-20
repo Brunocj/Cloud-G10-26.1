@@ -33,6 +33,7 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, editMode = fals
         internet_access: n.internet_access || 0,
         external_ip:     n.external_ip     || "",
         firewall_rules:  n.firewall_rules  || [],
+        ingress_rules:   n.ingress_rules   || [],
     });
 
     const [activeTab, setActiveTab] = useState("props");
@@ -105,6 +106,14 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, editMode = fals
     const addRule    = () => setF(p => ({ ...p, firewall_rules: [...p.firewall_rules, mkRule()] }));
     const updateRule = (id, key, val) => setF(p => ({ ...p, firewall_rules: p.firewall_rules.map(r => r.id === id ? { ...r, [key]: val } : r) }));
     const deleteRule = (id) => setF(p => ({ ...p, firewall_rules: p.firewall_rules.filter(r => r.id !== id) }));
+
+    // Reglas de entrada desde Internet (AWS-style): a diferencia de firewall_rules
+    // (VM↔VM dentro del slice), estas solo se evalúan en el camino IP externa/VPN
+    // → VM, y son deny-by-default — sin reglas, ni siquiera el SSH que promete el
+    // checkbox de abajo entra. Por eso se auto-siembra TCP/22 al asignar la IP.
+    const addIngressRule    = () => setF(p => ({ ...p, ingress_rules: [...p.ingress_rules, mkRule()] }));
+    const updateIngressRule = (id, key, val) => setF(p => ({ ...p, ingress_rules: p.ingress_rules.map(r => r.id === id ? { ...r, [key]: val } : r) }));
+    const deleteIngressRule = (id) => setF(p => ({ ...p, ingress_rules: p.ingress_rules.filter(r => r.id !== id) }));
 
     // Drag
     const panelRef  = useRef();
@@ -403,7 +412,20 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, editMode = fals
                                         {!f.external_ip && <span style={{ fontSize: 8, color: T.textMuted, fontStyle: "italic" }}>Sin acceso inbound si no se asigna</span>}
                                     </div>
                                     <select value={f.external_ip||""} disabled={isReadOnly}
-                                        onChange={e => u("external_ip", e.target.value)}
+                                        onChange={e => {
+                                            const val = e.target.value;
+                                            setF(prev => {
+                                                const next = { ...prev, external_ip: val };
+                                                // Al asignar la IP por primera vez, sembrar TCP/22 en las
+                                                // reglas de entrada — sin esto el SSH prometido acá abajo
+                                                // quedaría bloqueado por el deny-by-default de esas reglas.
+                                                if (val && !prev.external_ip) {
+                                                    const hasSsh = prev.ingress_rules.some(r => r.protocol === "TCP" && String(r.port) === "22");
+                                                    if (!hasSsh) next.ingress_rules = [...prev.ingress_rules, { id: `r${Date.now()}`, protocol: "TCP", port: 22 }];
+                                                }
+                                                return next;
+                                            });
+                                        }}
                                         style={{ ...inp, fontSize: 12, cursor: "pointer" }}>
                                         <option value="">— Sin IP VPN (solo NAT saliente) —</option>
                                         <option value="random">— IP aleatoria (el sistema elige del pool) —</option>
@@ -416,6 +438,77 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, editMode = fals
                                             <code style={{ fontFamily: "monospace", fontSize: 10 }}>ssh usuario@{f.external_ip === "random" ? "<IP_ASIGNADA>" : f.external_ip}</code>
                                         </div>
                                     )}
+                                </div>
+                            )}
+
+                            {f.internet_access === 1 && f.external_ip && (
+                                <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px dashed ${T.border}` }}>
+                                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+                                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                            <Shield size={12} color={T.accent} />
+                                            <span style={{ fontSize: 11, fontWeight: 700, color: T.text }}>Reglas de Entrada desde Internet</span>
+                                        </div>
+                                        {!isReadOnly && (
+                                            <button onClick={addIngressRule} style={{
+                                                fontSize: 10, fontWeight: 700, fontFamily: "inherit",
+                                                background: T.accentLight, color: T.accent,
+                                                border: `1px solid ${T.accent}44`, borderRadius: 6,
+                                                padding: "3px 9px", cursor: "pointer",
+                                                display: "flex", alignItems: "center", gap: 4,
+                                            }}>
+                                                <Plus size={10} /> Añadir Regla
+                                            </button>
+                                        )}
+                                    </div>
+
+                                    {f.ingress_rules.length > 0 && (
+                                        <div style={{ display: "grid", gridTemplateColumns: "90px 1fr 28px", gap: 6, marginBottom: 6 }}>
+                                            {["Protocolo","Puerto",""].map(h => (
+                                                <div key={h} style={{ fontSize: 9, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.06em" }}>{h}</div>
+                                            ))}
+                                        </div>
+                                    )}
+
+                                    <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                                        {f.ingress_rules.map(rule => (
+                                            <div key={rule.id} style={{ display: "grid", gridTemplateColumns: "90px 1fr 28px", gap: 6, alignItems: "center" }}>
+                                                <select value={rule.protocol} disabled={isReadOnly}
+                                                    onChange={e => updateIngressRule(rule.id, "protocol", e.target.value)}
+                                                    style={{ ...inp, fontSize: 11, padding: "5px 4px", cursor: "pointer" }}>
+                                                    {["TCP","UDP","ICMP"].map(p => <option key={p}>{p}</option>)}
+                                                </select>
+                                                <input
+                                                    type={rule.protocol === "ICMP" ? "text" : "number"}
+                                                    value={rule.protocol === "ICMP" ? "—" : rule.port}
+                                                    disabled={isReadOnly || rule.protocol === "ICMP"}
+                                                    placeholder={rule.protocol === "ICMP" ? "—" : "ej. 80"}
+                                                    min={1} max={65535}
+                                                    onChange={e => updateIngressRule(rule.id, "port", e.target.value)}
+                                                    style={{ ...inp, fontSize: 12, textAlign: "center", background: rule.protocol === "ICMP" ? T.surfaceElevated : undefined }}
+                                                />
+                                                {!isReadOnly ? (
+                                                    <button onClick={() => deleteIngressRule(rule.id)} style={{
+                                                        background: T.redLight, border: `1px solid ${T.red}22`,
+                                                        borderRadius: 6, cursor: "pointer", color: T.red,
+                                                        display: "flex", alignItems: "center", justifyContent: "center", padding: "5px",
+                                                    }}>
+                                                        <X size={11} />
+                                                    </button>
+                                                ) : <div />}
+                                            </div>
+                                        ))}
+                                        {f.ingress_rules.length === 0 && (
+                                            <div style={{ fontSize: 11, color: T.textFaint, textAlign: "center", padding: "10px 0" }}>
+                                                {isReadOnly ? "Sin reglas configuradas" : "Sin reglas — haz clic en \"Añadir Regla\""}
+                                            </div>
+                                        )}
+                                    </div>
+                                    <div style={{ fontSize: 9, color: T.textFaint, marginTop: 8, lineHeight: 1.5, display: "flex", gap: 5 }}>
+                                        <Info size={10} style={{ flexShrink: 0, marginTop: 1 }} />
+                                        Solo estos puertos son alcanzables desde la IP externa/VPN. Todo lo demás
+                                        se deniega — distinto del Firewall Interno, que solo controla el tráfico
+                                        entre VMs del propio slice.
+                                    </div>
                                 </div>
                             )}
                             {f.internet_access === 0 && (

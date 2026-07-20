@@ -432,10 +432,9 @@ async def process_placement_worker():
                 # slice_json (`firewall_rules`, del NodeEditor) y hay que adjuntarlas
                 # a cada extremo del enlace como vmN_security_rules, o el Network
                 # Orchestrator las recibe vacías y no aplica nada.
-                def _security_rules_for(vm_name: str) -> list:
-                    node = next((n for n in slice_json.get("nodes", []) if n.get("id") == vm_name), {})
+                def _rules_from(node: dict, key: str) -> list:
                     out = []
-                    for r in node.get("firewall_rules", []) or []:
+                    for r in node.get(key, []) or []:
                         proto = str(r.get("protocol", "tcp")).lower()
                         if proto == "icmp":
                             out.append({"allow_port": 0, "protocol": "icmp"})
@@ -445,6 +444,19 @@ async def process_placement_worker():
                         except (TypeError, ValueError):
                             continue  # regla sin puerto válido → se ignora
                     return out
+
+                def _security_rules_for(vm_name: str) -> list:
+                    node = next((n for n in slice_json.get("nodes", []) if n.get("id") == vm_name), {})
+                    return _rules_from(node, "firewall_rules")
+
+                # Reglas de entrada desde Internet (AWS-style, REQ nuevo): a
+                # diferencia de firewall_rules (VM↔VM dentro del slice, se
+                # adjunta a cada TAP de enlace), estas viajan por VM en
+                # VMNetworkSpec.ingress_rules — el Network Orchestrator las
+                # aplica solo en el camino IP externa/VPN → VM, deny-by-default.
+                def _ingress_rules_for(vm_name: str) -> list:
+                    node = next((n for n in slice_json.get("nodes", []) if n.get("id") == vm_name), {})
+                    return _rules_from(node, "ingress_rules")
 
                 # ── Q-in-Q (802.1ad): S-VID por slice + C-VID reutilizable ────
                 # El C-VID de cada enlace es el tag interno; el S-VID aísla el
@@ -780,6 +792,7 @@ async def process_placement_worker():
                         "tap_interfaces":  vms_payload_data[vm.name]["tap_interfaces"],
                         "internet_access": getattr(vm, 'internet_access', 0),
                         "external_ip":     vm.external_ip,
+                        "ingress_rules":   _ingress_rules_for(vm.name),
                         "internal_ip":     ip_interna_asignada,
                         "vm_user":         vm_user,
                         "vm_password":     vm_password,

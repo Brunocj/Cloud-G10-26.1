@@ -27,7 +27,12 @@ class SecurityRule(BaseModel):
     frontend restringe el <select>, pero nada impide pegarle directo a la API)
     permitía inyección de comandos con privilegios root en el worker.
     """
-    allow_port: int = Field(..., ge=1, le=65535)
+    # ge=0: ICMP no tiene puerto — tanto WebApp como placement_worker codifican
+    # esa regla como allow_port=0. Sin el 0 acá, Pydantic rechaza el mensaje
+    # ENTERO (DeployNetworkRequest se construye de una vez, no por-regla) y
+    # tira abajo el deploy completo del slice apenas alguien agrega una regla
+    # ICMP — no solo esa regla, todo el resto de VMs/enlaces del mensaje.
+    allow_port: int = Field(..., ge=0, le=65535)
     protocol: Literal["tcp", "udp", "icmp"] = "tcp"
 
     @field_validator("protocol", mode="before")
@@ -73,6 +78,10 @@ class VMNetworkSpec(BaseModel):
     tap_interfaces:  List[TapInterface] = Field(default_factory=list)
     internet_access: int = 0
     external_ip:     Optional[str] = None
+    # Reglas de entrada desde Internet (AWS-style): deny-by-default en el
+    # camino IP externa/VPN → VM. Distintas de SecurityRule en NetworkLink
+    # (esas gobiernan tráfico VM↔VM dentro del slice, por TAP de enlace).
+    ingress_rules:   List[SecurityRule] = Field(default_factory=list)
     internal_ip:     str
     # Modo Edición (REQ-US-14): VM ya desplegada — no crear su puerto de
     # gestión; solo importan los puertos de los enlaces nuevos que la tocan.

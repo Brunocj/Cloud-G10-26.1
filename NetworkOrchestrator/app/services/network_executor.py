@@ -330,19 +330,54 @@ class NetworkExecutor:
                     )
                     ssh.exec(cmd_dnat)
 
-                    # Forward explícito para permitir el flujo de entrada/salida
+                    # Respuestas de conexiones ya establecidas (en cualquier sentido)
+                    # siempre pasan — necesario tanto para lo que la VM inicia como
+                    # para las conexiones entrantes que sí matchean una regla abajo.
                     ssh.exec(
                         f"sudo iptables -I FORWARD 1 "
-                        f"-d {internal_vm_ip}/32 -j ACCEPT"
+                        f"-d {internal_vm_ip}/32 -m state --state ESTABLISHED,RELATED -j ACCEPT"
                     )
                     ssh.exec(
                         f"sudo iptables -I FORWARD 1 "
                         f"-s {internal_vm_ip}/32 -m state --state ESTABLISHED,RELATED -j ACCEPT"
                     )
 
+                    # Ingreso desde Internet (AWS-style, deny-by-default): solo lo
+                    # que el usuario declaró en ingress_rules entra por la IP
+                    # externa/VPN — el resto se DROPPEA. Antes esto era un ACCEPT
+                    # incondicional (`-d {ip} -j ACCEPT`), full-open sin importar
+                    # el Firewall Interno (que ni siquiera corre sobre este camino,
+                    # solo ve TAPs de enlace).
+                    #
+                    # OJO: NO se scopea con `-i {EXTERNAL_INTERFACE}` (br-int) — se
+                    # probó en cluster real y ese match nunca hace hit (contador en
+                    # 0 con tráfico real cruzando la regla): con OVS, el paquete
+                    # DNAT'eado hacia la subred del slice no llega a FORWARD con
+                    # `-i br-int` reportado por netfilter (el datapath de OVS no
+                    # expone la interfaz "puente" ahí como lo haría un bridge Linux
+                    # normal), así que cae a la policy ACCEPT por defecto del chain
+                    # y el filtro queda de adorno. Se matchea solo por destino, igual
+                    # que el ACCEPT incondicional original — el tráfico intra-slice
+                    # sigue sin verse afectado porque nunca pasa por FORWARD (se
+                    # conmuta a nivel L2/OVS, no se rutea).
+                    ingress_rules = getattr(vm, 'ingress_rules', []) or []
+                    for rule in ingress_rules:
+                        proto = getattr(rule, 'protocol', 'tcp')
+                        if proto == "icmp":
+                            cmd = f"sudo iptables -I FORWARD 1 -d {internal_vm_ip}/32 -p icmp -j ACCEPT"
+                        else:
+                            cmd = (
+                                f"sudo iptables -I FORWARD 1 "
+                                f"-d {internal_vm_ip}/32 -p {proto} --dport {rule.allow_port} -j ACCEPT"
+                            )
+                        ssh.exec(cmd)
+                        logger.info(f"[{self.worker_ip}] Ingress ACCEPT {proto}/{getattr(rule, 'allow_port', '-')} -> {internal_vm_ip}")
+
+                    ssh.exec(f"sudo iptables -A FORWARD -d {internal_vm_ip}/32 -j DROP")
+
                     logger.info(
                         f"[{self.worker_ip}] DNAT exterior habilitado ({settings.EXTERNAL_INTERFACE}): "
-                        f"{ext_ip} -> {internal_vm_ip}"
+                        f"{ext_ip} -> {internal_vm_ip} ({len(ingress_rules)} regla(s) de entrada)"
                     )
 
         except Exception as e:
@@ -440,15 +475,31 @@ class NetworkExecutor:
                     exit_code_dnat, _, err_dnat = ssh.exec(cmd_dnat_del)
                     logger.info(f"🔥🔥🔥 [DESTROY]   DNAT para {ext_ip}: exit_code={exit_code_dnat}, err={err_dnat}")
 
-                    # Remover reglas de forward para acceso exterior
+                    # Remover reglas de forward para acceso exterior (ESTABLISHED,RELATED
+                    # en ambos sentidos — dst-based reemplazó al ACCEPT incondicional legado)
                     ssh.exec(
                         f"sudo iptables -D FORWARD "
-                        f"-d {internal_vm_ip}/32 -j ACCEPT || true"
+                        f"-d {internal_vm_ip}/32 -m state --state ESTABLISHED,RELATED -j ACCEPT || true"
                     )
                     ssh.exec(
                         f"sudo iptables -D FORWARD "
                         f"-s {internal_vm_ip}/32 -m state --state ESTABLISHED,RELATED -j ACCEPT || true"
                     )
+                    # Limpieza genérica de las reglas de ingreso (un ACCEPT por
+                    # ingress_rule + el DROP final) — por grep en vez de rearmar
+                    # cada regla 1:1, así no depende de que el payload de destroy
+                    # traiga las mismas ingress_rules que trajo el deploy. El
+                    # patrón `-d {ip}/32 -p ` / `-d {ip}/32 -j DROP` identifica
+                    # SOLO estas reglas (sin `-i`, ver comentario en deploy) sin
+                    # tocar las de REGLA A (que usan `-i/-o ens3`) ni las de
+                    # ESTABLISHED,RELATED (ya borradas arriba explícitamente).
+                    cleanup_ingress = (
+                        f"sudo iptables -S FORWARD | "
+                        f"grep -E -- '-d {internal_vm_ip}/32 (-p |-j DROP)' | "
+                        f"sed 's/^-A /-D /' | "
+                        f"while read r; do sudo iptables $r || true; done"
+                    )
+                    ssh.exec(f"bash -c \"{cleanup_ingress}\"")
                     dnat_count += 1
             logger.info(f"🔥🔥🔥 [DESTROY]   Limpiadas {snat_count} reglas SNAT y {dnat_count} reglas DNAT")
 

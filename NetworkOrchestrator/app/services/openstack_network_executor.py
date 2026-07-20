@@ -460,8 +460,13 @@ class OpenStackNetworkExecutor:
 
             # 5. Crear puerto Neutron para cada VM (red interna del slice + opcional Floating IP)
             port_map = {}
-            # vm_id → lista de puertos Neutron (mgmt + enlaces) para asignar SGs per-VM más abajo
-            vm_ports_map: dict = {}
+            # vm_id → puerto de gestión (el que lleva la Floating IP) — se usa
+            # para el SG de ingreso desde Internet (6.c), separado del SG de
+            # Firewall Interno que solo va en los puertos de enlace.
+            vm_mgmt_port_map: dict = {}
+            # vm_id → lista de puertos Neutron de ENLACE (no gestión) para asignar
+            # el SG de Firewall Interno per-VM más abajo (6.a)
+            vm_link_ports_map: dict = {}
             for vm in request.vms:
                 # Modo extend: las VMs ya desplegadas no reciben puerto de gestión
                 # nuevo; solo entradas para registrar sus puertos de enlace.
@@ -489,7 +494,7 @@ class OpenStackNetworkExecutor:
                     security_groups=[sg_id]
                 )
                 _created_ports.append(port)
-                vm_ports_map.setdefault(vm.vm_id, []).append(port)
+                vm_mgmt_port_map[vm.vm_id] = port
                 logger.info(f"[OpenStack] Puerto Neutron creado para VM {vm.vm_id} con IP fija: {vm.internal_ip}")
 
                 external_ip = None
@@ -587,8 +592,8 @@ class OpenStackNetworkExecutor:
                     if vm2_id in port_map:
                         port_map[vm2_id]["link_ports"].append(port2.id)
                     # Registrar objetos de puerto por-VM para posterior aplicación de SG per-VM
-                    vm_ports_map.setdefault(vm1_id, []).append(port1)
-                    vm_ports_map.setdefault(vm2_id, []).append(port2)
+                    vm_link_ports_map.setdefault(vm1_id, []).append(port1)
+                    vm_link_ports_map.setdefault(vm2_id, []).append(port2)
 
                     # Q-in-Q: el C-VID real es el segmentation_id que Neutron
                     # asignó a la red del enlace (no el vlan_id lógico). Se
@@ -613,8 +618,12 @@ class OpenStackNetworkExecutor:
             # Se agregan las reglas del usuario (vm1_security_rules /
             # vm2_security_rules de cada NetworkLink) por vm_id. Si una VM
             # aparece con reglas, se crea un SG dedicado con SOLO esas reglas
-            # (más ICMP para diagnóstico), se activa port_security en TODOS
-            # sus puertos (mgmt + enlaces) y se les asigna ese SG.
+            # (más ICMP para diagnóstico), se activa port_security en SUS
+            # PUERTOS DE ENLACE y se les asigna ese SG. El puerto de gestión
+            # (Floating IP) queda fuera de este SG a propósito — lo gobierna
+            # el SG de ingreso de 6.b (Reglas de Entrada desde Internet), que
+            # responde a una pregunta distinta (quién entra desde la IP
+            # externa, no quién le habla a la VM dentro del slice).
             # Sin esto, la prueba falla porque:
             #  · el SG por defecto del slice hardcodea ICMP+SSH, ignorando
             #    lo que el usuario configuró en el WebApp;
@@ -666,10 +675,13 @@ class OpenStackNetworkExecutor:
                         )
                         logger.info(f"[OpenStack]  ↳ ingress {r.protocol}/{r.allow_port} (VM {vm_id})")
 
-                    # Aplicar el SG a TODOS los puertos de la VM. Requiere
-                    # port_security_enabled=True en cada puerto (los de enlace
-                    # se crearon con False; los actualizamos aquí).
-                    for p in vm_ports_map.get(vm_id, []):
+                    # Aplicar el SG SOLO a los puertos de ENLACE de la VM (Firewall
+                    # Interno = tráfico VM↔VM dentro del slice). El puerto de
+                    # gestión (Floating IP) NO se toca acá — lo gobierna el SG de
+                    # ingreso de 6.c, o el SG default/no-internet si la VM no tiene
+                    # IP externa. Requiere port_security_enabled=True en cada
+                    # puerto (los de enlace se crearon con False; se actualiza aquí).
+                    for p in vm_link_ports_map.get(vm_id, []):
                         try:
                             await asyncio.to_thread(
                                 conn.network.update_port,
@@ -685,7 +697,67 @@ class OpenStackNetworkExecutor:
                     logger.error(f"[OpenStack] Error creando/aplicando SG por VM {vm_id}: {e}")
                     raise
 
-            # 6.b Q-in-Q (802.1ad): interponer el dot1q-tunnel en cada compute
+            # 6.b Security Group de Ingreso desde Internet (AWS-style, deny-by-default)
+            # ─────────────────────────────────────────────────────────────────
+            # A diferencia de 6.a (Firewall Interno, solo puertos de enlace), este
+            # SG gobierna qué entra por la Floating IP del puerto de gestión.
+            # Se aplica SOLO a VMs con external_ip; reemplaza el SG default/
+            # no-internet que ese puerto traía desde su creación (sin ICMP/SSH
+            # implícitos — deny-by-default puro, el usuario declara cada regla).
+            for vm in request.vms:
+                if getattr(vm, "already_deployed", False) or not getattr(vm, "external_ip", None):
+                    continue
+                mgmt_port = vm_mgmt_port_map.get(vm.vm_id)
+                if not mgmt_port:
+                    continue
+
+                seen = set()
+                unique_ingress = []
+                for r in (getattr(vm, "ingress_rules", None) or []):
+                    key = (r.protocol.lower(), int(r.allow_port))
+                    if key not in seen:
+                        seen.add(key)
+                        unique_ingress.append(r)
+
+                sg_name = f"secgroup-slice-{slice_id}-vm-{vm.vm_id}-ingress"
+                try:
+                    ingress_sg = await asyncio.to_thread(
+                        conn.network.create_security_group,
+                        name=sg_name,
+                        description=f"Internet ingress rules for slice {slice_id} VM {vm.vm_id}"
+                    )
+                    _created_sec_group_per_vm.append(ingress_sg)
+                    logger.info(f"[OpenStack] SG de ingreso creado: {sg_name} ({ingress_sg.id})")
+
+                    for r in unique_ingress:
+                        rule_kwargs = dict(
+                            security_group_id=ingress_sg.id,
+                            direction="ingress", ethertype="IPv4",
+                        )
+                        if r.protocol.lower() == "icmp":
+                            rule_kwargs["protocol"] = "icmp"
+                        else:
+                            rule_kwargs.update(
+                                protocol=r.protocol.lower(),
+                                port_range_min=int(r.allow_port),
+                                port_range_max=int(r.allow_port),
+                            )
+                        await asyncio.to_thread(conn.network.create_security_group_rule, **rule_kwargs)
+                        logger.info(f"[OpenStack]  ↳ ingress {r.protocol}/{r.allow_port} (VM {vm.vm_id}, desde Internet)")
+
+                    await asyncio.to_thread(
+                        conn.network.update_port,
+                        mgmt_port.id,
+                        port_security_enabled=True,
+                        security_group_ids=[ingress_sg.id],
+                    )
+                    logger.info(f"[OpenStack]  ↳ puerto de gestión {mgmt_port.name} ({mgmt_port.id}) → SG {sg_name} "
+                                f"({len(unique_ingress)} regla(s))")
+                except Exception as e:
+                    logger.error(f"[OpenStack] Error creando/aplicando SG de ingreso para VM {vm.vm_id}: {e}")
+                    raise
+
+            # 6.c Q-in-Q (802.1ad): interponer el dot1q-tunnel en cada compute
             # del slice ANTES de que Compute cree las VMs (pre-compute, como Linux).
             if qinq_s_vlan and qinq_host_cvlans:
                 logger.info(f"[OpenStack][QinQ] Aplicando S-VID {qinq_s_vlan} en {len(qinq_host_cvlans)} compute(s)")

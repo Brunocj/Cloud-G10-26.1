@@ -20,6 +20,29 @@ del mensaje activa su ejecutor de **Linux Cluster** (OVS/SSH) o de **OpenStack**
 | Seguridad | iptables por TAP (security rules del usuario) | Security Groups de Neutron |
 | Orden | Compute **antes** que Network (los TAP ya existen) | **Network antes que Compute** (Nova exige los puertos ya creados → devuelve `port_map`) |
 
+### Dos capas de firewall
+
+El sistema separa dos preguntas distintas, cada una con su propio punto de aplicación:
+
+| | **Firewall Interno** (`firewall_rules`, por enlace) | **Reglas de Entrada desde Internet** (`ingress_rules`, por VM) |
+|---|---|---|
+| Responde | ¿Quién dentro del slice puede hablarle a esta VM? | ¿Qué puede entrar por la IP externa/VPN? |
+| Se activa | Siempre que el enlace exista | Solo si la VM tiene `external_ip` asignada |
+| Vacío = | Totalmente abierto (compat. legado) | **Deny-by-default** — nada entra salvo tráfico ya establecido |
+| Linux | `iptables` sobre el TAP de cada enlace (`--physdev-out`) | `iptables` sobre el camino DNAT (`-d {internal_ip}`), NO sobre los TAPs |
+| OpenStack | SG por VM aplicado a sus **puertos de enlace** | SG por VM aplicado **solo** al puerto de gestión (el de la Floating IP) |
+
+> En Linux, el filtro de `ingress_rules` matchea **solo por IP destino**, sin
+> restringir por interfaz de entrada. Se probó con `-i {EXTERNAL_INTERFACE}`
+> (br-int) primero, pero en el cluster real ese match nunca hacía hit — con
+> OVS, el paquete DNAT'eado no llega a `FORWARD` reportando `br-int` como
+> interfaz de entrada (a diferencia de un bridge Linux normal), así que caía
+> a la policy `ACCEPT` por defecto del chain y el filtro quedaba de adorno.
+
+El checkbox "Acceso SSH externo (IP VPN)" del editor siembra automáticamente una
+regla `TCP/22` en `ingress_rules` al asignar la IP — sin eso, el propio acceso
+SSH que ese checkbox promete quedaría bloqueado por el deny-by-default.
+
 ## Responsabilidades
 
 - **Linux:** conectar los TAP (creados por Compute) a `br-int`, aplicar el tag VLAN
@@ -157,7 +180,7 @@ según la zona:
 | `mgmt_vlan` | VLAN de gestión del slice (reservada por el Slice Manager) |
 | `links[].vlan_id` / `links[].s_vlan_id` | C-VID por enlace / S-VID del slice (Q-in-Q) |
 | `compute_ssh_map` | credenciales SSH por host de Nova (Q-in-Q OpenStack, si aplica) |
-| `vms[]` | specs de red por VM (IP interna, acceso a internet, IP externa) |
+| `vms[]` | specs de red por VM (IP interna, acceso a internet, IP externa, `ingress_rules`) |
 
 La respuesta de deploy incluye además el **`port_map`** (`vm_id → {provider_port_id,
 external_ip, link_ports}`) en OpenStack, que el Compute Provisioner consume para

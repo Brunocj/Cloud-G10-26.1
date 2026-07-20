@@ -35,6 +35,11 @@ class TapInterface(BaseModel):
     )
 
 
+class SecurityRule(BaseModel):
+    allow_port: int
+    protocol: str  # "tcp" o "udp"
+
+
 class VMSpec(BaseModel):
     """
     Especificación de una VM.
@@ -60,6 +65,12 @@ class VMSpec(BaseModel):
     internet_access: int = 0
     external_ip:     Optional[str] = None
     internal_ip:     str = "0.0.0.0"
+    # Reglas de entrada desde Internet (AWS-style, deny-by-default): sin este
+    # campo acá, Pydantic las descarta silenciosamente al validar el mensaje
+    # entrante — el Slice Manager las manda bien, pero VMSpec no las declaraba
+    # y por diseño ignora cualquier key no declarada. Mismo bug de fondo que
+    # ya resolvía el comentario de arriba, para un campo nuevo.
+    ingress_rules:   List[SecurityRule] = Field(default_factory=list)
 
     # Credenciales de la VM para cloud-init
     vm_user:     Optional[str] = None   # Si None → se usa el nombre de la imagen
@@ -96,10 +107,6 @@ class VMResult(BaseModel):
 # ---------------------------------------------------------------------------
 # Mensajes de entrada: desde el Slice Manager
 # ---------------------------------------------------------------------------
-class SecurityRule(BaseModel):
-    allow_port: int
-    protocol: str  # "tcp" o "udp"
-
 class NetworkLink(BaseModel):
     connection_id: str
     vlan_id: int                       # C-VID (tag interno/cliente) por enlace
