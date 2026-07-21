@@ -1,9 +1,10 @@
 # app/routers/requests_proxy.py
 """
 Proxies transparentes hacia el Slice Manager para los prefijos nuevos:
-  /api/v1/requests/**  → flujo de aprobaciones
-  /api/v1/audit/**     → bitácora de eventos
-  /api/v1/infra/**     → gestión de infraestructura (superAdmin)
+  /api/v1/requests/**     → flujo de aprobaciones
+  /api/v1/audit/**        → bitácora de eventos
+  /api/v1/infra/**        → gestión de infraestructura (superAdmin)
+  /api/v1/maintenance/**  → limpieza de BD de slices/VMs (admin/superAdmin)
 """
 import logging
 
@@ -35,3 +36,9 @@ async def forward_audit(path: str, request: Request):
                   summary="Reenvía la gestión de infraestructura al Slice Manager")
 async def forward_infra(path: str, request: Request):
     return await forward(request, f"{settings.SLICE_MANAGER_URL}/api/v1/infra/{path}")
+
+
+@router.api_route("/api/v1/maintenance/{path:path}", methods=_METHODS,
+                  summary="Reenvía el mantenimiento de BD al Slice Manager")
+async def forward_maintenance(path: str, request: Request):
+    return await forward(request, f"{settings.SLICE_MANAGER_URL}/api/v1/maintenance/{path}")

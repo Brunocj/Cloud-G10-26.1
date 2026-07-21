@@ -70,6 +70,7 @@ export {
     FolderOpen,
     Image,
     Package,
+    Database,
 
     // Status / Feedback
     Check,

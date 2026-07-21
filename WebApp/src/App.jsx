@@ -20,6 +20,7 @@ import { UsersView }        from "./views/UsersView";
 import { RequestsView }     from "./views/RequestsView";
 import { ConsumptionView }  from "./views/ConsumptionView";
 import { AuditView }        from "./views/AuditView";
+import { MaintenanceView }  from "./views/MaintenanceView";
 
 // Realtime notifications
 import { useNotifications } from "./hooks/useNotifications";
@@ -610,6 +611,7 @@ export default function App() {
             onLoadTemplate={loadTemplate}
             onPublishTemplate={(id) => setModal({ type: "publishTemplate", id })}
             onLogs={() => navigate("/admin/logs")}
+            onMaintenance={() => navigate("/admin/maintenance")}
         />
     );
 
@@ -682,6 +684,14 @@ export default function App() {
                 isSuperAdmin
                     ? <LogsView user={user} onBack={() => navigate("/")}
                         onProfile={() => navigate("/profile")} apiFetch={apiFetch} />
+                    : <Navigate to="/" replace />
+            } />
+
+            {/* Mantenimiento de BD (slices/VMs huérfanas) — superAdmin only, full screen */}
+            <Route path="/admin/maintenance" element={
+                isSuperAdmin
+                    ? <MaintenanceView user={user} onBack={() => navigate("/")}
+                        onProfile={() => navigate("/profile")} apiFetch={apiFetch} flash={flash} />
                     : <Navigate to="/" replace />
             } />
 

@@ -53,6 +53,7 @@ app/
  │    ├── user_router.py         → Gestión de usuarios / perfil
  │    ├── audit_router.py        → Bitácora de eventos
  │    ├── infra_router.py        → Gestión de infraestructura (superAdmin)
+ │    ├── maintenance_router.py  → Limpieza de BD de slices/VMs (admin/superAdmin)
  │    └── notification_router.py → Notificaciones (WebSockets)
  ├── repositories/
  │    └── slice_repo.py          → SliceRepository.save_draft()
@@ -61,7 +62,9 @@ app/
       ├── slice_destroyer.py     → Lógica compartida de destroy (manual/TTL/kill switch)
       ├── nats_listener.py       → Listener async: slice.result → actualiza MySQL / rollback
       ├── ttl_scheduler.py       → Auto-destrucción de slices al vencer su TTL
-      └── gc_scheduler.py        → Garbage collector de ISOs, discos e imágenes huérfanas
+      ├── stuck_ops_scheduler.py → Vigía de destroys/modifies colgados sin confirmación
+      ├── gc_scheduler.py        → Garbage collector de ISOs, discos e imágenes huérfanas
+      └── db_maintenance.py      → Detección/limpieza de filas huérfanas o inconsistentes en BD
 ```
 
 ---
@@ -222,6 +225,42 @@ para siempre. De eso se encarga stuck_ops_scheduler.py:
 
 ---
 
+## Mantenimiento de BD (`db_maintenance.py`)
+
+Herramienta a demanda (no un scheduler) para auditar y corregir filas de MySQL
+que quedaron sueltas por bugs ya corregidos, ediciones manuales de la BD, o
+saltos de estado sin pasar por el flujo normal. **No toca infraestructura
+física** (SSH/NATS) — solo bookkeeping en MySQL.
+
+Categorías corregibles vía `POST /api/v1/maintenance/clean`:
+
+| Categoría | Qué detecta | Corrección |
+|---|---|---|
+| `orphan_vms` | VM cuyo `slice_id` ya no existe en `slices` | Libera su IP externa y borra la fila |
+| `orphan_vlans` | VLAN cuyo `slice_id` ya no existe en `slices` | Borra la fila |
+| `stale_ip_pool` | IP con `is_used=1` sin VM viva detrás | `is_used=0`, `vm_id=NULL` |
+| `zombie_vms` | VM en estado vivo cuyo slice ya es TERMINATED/FAILED/REJECTED | Libera su IP y alinea `vm.state` con el slice |
+| `terminated_vms` | VM en estado `TERMINATED` (historial de instancias ya destruidas) | Libera su IP (si quedó alguna) y borra la fila |
+| `empty_drafts` | Slice `DRAFT` sin ninguna VM asociada | Borra la fila |
+
+`terminated_vms` no toca las VMs `FAILED` (quedan como evidencia de despliegues
+fallidos) ni el slice al que pertenecían (el historial del slice se sirve
+desde `slice.slice_json`, no desde la tabla `vms` — purgar estas filas no
+afecta lo que ve el usuario).
+
+`GET /api/v1/maintenance/scan` (admin+) devuelve el reporte de solo lectura,
+incluyendo además `stuck_operations` (informativo: TERMINATING/PROVISIONING
+más viejos que `STUCK_OP_TIMEOUT_MINUTES`) — esa categoría **nunca** se
+corrige desde `clean`, porque ya la maneja `stuck_ops_scheduler` con la
+lógica segura de reintentos/reversión (ver sección anterior); forzarla acá
+podría liberar VLANs/IPs de infraestructura que todavía sigue viva.
+
+`POST /api/v1/maintenance/clean` (superAdmin) acepta `{ categories, dry_run }`;
+con `dry_run=true` (default) solo devuelve cuántas filas se tocarían, sin
+escribir en la BD.
+
+---
+
 ## API REST
 
 | Método | Ruta | Auth | Descripción |
@@ -238,6 +277,8 @@ para siempre. De eso se encarga stuck_ops_scheduler.py:
 | `POST` | `/api/v1/slices/utils/images/gc/run` | admin+ | Lanza ciclo de GC manualmente |
 | `GET` | `/api/v1/slices/utils/workers` | usuario+ | Lista workers registrados |
 | `GET` | `/api/v1/slices/utils/available-ips` | usuario+ | Lista IPs del pool sin asignar |
+| `GET` | `/api/v1/maintenance/scan` | admin+ | Reporte de filas huérfanas/inconsistentes (solo lectura) |
+| `POST` | `/api/v1/maintenance/clean` | superAdmin | Corrige las inconsistencias detectadas (`dry_run=true` por defecto) |
 | `GET` | `/` | No | Healthcheck básico |
 
 ---

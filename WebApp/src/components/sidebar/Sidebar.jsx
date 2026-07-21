@@ -5,7 +5,7 @@ import { AzureVm }     from "../ui/AzureIcons";
 import {
     Cloud, Wrench,
     Terminal, LayoutList, Image, Plus, ArrowLeft, Activity, ChevronDown, Users, ShieldCheck, Inbox,
-    BarChart2, ClipboardList, Server, Cpu,
+    BarChart2, ClipboardList, Server, Cpu, Database,
 } from "../ui/Icon";
 
 import { TemplatePicker } from "./TemplatePicker";
@@ -74,7 +74,7 @@ export const Sidebar = ({
     isSuperAdmin, onInfraMonitor, onProjects, onUsersManage,
     onRequests, pendingCount = 0,
     onConsumption, onAudit,
-    onLoadTemplate, onPublishTemplate, onLogs,
+    onLoadTemplate, onPublishTemplate, onLogs, onMaintenance,
 }) => {
     const isAdmin        = user?.role === "admin" || user?.role === "superAdmin" || user?.role === "jefeProyecto";
     const isStrictAdmin  = user?.role === "admin" || user?.role === "superAdmin";
@@ -355,6 +355,9 @@ export const Sidebar = ({
                         )}
                         {isSuperAdmin && (
                             <SecondaryBtn onClick={onLogs} icon={Terminal} label="Logs de contenedores" />
+                        )}
+                        {isSuperAdmin && (
+                            <SecondaryBtn onClick={onMaintenance} icon={Database} label="Mantenimiento de BD" />
                         )}
                     </div>
 
