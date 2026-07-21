@@ -24,6 +24,13 @@ Categorías corregibles:
                    no de la tabla `vms`), así que purgarlas es solo limpieza
                    de espacio; no se tocan las VMs FAILED (quedan como
                    evidencia de despliegues fallidos).
+  terminated_slices Slice en estado TERMINATED — el despliegue completo ya
+                   fue destruido y confirmado. Se borran también sus VMs
+                   (liberando cualquier IP que hubiera quedado) y cualquier
+                   VLAN residual, porque `vms.slice_id`/`vlans.slice_id` son
+                   FK hacia `slices.id` y no se puede borrar el padre sin
+                   soltar antes a los hijos. No se tocan los slices FAILED
+                   ni REJECTED (quedan como evidencia para debug).
   empty_drafts     Slice DRAFT sin ninguna VM asociada.
 
 Solo informativa (nunca se toca desde `clean`):
@@ -47,7 +54,10 @@ _ALIVE_VM_STATES = ("DRAFT", "PROVISIONING", "ACTIVE", "PENDING_APPROVAL")
 _TERMINAL_VM_STATE = {"TERMINATED": "TERMINATED", "FAILED": "FAILED", "REJECTED": "FAILED"}
 _DATE_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S")
 
-CATEGORIES = ("orphan_vms", "orphan_vlans", "stale_ip_pool", "zombie_vms", "terminated_vms", "empty_drafts")
+CATEGORIES = (
+    "orphan_vms", "orphan_vlans", "stale_ip_pool", "zombie_vms",
+    "terminated_vms", "terminated_slices", "empty_drafts",
+)
 
 
 def _parse_date(raw):
@@ -109,6 +119,11 @@ def _find_terminated_vms(db: Session) -> list:
     return db.query(Vm).filter(Vm.state == "TERMINATED").all()
 
 
+def _find_terminated_slices(db: Session) -> list:
+    """Slices en estado TERMINATED — historial de despliegues ya destruidos."""
+    return db.query(Slice).filter(Slice.status == "TERMINATED").all()
+
+
 def _find_empty_drafts(db: Session) -> list:
     vm_slice_ids = {row[0] for row in db.query(Vm.slice_id).distinct().all() if row[0] is not None}
     return [s for s in db.query(Slice).filter(Slice.status == "DRAFT").all() if s.id not in vm_slice_ids]
@@ -141,6 +156,7 @@ def scan(db: Session) -> dict:
     stale_ips = _find_stale_ip_pool(db)
     zombies = _find_zombie_vms(db, slices_by_id)
     terminated = _find_terminated_vms(db)
+    terminated_slices = _find_terminated_slices(db)
     empty_drafts = _find_empty_drafts(db)
     stuck_ops = _find_stuck_operations(db)
 
@@ -165,6 +181,11 @@ def scan(db: Session) -> dict:
         "terminated_vms": {
             "count": len(terminated),
             "items": [{"id": v.id, "name": v.name, "slice_id": v.slice_id} for v in terminated],
+        },
+        "terminated_slices": {
+            "count": len(terminated_slices),
+            "items": [{"id": s.id, "name": s.name, "creator_id": s.creator_id,
+                       "date_destruction": s.date_destruction} for s in terminated_slices],
         },
         "empty_drafts": {
             "count": len(empty_drafts),
@@ -238,6 +259,20 @@ def clean(db: Session, categories: set = None, dry_run: bool = True) -> dict:
                         ip.is_used = 0
                         ip.vm_id = None
                 db.delete(vm)
+
+    if "terminated_slices" in selected:
+        for sl in _find_terminated_slices(db):
+            summary["terminated_slices"] += 1
+            if not dry_run:
+                for vm in db.query(Vm).filter(Vm.slice_id == sl.id).all():
+                    if vm.external_ip:
+                        ip = db.query(IpPool).filter(IpPool.ip_address == vm.external_ip).first()
+                        if ip:
+                            ip.is_used = 0
+                            ip.vm_id = None
+                    db.delete(vm)
+                db.query(Vlan).filter(Vlan.slice_id == sl.id).delete()
+                db.delete(sl)
 
     if "empty_drafts" in selected:
         for sl in _find_empty_drafts(db):

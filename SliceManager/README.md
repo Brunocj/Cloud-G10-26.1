@@ -241,12 +241,14 @@ Categorías corregibles vía `POST /api/v1/maintenance/clean`:
 | `stale_ip_pool` | IP con `is_used=1` sin VM viva detrás | `is_used=0`, `vm_id=NULL` |
 | `zombie_vms` | VM en estado vivo cuyo slice ya es TERMINATED/FAILED/REJECTED | Libera su IP y alinea `vm.state` con el slice |
 | `terminated_vms` | VM en estado `TERMINATED` (historial de instancias ya destruidas) | Libera su IP (si quedó alguna) y borra la fila |
+| `terminated_slices` | Slice en estado `TERMINATED` (despliegue ya destruido y confirmado) | Borra sus VMs (liberando IPs) y VLANs residuales, y luego el slice |
 | `empty_drafts` | Slice `DRAFT` sin ninguna VM asociada | Borra la fila |
 
-`terminated_vms` no toca las VMs `FAILED` (quedan como evidencia de despliegues
-fallidos) ni el slice al que pertenecían (el historial del slice se sirve
-desde `slice.slice_json`, no desde la tabla `vms` — purgar estas filas no
-afecta lo que ve el usuario).
+`terminated_vms` y `terminated_slices` no tocan lo que está en `FAILED` (ni
+`REJECTED`) — esos quedan como evidencia de despliegues fallidos para debug.
+`terminated_slices` borra primero las VMs y VLANs del slice porque
+`vms.slice_id` / `vlans.slice_id` son FK hacia `slices.id`: no se puede
+borrar el padre con hijos todavía colgando.
 
 `GET /api/v1/maintenance/scan` (admin+) devuelve el reporte de solo lectura,
 incluyendo además `stuck_operations` (informativo: TERMINATING/PROVISIONING

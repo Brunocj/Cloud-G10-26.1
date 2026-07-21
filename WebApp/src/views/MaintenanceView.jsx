@@ -44,6 +44,11 @@ const CATEGORY_META = {
         desc: "VM en estado TERMINATED — instancia ya destruida. No afecta el historial del slice.",
         itemLine: (it) => `#${it.id} "${it.name}" — slice_id=${it.slice_id}`,
     },
+    terminated_slices: {
+        label: "Slices terminados (historial)",
+        desc: "Slice en estado TERMINATED — borra el slice completo junto con sus VMs y VLANs residuales.",
+        itemLine: (it) => `#${it.id} "${it.name}"${it.date_destruction ? ` — destruido ${it.date_destruction}` : ""}`,
+    },
     empty_drafts: {
         label: "Borradores vacíos",
         desc: "Slice en borrador (DRAFT) sin ninguna VM asociada.",
