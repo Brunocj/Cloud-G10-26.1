@@ -1,0 +1,19 @@
+[Unit]
+Description=Gateway del pool de acceso externo OpenStack (10.60.16.1 en br-provider)
+Documentation=file:///opt/openstack-ext-gw.sh
+# br-provider es un bridge OVS: no existe hasta que openvswitch-switch arranca.
+After=openvswitch-switch.service network-online.target
+Wants=openvswitch-switch.service network-online.target
+# El L3 agent crea los qrouter que dependen de este gateway
+Before=neutron-l3-agent.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/openstack-ext-gw.sh
+# Si el bridge aún no está listo al arrancar, reintenta en vez de rendirse
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

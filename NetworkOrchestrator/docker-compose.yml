@@ -17,7 +17,19 @@ services:
       OS_USER_DOMAIN_NAME:      Cloud
       OS_PROJECT_DOMAIN_NAME:   Cloud
       OS_IDENTITY_API_VERSION:  "3"
-      OPENSTACK_EXTERNAL_NETWORK: "ext-net"
+      # Nombre REAL de la red externa en Neutron (`openstack network list --external`).
+      # OJO: aquí decía OPENSTACK_EXTERNAL_NETWORK="ext-net", variable que NINGÚN
+      # módulo lee — la que manda es OS_EXTERNAL_NETWORK_NAME (app/core/config.py).
+      OS_EXTERNAL_NETWORK_NAME: "external"
+      OS_EXTERNAL_SUBNET_NAME:  "external_subnet"
+      # Banda que Neutron autoasigna (puertos qg- de los routers). El resto del
+      # /24 queda para la tabla `ip_pool` del SliceManager. Deben ser disjuntos.
+      OS_EXTERNAL_ALLOCATION_POOL: "10.60.16.2-10.60.16.99"
+      # DNS entregado a las VMs vía config-drive (la subnet va sin DHCP)
+      OS_SUBNET_DNS_NAMESERVERS: "8.8.8.8,8.8.4.4"
+      # 1496 = 1500 − 4 del tag 802.1Q sobre el trunk ens4. Subir a 1500 solo si
+      # antes se sube el trunk a 1504 en TODOS los computes y el nodo de red.
+      OS_NETWORK_MTU:           "1496"
       OPENSTACK_AZ_ID:          "2"
       # ── SOCKS5 Proxy para OpenStack ──
       HTTP_PROXY:               "socks5h://openstack-proxy:1080"

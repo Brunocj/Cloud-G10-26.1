@@ -361,6 +361,8 @@ class OpenStackNetworkExecutor:
 
                 # 1. Crear Provider Network
                 network_args = {"name": network_name}
+                if settings.OS_NETWORK_MTU:
+                    network_args["mtu"] = settings.OS_NETWORK_MTU
                 if os.getenv("OS_VLAN_TRANSPARENT", "").lower() in ("1", "true", "yes"):
                     network_args["vlan_transparent"] = True
                 prov_type = os.getenv("OS_PROVIDER_NETWORK_TYPE")
@@ -382,7 +384,9 @@ class OpenStackNetworkExecutor:
                 _created_network = await asyncio.to_thread(conn.network.create_network, **network_args)
                 logger.info(f"[OpenStack] net-slice creada con segmentation_id={getattr(_created_network,'provider_segmentation_id',None)} "
                             f"(mgmt_vlan solicitado={_mgmt_vlan})")
-                logger.info(f"[OpenStack] Red Provider creada: {_created_network.name} (ID: {_created_network.id})")
+                logger.info(f"[OpenStack] Red Provider creada: {_created_network.name} (ID: {_created_network.id}, "
+                            f"MTU solicitada={settings.OS_NETWORK_MTU or 'default'}, "
+                            f"MTU efectiva={getattr(_created_network, 'mtu', '?')})")
 
                 # 2. Crear Subnet asociada con CIDR dinámico
                 if request.vms:
@@ -394,6 +398,11 @@ class OpenStackNetworkExecutor:
                     cidr = "10.0.1.0/24"
                     gateway_ip = "10.0.1.1"
 
+                # DNS de la subnet: sin esto la VM queda sin resolver (ver nota
+                # en Settings.OS_SUBNET_DNS_NAMESERVERS). Nova lo propaga a la
+                # VM por el network_data.json del config-drive.
+                _dns = [d.strip() for d in settings.OS_SUBNET_DNS_NAMESERVERS.split(",") if d.strip()]
+
                 _created_subnet = await asyncio.to_thread(
                     conn.network.create_subnet,
                     name=subnet_name,
@@ -401,6 +410,7 @@ class OpenStackNetworkExecutor:
                     ip_version=4,
                     cidr=cidr,
                     gateway_ip=gateway_ip,
+                    dns_nameservers=_dns,
                     # DHCP no es alcanzable en este cluster (mismo problema que ya
                     # tuvimos con el servicio de metadata) — con DHCP habilitado,
                     # cloud-init confía en que la VM va a pedir la IP por DHCP en
@@ -409,7 +419,10 @@ class OpenStackNetworkExecutor:
                     # IP. Deshabilitarlo fuerza el fixed_ip del puerto como estático.
                     enable_dhcp=False,
                 )
-                logger.info(f"[OpenStack] Subnet creada: {_created_subnet.name} (CIDR: {cidr}, GW: {gateway_ip})")
+                logger.info(f"[OpenStack] Subnet creada: {_created_subnet.name} (CIDR: {cidr}, GW: {gateway_ip}, DNS: {_dns or 'NINGUNO'})")
+                if not _dns:
+                    logger.warning("[OpenStack] ⚠️  Subnet sin dns_nameservers y con DHCP deshabilitado — "
+                                   "las VMs saldrán a Internet por IP pero NO resolverán nombres.")
 
                 # 3. Crear Security Group dedicado
                 _created_sec_group = await asyncio.to_thread(
@@ -476,18 +489,45 @@ class OpenStackNetworkExecutor:
                 ext_subnet = None
                 if ext_net:
                     ext_subnet = await asyncio.to_thread(conn.network.find_subnet, settings.OS_EXTERNAL_SUBNET_NAME)
+                    if ext_subnet:
+                        # El next-hop del SNAT del slice. Si esta IP no responde
+                        # ARP en el segmento L2 de la red externa, el router
+                        # devuelve ICMP Host Unreachable a las VMs y NO hay
+                        # salida a Internet, por más que el router exista y
+                        # enable_snat sea true. Se loguea para poder contrastarlo
+                        # contra el gateway real del segmento.
+                        logger.info(f"[OpenStack] external_subnet existente: {ext_subnet.cidr} "
+                                    f"gateway_ip={ext_subnet.gateway_ip} (next-hop del SNAT de TODOS los slices)")
                     if not ext_subnet:
+                        # OJO: se está inventando infraestructura COMPARTIDA a
+                        # partir de defaults del código. Si OS_EXTERNAL_GATEWAY_IP
+                        # no es el gateway real del segmento físico, la subnet
+                        # queda creada con un next-hop muerto — y persiste, así
+                        # que todos los deploys posteriores heredan el fallo.
+                        logger.warning(
+                            f"[OpenStack] ⚠️  '{settings.OS_EXTERNAL_SUBNET_NAME}' no existe — se creará con valores "
+                            f"del código (cidr={settings.OS_EXTERNAL_SUBNET_CIDR}, gw={settings.OS_EXTERNAL_GATEWAY_IP}). "
+                            f"VERIFICAR que ese gateway sea el real del segmento, o no habrá salida a Internet.")
+                        # Banda reservada a Neutron (puertos qg-); el resto del /24
+                        # es territorio de la tabla `ip_pool` del SliceManager.
+                        _ext_subnet_args = dict(
+                            name=settings.OS_EXTERNAL_SUBNET_NAME,
+                            network_id=ext_net.id,
+                            ip_version=4,
+                            cidr=settings.OS_EXTERNAL_SUBNET_CIDR,
+                            gateway_ip=settings.OS_EXTERNAL_GATEWAY_IP,
+                            enable_dhcp=True,
+                        )
+                        _pool = (settings.OS_EXTERNAL_ALLOCATION_POOL or "").strip()
+                        if "-" in _pool:
+                            _start, _end = (p.strip() for p in _pool.split("-", 1))
+                            _ext_subnet_args["allocation_pools"] = [{"start": _start, "end": _end}]
                         try:
                             ext_subnet = await asyncio.to_thread(
-                                conn.network.create_subnet,
-                                name=settings.OS_EXTERNAL_SUBNET_NAME,
-                                network_id=ext_net.id,
-                                ip_version=4,
-                                cidr=settings.OS_EXTERNAL_SUBNET_CIDR,
-                                gateway_ip=settings.OS_EXTERNAL_GATEWAY_IP,
-                                enable_dhcp=True,
+                                conn.network.create_subnet, **_ext_subnet_args
                             )
-                            logger.info(f"[OpenStack] external_subnet creada: {settings.OS_EXTERNAL_SUBNET_CIDR}")
+                            logger.info(f"[OpenStack] external_subnet creada: {settings.OS_EXTERNAL_SUBNET_CIDR} "
+                                        f"(allocation_pool Neutron: {_pool or 'completo'})")
                         except Exception as e:
                             logger.error(f"[OpenStack] No se pudo crear external_subnet: {e}")
                             ext_subnet = None
@@ -499,7 +539,15 @@ class OpenStackNetworkExecutor:
                             name=router_name,
                             external_gateway_info={"network_id": ext_net.id}
                         )
-                        logger.info(f"[OpenStack] Router virtual creado: {_created_router.name} (ID: {_created_router.id})")
+                        # IP del puerto qg- del router: es la dirección con la que
+                        # salen NATeadas las VMs del slice que NO tienen floating
+                        # IP. Cuando una VM reporta "Destination Host Unreachable"
+                        # desde ESTA IP, el que no puede resolver el next-hop es
+                        # el router, no la VM.
+                        _gw_info = getattr(_created_router, "external_gateway_info", None) or {}
+                        _gw_ips = [f.get("ip_address") for f in (_gw_info.get("external_fixed_ips") or [])]
+                        logger.info(f"[OpenStack] Router virtual creado: {_created_router.name} (ID: {_created_router.id}) "
+                                    f"— IP de SNAT del slice: {_gw_ips or 'SIN IP EXTERNA'}")
 
                         # Conectar subred interna del slice al router (Gateway del slice)
                         await asyncio.to_thread(
@@ -512,7 +560,16 @@ class OpenStackNetworkExecutor:
                         logger.error(f"[OpenStack] Fallo al configurar Router/Interfaz en OpenStack: {e}")
                         raise e
                 else:
-                    logger.warning(f"[OpenStack] Red externa '{settings.OS_EXTERNAL_NETWORK_NAME}' no encontrada. Enrutamiento L3 omitido.")
+                    # Antes esto era un warning y el deploy seguía: se creaban las
+                    # VMs sobre una red SIN router, con un gateway_ip que nadie
+                    # contesta, y el slice se reportaba SUCCESS. Sin salida a
+                    # Internet y sin acceso externo, sin ninguna señal de error.
+                    # Es un error de configuración, no una degradación tolerable.
+                    raise RuntimeError(
+                        f"Red externa '{settings.OS_EXTERNAL_NETWORK_NAME}' no encontrada en Neutron. "
+                        f"Sin ella no hay router, ni salida a Internet, ni Floating IPs. "
+                        f"Revisar OS_EXTERNAL_NETWORK_NAME (`openstack network list --external`)."
+                    )
             else:
                 # EXTEND: la red externa solo se necesita para Floating IPs de VMs nuevas
                 ext_net = await asyncio.to_thread(conn.network.find_network, settings.OS_EXTERNAL_NETWORK_NAME)
@@ -573,7 +630,29 @@ class OpenStackNetworkExecutor:
                         external_ip = fip.floating_ip_address
                         logger.info(f"[OpenStack] Floating IP asociada a VM {vm.vm_id}: {external_ip}")
                     except Exception as e:
-                        logger.error(f"[OpenStack] Falló la creación/asociación de Floating IP para VM {vm.vm_id}: {e}")
+                        # La IP explícita viene de la tabla `ip_pool` del SliceManager,
+                        # que reparte 10.60.16.0/24 SIN coordinarse con el
+                        # allocation_pool de la subnet externa de Neutron — de ahí
+                        # salen también el puerto qg- del router de CADA slice y
+                        # cualquier otra FIP. Cuando chocan, Neutron devuelve 409 y
+                        # antes la VM se quedaba sin IP externa con el deploy en
+                        # SUCCESS. Ahora se reintenta dejando elegir a Neutron: la
+                        # IP resultante viaja en el port_map y el SliceManager la
+                        # persiste (nats_listener), así que la UI muestra la real.
+                        if "floating_ip_address" in fip_kwargs:
+                            logger.warning(
+                                f"[OpenStack] IP externa {vm.external_ip} no disponible para VM {vm.vm_id} "
+                                f"({e}) — reintentando con asignación automática de Neutron.")
+                            try:
+                                fip_kwargs.pop("floating_ip_address")
+                                fip = await asyncio.to_thread(conn.network.create_ip, **fip_kwargs)
+                                external_ip = fip.floating_ip_address
+                                logger.info(f"[OpenStack] Floating IP (auto) asociada a VM {vm.vm_id}: {external_ip} "
+                                            f"— sustituye a {vm.external_ip}")
+                            except Exception as e2:
+                                logger.error(f"[OpenStack] ❌ ACCESO EXTERNO NO DISPONIBLE para VM {vm.vm_id}: {e2}")
+                        else:
+                            logger.error(f"[OpenStack] ❌ ACCESO EXTERNO NO DISPONIBLE para VM {vm.vm_id}: {e}")
 
                 port_map[vm.vm_id] = {
                     "provider_port_id": port.id,
@@ -598,7 +677,12 @@ class OpenStackNetworkExecutor:
                     # Crear red para el enlace. Se FUERZA el segmentation_id al
                     # C-VID que reservó el SliceManager (opción 1 → `vlans` = tag
                     # real). Requiere physnet configurado; si no, cae a tenant.
+                    # Misma MTU que la red de gestión: los enlaces también van
+                    # etiquetados sobre el trunk, así que sin esto una
+                    # transferencia grande VM↔VM se cuelga igual que el SSH.
                     link_net_args = {"name": f"net-link-{vlan_id}"}
+                    if settings.OS_NETWORK_MTU:
+                        link_net_args["mtu"] = settings.OS_NETWORK_MTU
                     _lprov_phys = os.getenv("OS_PROVIDER_PHYSICAL_NETWORK")
                     if _lprov_phys:
                         link_net_args["provider_network_type"] = "vlan"
@@ -811,6 +895,18 @@ class OpenStackNetworkExecutor:
                             )
                         await asyncio.to_thread(conn.network.create_security_group_rule, **rule_kwargs)
                         logger.info(f"[OpenStack]  ↳ ingress {r.protocol}/{r.allow_port} (VM {vm.vm_id}, desde Internet)")
+
+                    if not unique_ingress:
+                        # Deny-by-default puro: este SG reemplaza al default del
+                        # slice (que traía ICMP+SSH) y se queda con CERO reglas de
+                        # ingreso. La Floating IP queda inalcanzable — ni ping ni
+                        # SSH — aunque esté perfectamente creada y asociada. Es el
+                        # comportamiento buscado, pero desde fuera es idéntico a
+                        # "el acceso externo no funciona": se deja explícito.
+                        logger.warning(
+                            f"[OpenStack] ⚠️  VM {vm.vm_id} tiene IP externa pero NINGUNA regla de entrada "
+                            f"declarada — la Floating IP quedará inalcanzable (sin SSH ni ICMP). "
+                            f"Agregar reglas de entrada en el NodeEditor.")
 
                     await asyncio.to_thread(
                         conn.network.update_port,
