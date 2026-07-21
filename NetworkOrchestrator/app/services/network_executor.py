@@ -30,9 +30,13 @@ class NetworkExecutor:
         if not tap_vlan_pairs:
             return
 
+        mtu = getattr(settings, "DATA_TRUNK_MTU", 0) or 0
+
         # 1. Crear y levantar todos los TAPs en un único shell one-liner
         tap_cmds = "; ".join(
-            f"sudo ip tuntap add dev {tap} mode tap 2>/dev/null || true; sudo ip link set {tap} up || true"
+            f"sudo ip tuntap add dev {tap} mode tap 2>/dev/null || true; "
+            f"sudo ip link set {tap} up || true"
+            + (f"; sudo ip link set {tap} mtu {mtu} || true" if mtu else "")
             for tap, _ in tap_vlan_pairs
         )
         ssh.exec(f"bash -c '{tap_cmds}'")
@@ -48,7 +52,26 @@ class NetworkExecutor:
         for tap, vlan in tap_vlan_pairs:
             ovs_parts.append(f"--may-exist add-port br-int {tap}")
             ovs_parts.append(f"set port {tap} tag={vlan}")
-        exit_code, _, err = ssh.exec("sudo ovs-vsctl " + " -- ".join(ovs_parts))
+
+        ovs_cmd = "sudo ovs-vsctl " + " -- ".join(ovs_parts)
+        # br-int y el trunk deben quedar al MISMO mtu reducido que las taps, o la
+        # interfaz "miente" con 1500 mientras el camino físico real hacia otro
+        # worker no lo soporta (blackhole de PMTU: sin ICMP "frag needed" de
+        # vuelta, TCP nunca se entera y se cuelga en el primer paquete grande —
+        # ver DATA_TRUNK_MTU). Encadenado en el MISMO comando (RC capturado antes)
+        # para no sumar una 3ª llamada SSH ni alterar el exit code que valida el
+        # ovs-vsctl de abajo.
+        if mtu:
+            full_cmd = (
+                f"bash -c '{ovs_cmd}; RC=$?; "
+                f"sudo ip link set br-int mtu {mtu} 2>/dev/null || true"
+                + (f"; sudo ip link set {trunk} mtu {mtu} 2>/dev/null || true" if trunk else "")
+                + "; exit $RC'"
+            )
+        else:
+            full_cmd = ovs_cmd
+
+        exit_code, _, err = ssh.exec(full_cmd)
         if exit_code != 0:
             raise RuntimeError(f"Fallo OVS batch en {self.worker_ip}: {err}")
 

@@ -29,6 +29,19 @@ class Settings(BaseSettings):
     # sobreviva reinicios/migraciones. Vacío = no gestionar el trunk.
     DATA_TRUNK_IFACE: str = "ens4"
 
+    # MTU real del trunk inter-worker. Detectado en el cluster: los workers son
+    # VMs anidadas y el uplink de ens4 hacia el switch virtual externo NO
+    # soporta frames de 1500 en todas las combinaciones (confirmado con
+    # ping -M do: falla justo a 1500, funciona parejo desde 1450 para abajo,
+    # en cualquier enlace que toque el worker con menor margen real). ens4/
+    # br-int seguían reportando 1500 igual — mentían sobre el techo real, sin
+    # devolver el ICMP "frag needed" que permitiría a PMTUD ajustarse solo, y
+    # SSH/TLS se colgaban justo en el primer paquete de key exchange más
+    # grande que los iniciales. Mismo síntoma que ya resolvió OS_NETWORK_MTU
+    # para OpenStack; acá faltaba el equivalente para Linux Cluster.
+    # 0 = no forzar MTU (comportamiento previo).
+    DATA_TRUNK_MTU: int = 1450
+
     # ── OpenStack: red provider compartida para salida a Internet ──────────
     OS_EXTERNAL_NETWORK_NAME: str = "external"          # Red provider flat ya creada en OpenStack
     OS_EXTERNAL_SUBNET_NAME:  str = "external_subnet"
