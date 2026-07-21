@@ -191,13 +191,23 @@ async def process_placement_worker():
             # ── 1.5 RESOLUCIÓN DE IPs "random" (agnóstico Linux/OpenStack) ────
             # Ahora que la zona es conocida, cada VM con external_ip="random"
             # recibe una IP libre del pool de ESA zona, reservada atómicamente.
+            # Bug histórico: con `.first()` + commit fuera del loop, la segunda
+            # VM del deploy recibía la MISMA IP que la primera (visto en logs:
+            # dos VMs con 10.60.15.2 en Linux y 10.60.16.9 en OpenStack, esta
+            # última reventando en la creación de la floating IP).
+            # Doble candado:
+            #  · with_for_update(skip_locked=True) → bloqueo pesimista frente a
+            #    deploys concurrentes; si otro proceso ya tomó la fila, salta.
+            #  · flush+commit por VM → dentro de la MISMA sesión, la siguiente
+            #    iteración ya no ve esa fila con is_used=0; y si el deploy
+            #    revienta más adelante, la reserva queda persistida (no se pierde).
             from app.models import IpPool as _IpPool
             for vm in vms_de_bd:
                 if vm.external_ip == "random":
                     libre = db.query(_IpPool).filter(
                         _IpPool.availability_zone_id == zone_id,
                         _IpPool.is_used == 0,
-                    ).first()
+                    ).with_for_update(skip_locked=True).first()
                     if not libre:
                         logger.error("[PLACEMENT] ❌ Sin IPs libres en el pool de la zona %s para 'random'", zone_id)
                         vm.external_ip = None
@@ -206,6 +216,8 @@ async def process_placement_worker():
                         libre.is_used = 1
                         libre.vm_id = vm.id
                         vm.external_ip = libre.ip_address
+                        db.flush()   # la siguiente query del loop verá is_used=1
+                        db.commit()  # persiste esta reserva por VM (durable ante fallos)
                         logger.info("[PLACEMENT] 🎲 IP aleatoria asignada a VM %s (zona %s): %s",
                                     vm.name, zone_id, libre.ip_address)
             db.commit()
@@ -675,6 +687,7 @@ async def process_placement_worker():
                         "vm1_ssh_user":        worker1.get("user", "ubuntu"),
                         "vm1_ssh_private_key": get_ssh_key(worker1.get("key_path", "")),
                         "vm1_security_rules":  _security_rules_for(vm1_id),
+                        "vm1_link_ip":         ip1,   # IP manual de enlace (OpenStack); None = /30 automático
                         "vm2_id":              vm2_id,
                         "vm2_worker_ip":       worker2.get("ip", "0.0.0.0"),
                         "vm2_worker_port":     worker2.get("port", 22),
@@ -683,6 +696,7 @@ async def process_placement_worker():
                         "vm2_ssh_user":        worker2.get("user", "ubuntu"),
                         "vm2_ssh_private_key": get_ssh_key(worker2.get("key_path", "")),
                         "vm2_security_rules":  _security_rules_for(vm2_id),
+                        "vm2_link_ip":         ip2,   # IP manual de enlace (OpenStack); None = /30 automático
                     })
 
                     # C-VID en `vlan_number` (id auto-incremental) para OpenStack

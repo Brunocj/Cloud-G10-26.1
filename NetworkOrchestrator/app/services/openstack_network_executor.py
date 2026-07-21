@@ -1,6 +1,7 @@
 import os
 import logging
 import asyncio
+import ipaddress
 import openstack
 from app.core.config import settings
 from app.services.ssh_client import SSHClient
@@ -10,6 +11,65 @@ from app.models.schemas import (
 )
 
 logger = logging.getLogger("network-orchestrator.openstack")
+
+
+def _resolve_link_subnet(vlan_id, ip1_raw, ip2_raw):
+    """
+    Decide el CIDR de la subnet del enlace y el fixed_ip de cada puerto según
+    las IPs manuales que el usuario haya definido en el NodeEditor.
+
+    · Ningún extremo con IP  → comportamiento ACTUAL intacto: subnet
+      `10.{..}.{..}.0/30` con puertos .1 y .2 (cero regresión).
+    · Al menos un extremo con IP → la subnet se deriva de esa IP respetando su
+      prefijo (si no trae prefijo se asume /24). Cada puerto usa su IP de
+      usuario si cae dentro del CIDR; si está vacío o pertenece a otra subred,
+      Neutron le asigna una libre del mismo CIDR — Nova exige un fixed_ip en
+      todo puerto adjuntado al boot, así que nunca se deja sin IP.
+
+    En OpenStack la IP la aplica Nova al guest vía config-drive/network-config
+    (match por MAC), de modo que fijar el fixed_ip del puerto ES el mecanismo
+    para que la VM arranque con esa IP — sin tocar el Compute Provisioner.
+
+    Devuelve: (cidr:str, fixed1:str|None, fixed2:str|None)
+      fixedN None → Neutron auto-asigna desde la subnet.
+    """
+    default_cidr = f"10.{(vlan_id // 256) % 256}.{vlan_id % 256}.0/30"
+
+    def _norm(raw):
+        raw = (raw or "").strip()
+        if not raw:
+            return None
+        if "/" not in raw:
+            raw = f"{raw}/24"   # sin prefijo → /24 por defecto
+        try:
+            return ipaddress.ip_interface(raw)   # valida IP + prefijo juntos
+        except ValueError:
+            logger.warning("[OpenStack] IP de enlace inválida '%s' (VLAN %s) — ignorada", raw, vlan_id)
+            return None
+
+    if1 = _norm(ip1_raw)
+    if2 = _norm(ip2_raw)
+
+    # Ningún extremo con IP válida → comportamiento legado exacto
+    if not if1 and not if2:
+        base = f"10.{(vlan_id // 256) % 256}.{vlan_id % 256}"
+        return default_cidr, f"{base}.1", f"{base}.2"
+
+    # Subnet derivada del primer extremo con IP (prioriza VM1)
+    network = (if1 or if2).network
+    cidr = str(network)
+
+    def _fixed(iface):
+        if iface and iface.ip in network:
+            return str(iface.ip)
+        return None   # vacío o subred incompatible → auto-asignación de Neutron
+
+    fixed1, fixed2 = _fixed(if1), _fixed(if2)
+    if if2 and fixed2 is None and if2.ip not in network:
+        logger.warning("[OpenStack] IP de VM2 %s fuera de la subred %s (VLAN %s) — auto-asignada",
+                        if2.ip, cidr, vlan_id)
+    return cidr, fixed1, fixed2
+
 
 def get_connection():
     """Establece conexión con la API de OpenStack usando openstacksdk."""
@@ -549,8 +609,14 @@ class OpenStackNetworkExecutor:
                     )
                     _created_link_networks.append(net_link.id)
 
-                    # Crear subnet /30 sin DHCP para conexión punto a punto
-                    link_cidr = f"10.{(vlan_id // 256) % 256}.{vlan_id % 256}.0/30"
+                    # Subnet del enlace (sin DHCP, punto a punto). El CIDR y los
+                    # fixed_ips salen de las IPs manuales del usuario si las hay;
+                    # si no, es el /30 con .1/.2 de siempre (ver _resolve_link_subnet).
+                    link_cidr, fixed1, fixed2 = _resolve_link_subnet(
+                        vlan_id,
+                        getattr(link, "vm1_link_ip", None),
+                        getattr(link, "vm2_link_ip", None),
+                    )
                     sub_link = await asyncio.to_thread(
                         conn.network.create_subnet,
                         name=f"subnet-link-{vlan_id}",
@@ -562,27 +628,28 @@ class OpenStackNetworkExecutor:
                     )
                     _created_link_subnets.append(sub_link.id)
 
-                    # Crear puerto para VM1 (IP .1) - Port Security desactivado para permitir routing/IPs libres.
+                    # Puerto VM1 - Port Security desactivado para permitir routing/IPs libres.
                     # Nova exige un FixedIP en todo puerto adjuntado al boot ("Port ... requires a
-                    # FixedIP in order to be used") — fixed_ips=[] hace fallar create_server con 400,
-                    # así que el puerto SIEMPRE lleva IP asignada por Neutron/cloud-init; si el usuario
-                    # quiere otra, la reconfigura a mano dentro de la VM sobre esta base.
+                    # FixedIP in order to be used") — fixed_ips=[] hace fallar create_server con 400.
+                    # Si el usuario definió IP → esa IP; si no → una libre de la subnet (auto).
+                    fixed_ips_1 = [{"ip_address": fixed1}] if fixed1 else [{"subnet_id": sub_link.id}]
                     port1 = await asyncio.to_thread(
                         conn.network.create_port,
                         name=f"port-link-{vlan_id}-{vm1_id}",
                         network_id=net_link.id,
                         port_security_enabled=False,
-                        fixed_ips=[{"ip_address": f"10.{(vlan_id // 256) % 256}.{vlan_id % 256}.1"}]
+                        fixed_ips=fixed_ips_1
                     )
                     _created_ports.append(port1)
 
-                    # Crear puerto para VM2 (IP .2) - Port Security desactivado para permitir routing/IPs libres
+                    # Puerto VM2 - Port Security desactivado para permitir routing/IPs libres
+                    fixed_ips_2 = [{"ip_address": fixed2}] if fixed2 else [{"subnet_id": sub_link.id}]
                     port2 = await asyncio.to_thread(
                         conn.network.create_port,
                         name=f"port-link-{vlan_id}-{vm2_id}",
                         network_id=net_link.id,
                         port_security_enabled=False,
-                        fixed_ips=[{"ip_address": f"10.{(vlan_id // 256) % 256}.{vlan_id % 256}.2"}]
+                        fixed_ips=fixed_ips_2
                     )
                     _created_ports.append(port2)
 

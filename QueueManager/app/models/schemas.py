@@ -123,6 +123,7 @@ class NetworkLink(BaseModel):
     vm1_ssh_user: Optional[str] = None
     vm1_ssh_private_key: Optional[str] = None
     vm1_security_rules: List[SecurityRule] = Field(default_factory=list)
+    vm1_link_ip: Optional[str] = None   # IP/prefijo manual para la interfaz de enlace (None = /30 automático)
     # Datos del extremo 2
     vm2_id: str
     vm2_worker_ip: str
@@ -131,6 +132,7 @@ class NetworkLink(BaseModel):
     vm2_ssh_user: Optional[str] = None
     vm2_ssh_private_key: Optional[str] = None
     vm2_security_rules: List[SecurityRule] = Field(default_factory=list)
+    vm2_link_ip: Optional[str] = None   # IP/prefijo manual para la interfaz de enlace (None = /30 automático)
 
 
 class DeploySliceRequest(BaseModel):

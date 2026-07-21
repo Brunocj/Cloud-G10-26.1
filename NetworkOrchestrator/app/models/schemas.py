@@ -54,6 +54,7 @@ class NetworkLink(BaseModel):
     vm1_ssh_user:        Optional[str] = Field(default=None, description="Usuario SSH del worker 1")
     vm1_ssh_private_key: Optional[str] = Field(default=None, description="Llave PEM del worker 1")
     vm1_security_rules:  List[SecurityRule] = Field(default_factory=list)
+    vm1_link_ip:         Optional[str] = Field(default=None, description="IP/prefijo manual para la interfaz de enlace de la VM 1 (ej: 192.168.10.1/24). None = comportamiento actual (/30 automático).")
     
     # Datos del Extremo B (VM 2)
     vm2_id:              str = Field(..., description="ID de la VM 2")
@@ -63,6 +64,7 @@ class NetworkLink(BaseModel):
     vm2_ssh_user:        Optional[str] = Field(default=None, description="Usuario SSH del worker 2")
     vm2_ssh_private_key: Optional[str] = Field(default=None, description="Llave PEM del worker 2")
     vm2_security_rules:  List[SecurityRule] = Field(default_factory=list)
+    vm2_link_ip:         Optional[str] = Field(default=None, description="IP/prefijo manual para la interfaz de enlace de la VM 2 (ej: 192.168.10.2/24). None = comportamiento actual (/30 automático).")
 
 class TapInterface(BaseModel):
     tap_name: str
