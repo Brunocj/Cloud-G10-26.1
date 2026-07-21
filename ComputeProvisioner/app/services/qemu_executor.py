@@ -438,10 +438,17 @@ def _build_net_args(tap_interfaces: List[TapInterface]) -> str:
 
 def _build_network_config(tap_interfaces) -> str | None:
     """
-    Genera un cloud-init network-config v2 (netplan) SOLO si alguna interfaz
-    de enlace trae `ip_cidr` (IP manual del usuario). Si ninguna la trae,
-    devuelve None -> no se escribe network-config y se conserva el
-    comportamiento actual (gestión por DHCP, enlaces sin IP).
+    Genera un cloud-init network-config v2 (netplan) para las interfaces de
+    enlace del guest.
+
+    Se genera SIEMPRE que haya al menos una tap (no solo cuando alguna trae
+    `ip_cidr`): todas las interfaces —también la de gestión, cuyo VLAN de mgmt
+    también cruza el trunk inter-worker— reciben `mtu: DATA_TRUNK_MTU`. Sin
+    esto, la VM sigue generando frames de 1500 sin que nada se lo impida, y
+    como el descarte real ocurre fuera del stack IP del worker (ver comentario
+    en config.py), nunca llega el ICMP que permitiría a la VM autoajustarse
+    por PMTUD — el mismo cuelgue de SSH/TLS que ya se vio se puede repetir en
+    cualquier VM cuyo enlace cruce ese tramo, tenga o no IP manual.
 
     El match es por MAC (no por nombre ensN): determinístico e independiente
     de cómo el guest nombre la interfaz.
@@ -452,12 +459,13 @@ def _build_network_config(tap_interfaces) -> str | None:
     Acepta objetos TapInterface o dicts, por robustez.
     """
     taps = tap_interfaces or []
+    if not taps:
+        return None
 
     def _g(t, k):
         return t.get(k) if isinstance(t, dict) else getattr(t, k, None)
 
-    if not any(_g(t, "ip_cidr") for t in taps):
-        return None
+    mtu = getattr(settings, "DATA_TRUNK_MTU", 0) or 0
 
     lines = ["version: 2", "ethernets:"]
     for idx, t in enumerate(taps):
@@ -471,6 +479,8 @@ def _build_network_config(tap_interfaces) -> str | None:
         lines.append(f"  nic{idx}:")
         lines.append(f"    match:")
         lines.append(f"      macaddress: \"{mac}\"")
+        if mtu:
+            lines.append(f"    mtu: {mtu}")
         if ip:
             lines.append(f"    dhcp4: false")
             lines.append(f"    addresses:")

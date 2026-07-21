@@ -27,6 +27,20 @@ class Settings(BaseSettings):
     # ── OVS ─────────────────────────────────────────────────────────────────
     OVS_BRIDGE: str = "br-int"   # bridge OVS único por worker
 
+    # MTU real del trunk inter-worker (Linux Cluster). Ver DATA_TRUNK_MTU en
+    # NetworkOrchestrator/app/core/config.py para el detalle completo: el
+    # uplink de ens4 entre workers no soporta 1500 en todas las combinaciones
+    # (confirmado con ping -M do). Bajar el MTU del lado del bridge/trunk en
+    # el worker NO alcanza: el bridging es transparente y no fuerza el límite
+    # sobre tráfico que solo está atravesando (viene de la VM), así que la VM
+    # sigue mandando frames de 1500 igual — y como el descarte real ocurre en
+    # un tramo invisible para el worker (fuera de su stack IP), nunca se
+    # genera el ICMP "frag needed" que permitiría a la VM autoajustarse por
+    # PMTUD. Sin este valor puesto en la propia interfaz del guest (vía
+    # network-config), el mismo cuelgue de SSH/TLS puede repetirse en
+    # cualquier VM cuyo enlace cruce ese tramo. 0 = no forzar MTU.
+    DATA_TRUNK_MTU: int = 1450
+
     # ── VNC ─────────────────────────────────────────────────────────────────
     VNC_PORT_MIN: int = 5901
     VNC_PORT_MAX: int = 5999

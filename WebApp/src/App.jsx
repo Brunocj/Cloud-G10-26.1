@@ -492,9 +492,27 @@ export default function App() {
     };
 
     // ── Import / Export ───────────────────────────────────────────────────────
+    // Campos que solo tienen sentido en un despliegue concreto: worker donde
+    // cayó la VM, puertos VNC, IP del pool, id de instancia del proveedor.
+    // Debe coincidir con la lista que usa el backend al publicar plantillas
+    // (slice_router.py, "copia limpia del diseño").
+    const DEPLOY_ONLY_FIELDS = [
+        "worker", "worker_id", "worker_ip", "worker_port",
+        "vnc_port", "vnc_url", "external_ip", "provider_instance_id",
+    ];
+
     const exportarTopologia = () => {
         if (nodes.length === 0) { flash("No hay nodos para exportar", "error"); return; }
-        const blob = new Blob([JSON.stringify({ vms: nodes, edges }, null, 2)], { type: "application/json" });
+        // Un JSON exportado es un DISEÑO reutilizable, no una instantánea del
+        // despliegue: sin esta limpieza, exportar un slice activo arrastraba su
+        // worker, su puerto VNC y su IP del pool al archivo, y reimportarlo los
+        // metía en un diseño nuevo donde ya no significan nada.
+        const cleanNodes = nodes.map(n => {
+            const c = { ...n };
+            for (const k of DEPLOY_ONLY_FIELDS) delete c[k];
+            return c;
+        });
+        const blob = new Blob([JSON.stringify({ vms: cleanNodes, edges }, null, 2)], { type: "application/json" });
         const url  = URL.createObjectURL(blob);
         const a    = Object.assign(document.createElement("a"), { href: url, download: `topologia_pucp_${Date.now()}.json` });
         document.body.appendChild(a); a.click(); document.body.removeChild(a);
@@ -515,7 +533,15 @@ export default function App() {
                 const newNodes = json.vms.map(n => {
                     const newId = `${n.id}${suffix}`;
                     idMap[n.id] = newId;
-                    return { ...n, id: newId, x: (n.x ?? 0) + 50, y: (n.y ?? 0) + 50 };
+                    // link_ips está indexado por ID DE ENLACE, y los enlaces
+                    // reciben abajo el mismo sufijo. Sin reindexar estas claves,
+                    // cada búsqueda link_ips[edge.id] fallaba y las IPs
+                    // estáticas del diseño se perdían en silencio al importar.
+                    const link_ips = Object.fromEntries(
+                        Object.entries(n.link_ips || {})
+                            .map(([edgeId, ip]) => [`${edgeId}${suffix}`, ip])
+                    );
+                    return { ...n, id: newId, link_ips, x: (n.x ?? 0) + 50, y: (n.y ?? 0) + 50 };
                 });
                 const newEdges = (json.edges ?? []).map(ed => ({
                     ...ed, id: `${ed.id}${suffix}`,

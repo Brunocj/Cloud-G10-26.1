@@ -2,8 +2,9 @@ import { useState, useRef } from "react";
 import { T, btnBase, getStatusVisual } from "../../theme/tokens";
 import { buildLinear, buildRing, buildMesh, buildTree, buildBus, mkNode, NODE_SCALE } from "../../utils/topology";
 import { NodeEditor } from "./NodeEditor";
-import { MousePointer2, Link2, Monitor, Trash2, Maximize2, AlertTriangle, ZoomIn, ZoomOut } from "../ui/Icon";
-import { AzureVm, AzureNetwork, UbuntuLogo, WindowsLogo, CanvasNetBadge, CanvasSwitch } from "../ui/AzureIcons";
+import { ConfirmModal } from "../modals/ConfirmModal";
+import { MousePointer2, Link2, Trash2, Maximize2, ZoomIn, ZoomOut, Globe } from "../ui/Icon";
+import { AzureVm, UbuntuLogo, WindowsLogo, CanvasNetBadge, CanvasSwitch } from "../ui/AzureIcons";
 
 // ─── Geometría del nodo ───────────────────────────────────────────────────────
 // NODE_SCALE se importa de utils/topology.js, que es también quien escala el
@@ -54,6 +55,39 @@ const labelAnchor = (from, to) => {
     return { x: from.x + ux * d, y: from.y + uy * d };
 };
 
+/**
+ * Etiqueta de un extremo de enlace: nombre de interfaz y, opcionalmente, la IP
+ * estática que se le asignó.
+ *
+ * Se dibuja como un <g> posicionado por transform con el contenido en
+ * coordenadas relativas, para que el arrastre imperativo solo tenga que mover
+ * el grupo (ver updateEdgeCoords) y para que dé igual si lleva una o dos líneas.
+ */
+const EdgeLabel = ({ className, x, y, iface, ip }) => {
+    const twoLines = !!ip;
+    // Con IP la caja crece a lo alto y a lo ancho: un CIDR ocupa bastante más
+    // que "ens4" y con el ancho de una línea se saldría del recuadro.
+    const w = twoLines ? LABEL_W * 1.7 : LABEL_W;
+    const h = twoLines ? LABEL_H * 1.85 : LABEL_H;
+    return (
+        <g className={className} transform={`translate(${x},${y})`}>
+            <rect x={-w / 2} y={-h / 2} width={w} height={h} rx={5}
+                fill={T.surface} stroke={T.accent + "88"} strokeWidth={1.2} />
+            <text x={0} y={twoLines ? -h / 2 + LABEL_H * 0.55 : 0}
+                textAnchor="middle" dominantBaseline="middle"
+                style={{ fontSize: LABEL_FS, fill: T.accent, fontFamily: "monospace", fontWeight: 800 }}>
+                {iface}
+            </text>
+            {twoLines && (
+                <text x={0} y={h / 2 - LABEL_H * 0.5} textAnchor="middle" dominantBaseline="middle"
+                    style={{ fontSize: LABEL_FS * 0.85, fill: T.textMuted, fontFamily: "monospace", fontWeight: 700 }}>
+                    {ip}
+                </text>
+            )}
+        </g>
+    );
+};
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /**
@@ -80,7 +114,9 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
     const groupRef = useRef();           // root <g> — updated imperatively during pan/zoom
 
     const [mode,     setMode]     = useState("select");
-    const [showMgmt, setShowMgmt] = useState(true);   // red de gestión visible
+    const [showMgmt, setShowMgmt] = useState(true);    // red de gestión visible
+    const [showIps,  setShowIps]  = useState(false);   // IPs de enlace visibles
+    const [confirmClear, setConfirmClear] = useState(false);
     const [linkFrom, setLinkFrom] = useState(null);
     const [mouse,    setMouse]    = useState({ x: 0, y: 0 }); // world coords, for link preview
     const [editId,   setEditId]   = useState(null);
@@ -157,30 +193,16 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
         if (labelsGroup) {
             // Mismo anclaje que el render (labelAnchor) — si estas dos fórmulas
             // se separan, las etiquetas "saltan" al empezar a arrastrar.
+            // Cada etiqueta es un <g> con transform propio y su contenido en
+            // coordenadas relativas, así que basta con mover el grupo: no hay
+            // que reposicionar rect y text por separado (y sigue funcionando
+            // igual tenga una línea o dos, con IP).
             const f = labelAnchor(A, B);
             const t = labelAnchor(B, A);
-
-            const fromRect = labelsGroup.querySelector('.label-from-rect');
-            const fromText = labelsGroup.querySelector('.label-from-text');
-            const toRect = labelsGroup.querySelector('.label-to-rect');
-            const toText = labelsGroup.querySelector('.label-to-text');
-
-            if (fromRect) {
-                fromRect.setAttribute("x", f.x - LABEL_W / 2);
-                fromRect.setAttribute("y", f.y - LABEL_H / 2);
-            }
-            if (fromText) {
-                fromText.setAttribute("x", f.x);
-                fromText.setAttribute("y", f.y);
-            }
-            if (toRect) {
-                toRect.setAttribute("x", t.x - LABEL_W / 2);
-                toRect.setAttribute("y", t.y - LABEL_H / 2);
-            }
-            if (toText) {
-                toText.setAttribute("x", t.x);
-                toText.setAttribute("y", t.y);
-            }
+            const gFrom = labelsGroup.querySelector('.label-from');
+            const gTo   = labelsGroup.querySelector('.label-to');
+            if (gFrom) gFrom.setAttribute("transform", `translate(${f.x},${f.y})`);
+            if (gTo)   gTo.setAttribute("transform", `translate(${t.x},${t.y})`);
         }
     };
 
@@ -437,6 +459,21 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
     // Estados en vuelo → los enlaces "fluyen" para que se vea que hay trabajo.
     const flowing   = !!statusVis?.pulse;
 
+    /**
+     * IP estática del extremo `nodeId` del enlace `ed`.
+     * Las IPs de enlace se guardan POR NODO, indexadas por id de enlace
+     * (`node.link_ips[edgeId]`, ver NodeEditor), no en el propio enlace: cada
+     * extremo tiene la suya, así que hay que mirar en el nodo correspondiente.
+     */
+    const linkIpOf = (ed, nodeId) => {
+        const n = nodes.find(x => x.id === nodeId);
+        return (n?.link_ips || {})[ed.id] || null;
+    };
+
+    // ¿Hay alguna IP de enlace definida? Si no, el botón de mostrarlas no
+    // aparece: sería un interruptor que no cambia nada.
+    const hasLinkIps = nodes.some(n => Object.values(n.link_ips || {}).some(Boolean));
+
     // ── Red de gestión ───────────────────────────────────────────────────────
     // Todo slice recibe una red de gestión propia: cada VM la ve como ens3 y es
     // por donde el orquestador la administra (los ens4+ son los enlaces que el
@@ -599,12 +636,7 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                 </button>
 
                 {!editMode && <button
-                    onClick={() => {
-                        if (window.confirm("¿Estás seguro de limpiar todo el lienzo? Perderás el trabajo no guardado.")) {
-                            setNodes([]); setEdges([]); setLinkFrom(null); setEditId(null);
-                            if (onCleared) onCleared();
-                        }
-                    }}
+                    onClick={() => setConfirmClear(true)}
                     style={btnBase({ boxShadow: "none", fontSize: 11, padding: "5px 12px",
                         color: T.red, border: `1px solid ${T.red}33`, background: T.redLight,
                         display: "flex", alignItems: "center", gap: 5 })}>
@@ -714,29 +746,17 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                                         stroke="transparent" strokeWidth="18" strokeLinecap="round"
                                         style={{ cursor: isDesignMode ? "pointer" : "default" }}
                                         onPointerDown={ev => onEdgePointerDown(ev, ed.id)} />
-                                    {/* Interface labels */}
+                                    {/* Etiquetas de interfaz (+ IP si está activado).
+                                        Cada extremo es un <g> con transform y contenido
+                                        relativo — ver updateEdgeCoords. */}
                                     <g id={`edge-labels-${ed.id}`} style={{ pointerEvents: "none" }}>
                                         {iface.fromIface && (
-                                            <g>
-                                                <rect className="label-from-rect" x={f.x - LABEL_W / 2} y={f.y - LABEL_H / 2}
-                                                    width={LABEL_W} height={LABEL_H} rx={5}
-                                                    fill={T.surface} stroke={T.accent + "88"} strokeWidth={1.2} />
-                                                <text className="label-from-text" x={f.x} y={f.y} textAnchor="middle" dominantBaseline="middle"
-                                                    style={{ fontSize: LABEL_FS, fill: T.accent, fontFamily: "monospace", fontWeight: 800 }}>
-                                                    {iface.fromIface}
-                                                </text>
-                                            </g>
+                                            <EdgeLabel className="label-from" x={f.x} y={f.y}
+                                                iface={iface.fromIface} ip={showIps ? linkIpOf(ed, ed.from) : null} />
                                         )}
                                         {iface.toIface && (
-                                            <g>
-                                                <rect className="label-to-rect" x={t.x - LABEL_W / 2} y={t.y - LABEL_H / 2}
-                                                    width={LABEL_W} height={LABEL_H} rx={5}
-                                                    fill={T.surface} stroke={T.accent + "88"} strokeWidth={1.2} />
-                                                <text className="label-to-text" x={t.x} y={t.y} textAnchor="middle" dominantBaseline="middle"
-                                                    style={{ fontSize: LABEL_FS, fill: T.accent, fontFamily: "monospace", fontWeight: 800 }}>
-                                                    {iface.toIface}
-                                                </text>
-                                            </g>
+                                            <EdgeLabel className="label-to" x={t.x} y={t.y}
+                                                iface={iface.toIface} ip={showIps ? linkIpOf(ed, ed.to) : null} />
                                         )}
                                     </g>
                                 </g>
@@ -847,6 +867,23 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                     Flotante y no en la barra de modo porque esa solo aparece
                     en diseño/edición, y la red de gestión interesa sobre todo
                     al mirar un slice ya desplegado. */}
+                {hasLinkIps && (
+                    <button
+                        onClick={() => setShowIps(v => !v)}
+                        aria-pressed={showIps}
+                        title="Mostrar u ocultar las IPs asignadas a cada interfaz de enlace"
+                        style={btnBase({
+                            position: "absolute", top: 12, right: 165, zIndex: 5,
+                            fontSize: 11, padding: "5px 11px",
+                            background: showIps ? T.accentLight : T.surface,
+                            color:      showIps ? T.accent      : T.textMuted,
+                            border: `1px solid ${showIps ? T.accent + "66" : T.border}`,
+                            display: "flex", alignItems: "center", gap: 6,
+                        })}>
+                        <Globe size={12} /> IPs de enlace
+                    </button>
+                )}
+
                 {nodes.length > 0 && (
                     <button
                         onClick={() => setShowMgmt(v => !v)}
@@ -880,6 +917,22 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                         </div>
                         <div style={{ color: T.textFaint, fontSize: 11 }}>Doble clic en cualquier nodo para editarlo</div>
                     </div>
+                )}
+
+                {/* Confirmación de limpieza del lienzo — sustituye al
+                    window.confirm nativo, que rompía la estética de la app. */}
+                {confirmClear && (
+                    <ConfirmModal
+                        title="Limpiar el lienzo"
+                        msg={`Se eliminarán ${nodes.length} VM${nodes.length === 1 ? "" : "s"} y ${edges.length} enlace${edges.length === 1 ? "" : "s"} del diseño actual. Perderás el trabajo no guardado.`}
+                        confirmLabel="Sí, limpiar"
+                        onOk={() => {
+                            setNodes([]); setEdges([]); setLinkFrom(null); setEditId(null);
+                            setConfirmClear(false);
+                            if (onCleared) onCleared();
+                        }}
+                        onCancel={() => setConfirmClear(false)}
+                    />
                 )}
 
                 {/* ── Node editor overlay ── */}

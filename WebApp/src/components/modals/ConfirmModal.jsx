@@ -2,8 +2,10 @@ import { T, btnBase } from "../../theme/tokens";
 import { Overlay } from "./Overlay";
 import { AlertTriangle, Trash2 } from "../ui/Icon";
 
-export const ConfirmModal = ({ title, msg, onOk, onCancel }) => (
-    <Overlay>
+// confirmLabel es opcional: por defecto mantiene "Sí, Eliminar" para no cambiar
+// el texto de los usos que ya existían.
+export const ConfirmModal = ({ title, msg, onOk, onCancel, confirmLabel = "Sí, Eliminar" }) => (
+    <Overlay label={title}>
         <div style={{ background: T.surface, border: `1px solid ${T.red}33`, borderRadius: 14, padding: 26, maxWidth: 380, width: "90%", boxShadow: T.shadowMd }}>
             <div style={{ fontSize: 15, fontWeight: 800, color: T.text, marginBottom: 8, display: "flex", alignItems: "center", gap: 8 }}>
                 <AlertTriangle size={16} color={T.red} /> {title}
@@ -13,7 +15,7 @@ export const ConfirmModal = ({ title, msg, onOk, onCancel }) => (
                 <button onClick={onCancel} style={btnBase()}>Cancelar</button>
                 <button onClick={onOk} style={btnBase({ background: T.redLight, color: T.red, border: `1px solid ${T.red}44`,
                     display: "flex", alignItems: "center", gap: 6 })}>
-                    <Trash2 size={13} /> Sí, Eliminar
+                    <Trash2 size={13} /> {confirmLabel}
                 </button>
             </div>
         </div>
