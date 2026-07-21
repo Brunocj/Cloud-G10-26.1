@@ -1,5 +1,17 @@
 // --- NODE / TOPOLOGY HELPERS -------------------------------------------------
 
+/**
+ * Escala de la tarjeta de VM en el lienzo. Vive aquí, y no en Canvas.jsx, para
+ * que el espaciado de las plantillas de abajo crezca CON el nodo: si el nodo se
+ * agranda pero la separación no, las tarjetas acaban tapando las etiquetas de
+ * interfaz (ens3/ens4) que se dibujan sobre los enlaces.
+ *
+ * Canvas.jsx lo importa para el scale() del <g>, el hit-test y el anclaje de
+ * las etiquetas. Es la única fuente de verdad: cambiar este número reescala
+ * todo de forma consistente.
+ */
+export const NODE_SCALE = 1.35;
+
 let _nid = 200;
 
 // Base temporal única por carga de página: garantiza que los IDs de nodos NUEVOS
@@ -21,7 +33,7 @@ export const mkNode = (x, y, label, defaultImg) => {
 
 // ── Linear ────────────────────────────────────────────────────────────────────
 export const buildLinear = (count, cx, cy) => {
-    const sp = 150, totalW = (count - 1) * sp;
+    const sp = 150 * NODE_SCALE, totalW = (count - 1) * sp;
     const nodes = Array.from({ length: count }, (_, i) =>
         mkNode(cx - totalW / 2 + i * sp, cy, `VM-${i + 1}`)
     );
@@ -33,7 +45,7 @@ export const buildLinear = (count, cx, cy) => {
 
 // ── Ring ──────────────────────────────────────────────────────────────────────
 export const buildRing = (count, cx, cy) => {
-    const r = Math.max(100, count * 30);
+    const r = Math.max(100, count * 30) * NODE_SCALE;
     const nodes = Array.from({ length: count }, (_, i) => {
         const a = (2 * Math.PI * i) / count - Math.PI / 2;
         return mkNode(cx + r * Math.cos(a), cy + r * Math.sin(a), `VM-${i + 1}`);
@@ -46,7 +58,7 @@ export const buildRing = (count, cx, cy) => {
 
 // ── Mesh (fully connected) ────────────────────────────────────────────────────
 export const buildMesh = (count, cx, cy) => {
-    const r = Math.max(110, count * 32);
+    const r = Math.max(110, count * 32) * NODE_SCALE;
     const nodes = Array.from({ length: count }, (_, i) => {
         const a = (2 * Math.PI * i) / count - Math.PI / 2;
         return mkNode(cx + r * Math.cos(a), cy + r * Math.sin(a), `VM-${i + 1}`);
@@ -65,7 +77,7 @@ export const buildMesh = (count, cx, cy) => {
 export const buildTree = (count, cx, cy) => {
     const nodes = [];
     const edges = [];
-    const spX = 140, spY = 110;
+    const spX = 140 * NODE_SCALE, spY = 110 * NODE_SCALE;
 
     // BFS layout: place nodes level by level
     for (let i = 0; i < count; i++) {
@@ -88,14 +100,14 @@ export const buildTree = (count, cx, cy) => {
 // ── Bus ───────────────────────────────────────────────────────────────────────
 // One central bus node connected to all others (star/hub topology)
 export const buildBus = (count, cx, cy) => {
-    const sp = 140;
+    const sp = 140 * NODE_SCALE;
     const totalW = (count - 1) * sp;
 
     // All nodes on a horizontal line; bus node is separate (center-top)
     const leaves = Array.from({ length: count }, (_, i) =>
-        mkNode(cx - totalW / 2 + i * sp, cy + 80, `VM-${i + 1}`)
+        mkNode(cx - totalW / 2 + i * sp, cy + 80 * NODE_SCALE, `VM-${i + 1}`)
     );
-    const busNode = mkNode(cx, cy - 60, "BUS");
+    const busNode = mkNode(cx, cy - 60 * NODE_SCALE, "BUS");
 
     const nodes = [busNode, ...leaves];
     const edges = leaves.map((leaf, i) => ({

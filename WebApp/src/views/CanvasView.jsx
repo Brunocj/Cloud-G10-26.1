@@ -6,9 +6,9 @@ import { ThemePicker } from "../components/ui/ThemePicker";
 import {
     ArrowLeft, Save, Zap, Flame, Upload, Download, LayoutList,
 } from "../components/ui/Icon";
-import { AzureVm } from "../components/ui/AzureIcons";
 
 import { Canvas }          from "../components/canvas/Canvas";
+import { SlicesOverview }  from "./SlicesOverview";
 import { DeployModal }     from "../components/modals/DeployModal";
 import { SaveDraftModal }  from "../components/modals/SaveDraftModal";
 import { ConfirmModal }    from "../components/modals/ConfirmModal";
@@ -76,11 +76,11 @@ export const CanvasView = ({
     return (
         <>
             {/* ── Topbar ───────────────────────────────────────────────── */}
-            <div style={{
+            <div className="app-topbar" style={{
                 padding: "0 20px", height: 54,
                 borderBottom: `1px solid ${T.border}`, background: T.surface,
                 display: "flex", alignItems: "center", gap: 12,
-                flexShrink: 0, boxShadow: "0 2px 8px rgba(20,50,22,0.05)",
+                flexShrink: 0, boxShadow: "0 2px 8px rgba(0,0,0,0.05)",
             }}>
                 {viewState === "slice" ? (
                     /* ── Viewing / editing an existing slice ── */
@@ -189,16 +189,14 @@ export const CanvasView = ({
                 ) : viewState === "design" ? (
                     <Canvas nodes={nodes} edges={edges} setNodes={setNodes} setEdges={setEdges} imageList={imageList} activeSlice={null} onOpenConsole={setConsoleVm} targetAz={targetAz} setTargetAz={setTargetAz} apiFetch={apiFetch} onCleared={() => { setTargetAz(""); setAzModalOpen(true); }} isDesignMode={true} />
                 ) : (
-                    /* ── Browse empty state — prompt to select a slice ── */
-                    <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12, background: T.bg }}>
-                        <AzureVm size={56} />
-                        <div style={{ fontSize: 14, fontWeight: 600, color: T.textMuted }}>
-                            Seleccione un slice de la barra lateral para visualizarlo
-                        </div>
-                        <div style={{ fontSize: 12, color: T.textFaint }}>
-                            O cree uno nuevo con el botón "Crear Nuevo Slice"
-                        </div>
-                    </div>
+                    /* ── Browse: rejilla con todos los slices ──────────────
+                        Antes aquí solo había un cartel de "seleccione un slice
+                        de la barra lateral" ocupando la pantalla entera. */
+                    <SlicesOverview
+                        slices={slices}
+                        onOpen={setActiveId}
+                        canSeeOwner={user?.role === "admin" || user?.role === "superAdmin" || user?.role === "jefeProyecto"}
+                    />
                 )}
             </div>
 

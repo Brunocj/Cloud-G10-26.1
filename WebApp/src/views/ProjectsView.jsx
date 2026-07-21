@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { T, btnBase, getGlobalCss } from "../theme/tokens";
+import { T, btnBase, getGlobalCss, FONT_STACK } from "../theme/tokens";
 import { ThemePicker } from "../components/ui/ThemePicker";
 import { UserAvatar }  from "../components/ui/UserAvatar";
 import {
@@ -84,7 +84,7 @@ const ProjectEditModal = ({ project, onSave, onClose }) => {
                     <div style={{ fontSize: 16, fontWeight: 700, color: T.text }}>
                         {isNew ? "Nuevo Proyecto" : "Editar Proyecto"}
                     </div>
-                    <button onClick={onClose} style={btnBase({ padding: 4, background: "transparent", boxShadow: "none", color: T.textMuted })}>
+                    <button onClick={onClose} aria-label="Cerrar" style={btnBase({ padding: 4, background: "transparent", boxShadow: "none", color: T.textMuted })}>
                         <X size={16} />
                     </button>
                 </div>
@@ -228,7 +228,7 @@ const MembersPanel = ({ project, apiFetch, currentUser, onClose, flash }) => {
                         <div style={{ fontSize: 15, fontWeight: 700, color: T.text }}>{project.name}</div>
                         <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>Miembros del proyecto</div>
                     </div>
-                    <button onClick={onClose} style={btnBase({ padding: 4, background: "transparent", boxShadow: "none", color: T.textMuted })}>
+                    <button onClick={onClose} aria-label="Cerrar" style={btnBase({ padding: 4, background: "transparent", boxShadow: "none", color: T.textMuted })}>
                         <X size={16} />
                     </button>
                 </div>
@@ -456,9 +456,9 @@ export const ProjectsView = ({ user, logout, reTheme, themeRev, onBack, onProfil
     };
 
     return (
-        <div style={{ display: "flex", flexDirection: "column", height: "100vh", background: T.bg, fontFamily: "'DM Sans','Segoe UI',sans-serif", color: T.text }}>
+        <div style={{ display: "flex", flexDirection: "column", height: "100vh", background: T.bg, fontFamily: FONT_STACK, color: T.text }}>
             {/* Topbar */}
-            <div style={{ padding: "0 20px", height: 54, borderBottom: `1px solid ${T.border}`, background: T.surface, display: "flex", alignItems: "center", gap: 12, flexShrink: 0, boxShadow: "0 2px 8px rgba(20,50,22,0.05)" }}>
+            <div className="app-topbar" style={{ padding: "0 20px", height: 54, borderBottom: `1px solid ${T.border}`, background: T.surface, display: "flex", alignItems: "center", gap: 12, flexShrink: 0, boxShadow: "0 2px 8px rgba(0,0,0,0.05)" }}>
                 <button onClick={onBack}
                     style={btnBase({ padding: "6px 10px", fontSize: 11, background: T.surfaceElevated, color: T.textMuted, border: `1px solid ${T.border}`, boxShadow: "none", display: "flex", alignItems: "center", gap: 6 })}>
                     <ArrowLeft size={13} /> Volver

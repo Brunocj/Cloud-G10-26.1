@@ -52,7 +52,7 @@ export const PublishTemplateModal = ({ sliceName, userRole, apiFetch, onConfirm,
             <div style={{ background: T.surface, borderRadius: 14, width: 440, border: `1px solid ${T.border}`, padding: "24px 26px", boxShadow: "0 12px 40px rgba(0,0,0,0.25)" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 14 }}>
                     <div style={{ fontSize: 16, fontWeight: 800, color: T.text }}>⭐ Publicar como Plantilla</div>
-                    <button onClick={onClose} style={btnBase({ padding: 4, background: "transparent", boxShadow: "none", color: T.textMuted })}>
+                    <button onClick={onClose} aria-label="Cerrar" style={btnBase({ padding: 4, background: "transparent", boxShadow: "none", color: T.textMuted })}>
                         <X size={16} />
                     </button>
                 </div>

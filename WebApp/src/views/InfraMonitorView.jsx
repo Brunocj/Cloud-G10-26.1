@@ -13,7 +13,7 @@
  *  - La caída de Observabilidad NO bloquea la gestión: las cards muestran specs sin métricas.
  */
 import { useState, useEffect, useRef } from "react";
-import { T, btnBase, inp } from "../theme/tokens";
+import { T, btnBase, inp, FONT_STACK } from "../theme/tokens";
 import { ThemePicker }  from "../components/ui/ThemePicker";
 import { UserAvatar }   from "../components/ui/UserAvatar";
 import {
@@ -93,7 +93,7 @@ const WorkerModal = ({ worker, zones, onSave, onClose, onTest }) => {
                     <div style={{ fontSize: 16, fontWeight: 700, color: T.text }}>
                         {worker ? `Editar ${worker.name}` : "Matricular Servidor Físico"}
                     </div>
-                    <button onClick={onClose} style={btnBase({ padding: 4, background: "transparent", boxShadow: "none", color: T.textMuted })}>
+                    <button onClick={onClose} aria-label="Cerrar" style={btnBase({ padding: 4, background: "transparent", boxShadow: "none", color: T.textMuted })}>
                         <X size={16} />
                     </button>
                 </div>
@@ -419,13 +419,13 @@ export const InfraMonitorView = ({ user, logout, reTheme, themeRev, onBack, onPr
     return (
         <div style={{
             display: "flex", flexDirection: "column", height: "100vh",
-            background: T.bg, fontFamily: "'DM Sans','Segoe UI',sans-serif", color: T.text,
+            background: T.bg, fontFamily: FONT_STACK, color: T.text,
         }}>
             {/* Topbar */}
-            <div style={{
+            <div className="app-topbar" style={{
                 padding: "0 20px", height: 54, borderBottom: `1px solid ${T.border}`,
                 background: T.surface, display: "flex", alignItems: "center", gap: 12,
-                flexShrink: 0, boxShadow: "0 2px 8px rgba(20,50,22,0.05)",
+                flexShrink: 0, boxShadow: "0 2px 8px rgba(0,0,0,0.05)",
             }}>
                 <button onClick={onBack}
                     style={btnBase({ padding: "6px 10px", fontSize: 11, background: T.surfaceElevated, color: T.textMuted, border: `1px solid ${T.border}`, boxShadow: "none", display: "flex", alignItems: "center", gap: 6 })}>
@@ -436,7 +436,7 @@ export const InfraMonitorView = ({ user, logout, reTheme, themeRev, onBack, onPr
                 <span style={{ fontSize: 9, fontWeight: 800, padding: "2px 8px", borderRadius: 20, background: "#ff820022", color: "#ff8200", border: "1px solid #ff820044" }}>
                     BARE-METAL · SUPERADMIN
                 </span>
-                <button onClick={refreshAll} title="Refrescar"
+                <button onClick={refreshAll} title="Refrescar" aria-label="Refrescar"
                     style={btnBase({ padding: 6, background: "transparent", boxShadow: "none", color: T.textMuted })}>
                     <RefreshCw size={14} />
                 </button>

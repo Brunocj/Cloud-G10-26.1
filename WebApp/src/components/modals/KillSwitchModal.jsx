@@ -31,7 +31,7 @@ export const KillSwitchModal = ({ sliceName, ownerLabel, onConfirm, onClose }) =
                     <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 16, fontWeight: 800, color: T.red }}>
                         <AlertTriangle size={18} /> Forzar Destrucción (Kill Switch)
                     </div>
-                    <button onClick={onClose} style={btnBase({ padding: 4, background: "transparent", boxShadow: "none", color: T.textMuted })}>
+                    <button onClick={onClose} aria-label="Cerrar" style={btnBase({ padding: 4, background: "transparent", boxShadow: "none", color: T.textMuted })}>
                         <X size={16} />
                     </button>
                 </div>

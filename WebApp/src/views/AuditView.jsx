@@ -4,15 +4,18 @@
  * Filtros por nivel, módulo y búsqueda de texto. Refresco manual + auto (15s).
  */
 import { useState, useEffect, useRef } from "react";
-import { T, btnBase, inp } from "../theme/tokens";
+import { T, btnBase, inp, FONT_STACK } from "../theme/tokens";
 import { UserAvatar } from "../components/ui/UserAvatar";
 import { ArrowLeft, ClipboardList, RefreshCw, AlertTriangle, Search } from "../components/ui/Icon";
 
-const LEVEL_STYLE = {
-    INFO:    { fg: "#1976d2", bg: "#e3f2fd" },
-    WARNING: { fg: "#a16207", bg: "#fef9c3" },
-    ERROR:   { fg: "#dc2626", bg: "#fee2e2" },
-};
+// Función (no constante de módulo) para que lea los valores vivos de T: los
+// colores eran hex fijos de tema claro y en los temas oscuros quedaban badges
+// pálidos sobre superficie oscura.
+const getLevelStyle = () => ({
+    INFO:    { fg: T.accent, bg: T.accentLight },
+    WARNING: { fg: T.yellow, bg: T.yellowLight },
+    ERROR:   { fg: T.red,    bg: T.redLight    },
+});
 
 const ACTION_LABELS = {
     deploy_requested: "Solicitud",
@@ -44,6 +47,7 @@ export const AuditView = ({ user, onBack, onProfile, apiFetch }) => {
     const [query, setQuery]     = useState("");
     const queryRef = useRef("");
     queryRef.current = query;
+    const levelStyle = getLevelStyle();
 
     const load = async (lvl = level) => {
         try {
@@ -64,8 +68,8 @@ export const AuditView = ({ user, onBack, onProfile, apiFetch }) => {
     }, [level]);
 
     return (
-        <div style={{ display: "flex", flexDirection: "column", height: "100vh", background: T.bg, fontFamily: "'DM Sans','Segoe UI',sans-serif", color: T.text }}>
-            <div style={{ padding: "0 20px", height: 54, borderBottom: `1px solid ${T.border}`, background: T.surface, display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
+        <div style={{ display: "flex", flexDirection: "column", height: "100vh", background: T.bg, fontFamily: FONT_STACK, color: T.text }}>
+            <div className="app-topbar" style={{ padding: "0 20px", height: 54, borderBottom: `1px solid ${T.border}`, background: T.surface, display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
                 <button onClick={onBack}
                     style={btnBase({ padding: "6px 10px", fontSize: 11, background: T.surfaceElevated, color: T.textMuted, border: `1px solid ${T.border}`, boxShadow: "none", display: "flex", alignItems: "center", gap: 6 })}>
                     <ArrowLeft size={13} /> Volver
@@ -97,7 +101,7 @@ export const AuditView = ({ user, onBack, onProfile, apiFetch }) => {
                         style={{ ...inp, marginBottom: 0, padding: "6px 10px 6px 30px", fontSize: 11 }} />
                 </div>
 
-                <button onClick={() => load()} title="Refrescar"
+                <button onClick={() => load()} title="Refrescar" aria-label="Refrescar"
                     style={btnBase({ padding: 6, background: "transparent", boxShadow: "none", color: T.textMuted })}>
                     <RefreshCw size={14} />
                 </button>
@@ -125,10 +129,10 @@ export const AuditView = ({ user, onBack, onProfile, apiFetch }) => {
                             </thead>
                             <tbody>
                                 {rows.map(r => {
-                                    const lv = LEVEL_STYLE[r.level] || LEVEL_STYLE.INFO;
+                                    const lv = levelStyle[r.level] || levelStyle.INFO;
                                     const isErr = r.level === "ERROR" || r.action === "force_destroy";
                                     return (
-                                        <tr key={r.id} style={{ borderBottom: `1px solid ${T.border}`, background: isErr ? "#fee2e222" : "transparent" }}>
+                                        <tr key={r.id} style={{ borderBottom: `1px solid ${T.border}`, background: isErr ? T.redLight : "transparent" }}>
                                             <td style={{ padding: "8px 12px", fontFamily: "monospace", fontSize: 11, color: T.textMuted, whiteSpace: "nowrap" }}>{r.timestamp}</td>
                                             <td style={{ padding: "8px 12px" }}>
                                                 <span style={{ fontSize: 9, fontWeight: 800, padding: "2px 8px", borderRadius: 20, color: lv.fg, background: lv.bg }}>{r.level}</span>

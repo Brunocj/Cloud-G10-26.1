@@ -1,4 +1,4 @@
-import { T, getGlobalCss } from "../theme/tokens";
+import { T, getGlobalCss, FONT_STACK } from "../theme/tokens";
 import { Toast } from "../components/ui/Toast";
 
 // ─── AppLayout ────────────────────────────────────────────────────────────────
@@ -7,7 +7,7 @@ export const AppLayout = ({ sidebar, children, toast, themeRev }) => (
     <div style={{
         display: "flex", height: "100vh",
         background: T.bg,
-        fontFamily: "'DM Sans','Segoe UI',sans-serif",
+        fontFamily: FONT_STACK,
         color: T.text, overflow: "hidden",
     }}>
         {sidebar}

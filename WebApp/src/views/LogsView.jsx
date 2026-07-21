@@ -8,7 +8,7 @@
  * Props: { user, onBack, onProfile, apiFetch }
  */
 import { useState, useEffect, useCallback, useRef } from "react";
-import { T, btnBase, inp } from "../theme/tokens";
+import { T, btnBase, inp, FONT_STACK } from "../theme/tokens";
 import { UserAvatar } from "../components/ui/UserAvatar";
 import { ArrowLeft, Terminal, RefreshCw, AlertTriangle, Search } from "../components/ui/Icon";
 
@@ -184,9 +184,9 @@ export function LogsView({ user, onBack, onProfile, apiFetch }) {
     const LEVEL_COLOR = { ERROR: T.red, WARNING: T.yellow, DEBUG: T.textFaint };
 
     return (
-        <div style={{ display: "flex", flexDirection: "column", height: "100vh", background: T.bg, fontFamily: "'DM Sans','Segoe UI',sans-serif", color: T.text }}>
+        <div style={{ display: "flex", flexDirection: "column", height: "100vh", background: T.bg, fontFamily: FONT_STACK, color: T.text }}>
             {/* ── Topbar (plantilla maestra) ── */}
-            <div style={{ padding: "0 20px", height: 54, borderBottom: `1px solid ${T.border}`, background: T.surface, display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
+            <div className="app-topbar" style={{ padding: "0 20px", height: 54, borderBottom: `1px solid ${T.border}`, background: T.surface, display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
                 <button onClick={onBack}
                     style={btnBase({ padding: "6px 10px", fontSize: 11, background: T.surfaceElevated, color: T.textMuted, border: `1px solid ${T.border}`, boxShadow: "none", display: "flex", alignItems: "center", gap: 6 })}>
                     <ArrowLeft size={13} /> Volver
@@ -196,7 +196,7 @@ export function LogsView({ user, onBack, onProfile, apiFetch }) {
                 <span style={{ fontSize: 9, fontWeight: 800, padding: "2px 8px", borderRadius: 20, background: T.accentLight, color: T.accent, border: `1px solid ${T.accent}44` }}>
                     LOKI · SUPERADMIN
                 </span>
-                <button onClick={runQuery} title="Refrescar" disabled={loading}
+                <button onClick={runQuery} title="Refrescar" aria-label="Refrescar" disabled={loading}
                     style={btnBase({ padding: 6, background: "transparent", boxShadow: "none", color: T.textMuted, opacity: loading ? 0.5 : 1 })}>
                     <RefreshCw size={14} />
                 </button>
@@ -285,12 +285,12 @@ export function LogsView({ user, onBack, onProfile, apiFetch }) {
                     {/* Líneas */}
                     <div style={{ flex: 1, overflow: "auto", fontFamily: "'JetBrains Mono','Fira Code',Consolas,monospace", fontSize: 12, lineHeight: 1.55 }}>
                         {lines.length === 0 && !loading && (
-                            <div style={{ padding: 30, textAlign: "center", color: T.textMuted, fontFamily: "'DM Sans','Segoe UI',sans-serif", fontSize: 13 }}>
+                            <div style={{ padding: 30, textAlign: "center", color: T.textMuted, fontFamily: FONT_STACK, fontSize: 13 }}>
                                 Sin resultados para el filtro actual.
                             </div>
                         )}
                         {loading && lines.length === 0 && (
-                            <div style={{ padding: 30, textAlign: "center", color: T.textMuted, fontFamily: "'DM Sans','Segoe UI',sans-serif", fontSize: 13 }}>
+                            <div style={{ padding: 30, textAlign: "center", color: T.textMuted, fontFamily: FONT_STACK, fontSize: 13 }}>
                                 Cargando…
                             </div>
                         )}

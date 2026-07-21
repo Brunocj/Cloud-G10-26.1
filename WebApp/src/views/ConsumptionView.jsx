@@ -3,7 +3,7 @@
  * admin/superAdmin ven todos los proyectos; jefeProyecto los suyos.
  */
 import { useState, useEffect } from "react";
-import { T, btnBase } from "../theme/tokens";
+import { T, btnBase, FONT_STACK } from "../theme/tokens";
 import { UserAvatar } from "../components/ui/UserAvatar";
 import { ArrowLeft, BarChart2, RefreshCw, AlertTriangle, Users } from "../components/ui/Icon";
 
@@ -38,15 +38,15 @@ export const ConsumptionView = ({ user, onBack, onProfile, apiFetch }) => {
     const maxVcpu = Math.max(1, ...rows.map(r => r.vcpus || 0));
 
     return (
-        <div style={{ display: "flex", flexDirection: "column", height: "100vh", background: T.bg, fontFamily: "'DM Sans','Segoe UI',sans-serif", color: T.text }}>
-            <div style={{ padding: "0 20px", height: 54, borderBottom: `1px solid ${T.border}`, background: T.surface, display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
+        <div style={{ display: "flex", flexDirection: "column", height: "100vh", background: T.bg, fontFamily: FONT_STACK, color: T.text }}>
+            <div className="app-topbar" style={{ padding: "0 20px", height: 54, borderBottom: `1px solid ${T.border}`, background: T.surface, display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
                 <button onClick={onBack}
                     style={btnBase({ padding: "6px 10px", fontSize: 11, background: T.surfaceElevated, color: T.textMuted, border: `1px solid ${T.border}`, boxShadow: "none", display: "flex", alignItems: "center", gap: 6 })}>
                     <ArrowLeft size={13} /> Volver
                 </button>
                 <BarChart2 size={16} color={T.accent} />
                 <span style={{ fontSize: 15, fontWeight: 800 }}>Consumo por Proyecto</span>
-                <button onClick={load} title="Refrescar"
+                <button onClick={load} title="Refrescar" aria-label="Refrescar"
                     style={btnBase({ padding: 6, background: "transparent", boxShadow: "none", color: T.textMuted })}>
                     <RefreshCw size={14} />
                 </button>

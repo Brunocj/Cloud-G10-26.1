@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { T, inp } from "../../theme/tokens";
+import { T, inp, FONT_STACK, getGlobalCss } from "../../theme/tokens";
 import { Toast } from "../ui/Toast";
 import { RegisterPage } from "./RegisterPage";
 import { Mail, Lock, Eye, EyeOff, AlertTriangle, Cloud, Loader, FlaskConical, ArrowRight } from "../ui/Icon";
@@ -86,7 +86,7 @@ export const LoginPage = ({ onLogin, isDemoMode = false }) => {
     return (
         <div style={{
             minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center",
-            background: T.bg, fontFamily: "'DM Sans','Segoe UI',sans-serif",
+            background: T.bg, fontFamily: FONT_STACK,
             position: "relative", overflow: "hidden",
         }}>
             {/* Dot-grid background */}
@@ -111,14 +111,14 @@ export const LoginPage = ({ onLogin, isDemoMode = false }) => {
                 margin: "20px",
                 background: T.surface, borderRadius: 20,
                 border: `1px solid ${T.border}`,
-                boxShadow: "0 20px 60px rgba(20,60,22,0.12), 0 4px 16px rgba(20,60,22,0.08)",
+                boxShadow: "0 20px 60px rgba(0,0,0,0.13), 0 4px 16px rgba(0,0,0,0.07)",
                 overflow: "hidden",
                 animation: "fadeIn 0.35s ease",
                 transition: "max-width 0.3s ease",
             }}>
                 {/* Header */}
                 <div style={{
-                    background: `linear-gradient(135deg, ${T.accent} 0%, #388e3c 100%)`,
+                    background: `linear-gradient(135deg, ${T.accentMid} 0%, ${T.accent} 100%)`,
                     padding: "22px 32px 18px",
                     display: "flex", alignItems: "center", gap: 14,
                 }}>
@@ -184,6 +184,7 @@ export const LoginPage = ({ onLogin, isDemoMode = false }) => {
                                     placeholder="••••••••" disabled={loading} IconComp={Lock}
                                     rightSlot={
                                         <button type="button" onClick={() => setShowPass(v => !v)}
+                                            aria-label={showPass ? "Ocultar contraseña" : "Mostrar contraseña"}
                                             style={{ background: "none", border: "none", cursor: "pointer", color: T.textMuted, padding: 2, display: "flex" }}>
                                             {showPass ? <EyeOff size={15} /> : <Eye size={15} />}
                                         </button>
@@ -208,7 +209,7 @@ export const LoginPage = ({ onLogin, isDemoMode = false }) => {
                                         marginTop: 4, height: 48, borderRadius: 12, border: "none",
                                         background: (loading || !email.trim() || !password)
                                             ? T.border
-                                            : `linear-gradient(135deg, ${T.accent} 0%, #388e3c 100%)`,
+                                            : `linear-gradient(135deg, ${T.accentMid} 0%, ${T.accent} 100%)`,
                                         color: (loading || !email.trim() || !password) ? T.textMuted : "#fff",
                                         fontSize: 15, fontWeight: 700, fontFamily: "inherit",
                                         cursor: (loading || !email.trim() || !password) ? "not-allowed" : "pointer",
@@ -241,13 +242,15 @@ export const LoginPage = ({ onLogin, isDemoMode = false }) => {
 
             {toast && <Toast msg={toast.msg} type={toast.type} />}
 
+            {/* El login se renderiza fuera del árbol de AppLayout, así que no
+                heredaba el CSS global: se quedaba sin anillo de foco de teclado
+                ni respeto a prefers-reduced-motion, justo en la única pantalla
+                que es un formulario. Se inyecta aquí además de sus keyframes. */}
+            <style>{getGlobalCss()}</style>
             <style>{`
-                @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&display=swap');
-                * { box-sizing: border-box; }
                 @keyframes fadeIn { from { opacity:0; transform:translateY(20px); } to { opacity:1; transform:translateY(0); } }
                 @keyframes shake  { 0%,100%{transform:translateX(0)} 20%,60%{transform:translateX(-5px)} 40%,80%{transform:translateX(5px)} }
                 @keyframes spin   { to { transform:rotate(360deg); } }
-                input:focus, select:focus { outline: none; }
             `}</style>
         </div>
     );

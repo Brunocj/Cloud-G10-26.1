@@ -1,9 +1,58 @@
 import { useState, useRef } from "react";
-import { T, btnBase } from "../../theme/tokens";
-import { buildLinear, buildRing, buildMesh, buildTree, buildBus, mkNode } from "../../utils/topology";
+import { T, btnBase, getStatusVisual } from "../../theme/tokens";
+import { buildLinear, buildRing, buildMesh, buildTree, buildBus, mkNode, NODE_SCALE } from "../../utils/topology";
 import { NodeEditor } from "./NodeEditor";
 import { MousePointer2, Link2, Monitor, Trash2, Maximize2, AlertTriangle, ZoomIn, ZoomOut } from "../ui/Icon";
-import { AzureVm, AzureNetwork, UbuntuLogo, WindowsLogo } from "../ui/AzureIcons";
+import { AzureVm, AzureNetwork, UbuntuLogo, WindowsLogo, CanvasNetBadge, CanvasSwitch } from "../ui/AzureIcons";
+
+// ─── Geometría del nodo ───────────────────────────────────────────────────────
+// NODE_SCALE se importa de utils/topology.js, que es también quien escala el
+// espaciado de las plantillas con el mismo factor. Se aplica como scale() en el
+// <g> del nodo, así que arrastra consigo textos, íconos y badges.
+// OJO: los enlaces se dibujan entre CENTROS de nodo, que no dependen de la
+// escala — pero sus ETIQUETAS sí (ver labelAnchor).
+
+// Semiejes del área sensible al clic, en coordenadas de mundo.
+const HIT_HALF_W = 30 * NODE_SCALE;
+const HIT_HALF_H = 28 * NODE_SCALE;
+
+// Media caja que ocupa la tarjeta dibujada. El alto usa 42 y no 30 porque bajo
+// el rectángulo todavía se pintan el label y las specs (y=27.5 y y=38.5).
+const CARD_HALF_W = 36 * NODE_SCALE;
+const CARD_HALF_H = 42 * NODE_SCALE;
+
+// Separación entre el borde de la tarjeta y la etiqueta de interfaz.
+const LABEL_MARGIN = 13;
+
+// Etiquetas de interfaz (ens3/ens4…). Antes eran 34×14 con texto de 7.5px:
+// ilegibles proyectadas. Se escalan igual que el nodo.
+const LABEL_W  = 42 * NODE_SCALE;
+const LABEL_H  = 17 * NODE_SCALE;
+const LABEL_FS = 9.5 * NODE_SCALE;
+
+/**
+ * Punto donde se ancla la etiqueta de interfaz del extremo `from` de un enlace.
+ *
+ * Antes se usaba una fracción fija de la recta (0.28 / 0.72). Eso rompía en
+ * cuanto el enlace era corto o el nodo grande: con el espaciado lineal de 150 y
+ * la tarjeta a escala 1.35, el 28% caía en 42 px mientras la tarjeta llega a
+ * 48.6 px — la etiqueta quedaba DEBAJO de la VM. Ahora se proyecta el rayo
+ * from→to contra el rectángulo de la tarjeta y se separa LABEL_MARGIN del
+ * borde real, así que no depende de la longitud del enlace.
+ *
+ * El clamp a 0.40·longitud evita que en enlaces muy cortos las dos etiquetas
+ * del mismo enlace se crucen en el centro.
+ */
+const labelAnchor = (from, to) => {
+    const dx = to.x - from.x, dy = to.y - from.y;
+    const len = Math.hypot(dx, dy) || 1;
+    const ux = dx / len, uy = dy / len;
+    // Distancia del centro al borde del rectángulo en la dirección (ux,uy)
+    const hitX = Math.abs(ux) > 1e-6 ? CARD_HALF_W / Math.abs(ux) : Infinity;
+    const hitY = Math.abs(uy) > 1e-6 ? CARD_HALF_H / Math.abs(uy) : Infinity;
+    const d = Math.min(Math.min(hitX, hitY) + LABEL_MARGIN, len * 0.40);
+    return { x: from.x + ux * d, y: from.y + uy * d };
+};
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -31,6 +80,7 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
     const groupRef = useRef();           // root <g> — updated imperatively during pan/zoom
 
     const [mode,     setMode]     = useState("select");
+    const [showMgmt, setShowMgmt] = useState(true);   // red de gestión visible
     const [linkFrom, setLinkFrom] = useState(null);
     const [mouse,    setMouse]    = useState({ x: 0, y: 0 }); // world coords, for link preview
     const [editId,   setEditId]   = useState(null);
@@ -66,6 +116,18 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
         };
     };
 
+    /**
+     * Único punto que escribe el cursor del SVG. Memoriza el valor en `cursor`
+     * para no reescribir el estilo en cada pointermove; por eso TODOS los sitios
+     * que cambian el cursor deben pasar por aquí, o el ref quedaría desfasado y
+     * el hover dejaría de actualizarse.
+     */
+    const setCursor = (value) => {
+        if (cursor.current === value) return;
+        cursor.current = value;
+        if (svgRef.current) svgRef.current.style.cursor = value;
+    };
+
     /** Apply transform imperatively (avoids React re-render during drag). */
     const applyTransform = (x, y, z) => {
         panRef.current = { x, y };
@@ -93,31 +155,31 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
 
         const labelsGroup = document.getElementById(`edge-labels-${edgeId}`);
         if (labelsGroup) {
-            const fx = A.x + 0.28 * (B.x - A.x);
-            const fy = A.y + 0.28 * (B.y - A.y);
-            const tx = A.x + 0.72 * (B.x - A.x);
-            const ty = A.y + 0.72 * (B.y - A.y);
-            
+            // Mismo anclaje que el render (labelAnchor) — si estas dos fórmulas
+            // se separan, las etiquetas "saltan" al empezar a arrastrar.
+            const f = labelAnchor(A, B);
+            const t = labelAnchor(B, A);
+
             const fromRect = labelsGroup.querySelector('.label-from-rect');
             const fromText = labelsGroup.querySelector('.label-from-text');
             const toRect = labelsGroup.querySelector('.label-to-rect');
             const toText = labelsGroup.querySelector('.label-to-text');
 
             if (fromRect) {
-                fromRect.setAttribute("x", fx - 17);
-                fromRect.setAttribute("y", fy - 8);
+                fromRect.setAttribute("x", f.x - LABEL_W / 2);
+                fromRect.setAttribute("y", f.y - LABEL_H / 2);
             }
             if (fromText) {
-                fromText.setAttribute("x", fx);
-                fromText.setAttribute("y", fy + 0.5);
+                fromText.setAttribute("x", f.x);
+                fromText.setAttribute("y", f.y);
             }
             if (toRect) {
-                toRect.setAttribute("x", tx - 17);
-                toRect.setAttribute("y", ty - 8);
+                toRect.setAttribute("x", t.x - LABEL_W / 2);
+                toRect.setAttribute("y", t.y - LABEL_H / 2);
             }
             if (toText) {
-                toText.setAttribute("x", tx);
-                toText.setAttribute("y", ty + 0.5);
+                toText.setAttribute("x", t.x);
+                toText.setAttribute("y", t.y);
             }
         }
     };
@@ -134,7 +196,7 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
     const hitNode = (world) => {
         for (let i = nodes.length - 1; i >= 0; i--) {
             const n = nodes[i];
-            if (Math.abs(world.x - n.x) <= 30 && Math.abs(world.y - n.y) <= 28) return n;
+            if (Math.abs(world.x - n.x) <= HIT_HALF_W && Math.abs(world.y - n.y) <= HIT_HALF_H) return n;
         }
         return null;
     };
@@ -173,7 +235,7 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                 startPanX: panRef.current.x, startPanY: panRef.current.y,
             };
             svgRef.current.setPointerCapture(e.pointerId);
-            svgRef.current.style.cursor = "grabbing";
+            setCursor("grabbing");
             return;
         }
 
@@ -205,7 +267,7 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
             startWorldX: world.x, startWorldY: world.y,
         };
         svgRef.current.setPointerCapture(e.pointerId);
-        svgRef.current.style.cursor = "grabbing";
+        setCursor("grabbing");
     };
 
     const onPointerMove = (e) => {
@@ -214,6 +276,18 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
 
         // Update mouse for link preview line
         setMouse(world);
+
+        // Hover sobre nodo: el cursor indica que la tarjeta es agarrable antes
+        // de pulsar. Se aplica de forma imperativa sobre el SVG y se memoriza en
+        // `cursor` para no reescribir el estilo en cada evento de movimiento
+        // (este handler se dispara decenas de veces por segundo).
+        if (!nodeDrag.current && !bgDrag.current && svgRef.current) {
+            const over = hitNode(world);
+            const want = mode === "link"
+                ? (over ? "pointer" : "crosshair")
+                : (over ? "grab" : "default");
+            setCursor(want);
+        }
 
         // ── Node drag ──────────────────────────────────────────────────────
         if (nodeDrag.current) {
@@ -225,9 +299,11 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
             nodePositionsRef.current[id] = { x: newX, y: newY };
             
             // 2. Update node DOM element transform
+            //    Debe repetir el scale() del render — si se escribe solo el
+            //    translate, el nodo se encoge de golpe al empezar a arrastrarlo.
             const nodeEl = document.getElementById(`node-${id}`);
             if (nodeEl) {
-                nodeEl.setAttribute("transform", `translate(${newX},${newY})`);
+                nodeEl.setAttribute("transform", `translate(${newX},${newY}) scale(${NODE_SCALE})`);
             }
             
             // 3. Update all connected edges and their labels
@@ -263,9 +339,7 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
             bgDrag.current = null;
             commitTransform();            // one React re-render to sync state
         }
-        if (svgRef.current) {
-            svgRef.current.style.cursor = mode === "link" ? "crosshair" : "default";
-        }
+        setCursor(mode === "link" ? "crosshair" : "default");
     };
 
     /** Prevent browser context menu on right-click inside the canvas. */
@@ -321,7 +395,7 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
         setMode(m);
         setLinkFrom(null);
         setEditId(null);
-        if (svgRef.current) svgRef.current.style.cursor = m === "link" ? "crosshair" : "default";
+        setCursor(m === "link" ? "crosshair" : "default");
     };
 
     // ── Interactive Zoom Handler ──────────────────────────────────────────────
@@ -354,6 +428,27 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
     const linkFromNode = linkFrom ? nodes.find(n => n.id === linkFrom) : null;
     const totalRam     = nodes.reduce((s, n) => s + n.ram, 0);
     const ifaceMap     = buildIfaceMap(edges);
+
+    // Estado visual del slice. OJO: el modelo NO guarda estado por VM
+    // (SliceManager solo persiste Slice.status), así que todos los nodos de un
+    // slice comparten indicador — no se puede pintar una VM caída aparte.
+    // En el diseñador (sin slice todavía) no hay estado que mostrar.
+    const statusVis = activeSlice ? getStatusVisual(activeSlice.status) : null;
+    // Estados en vuelo → los enlaces "fluyen" para que se vea que hay trabajo.
+    const flowing   = !!statusVis?.pulse;
+
+    // ── Red de gestión ───────────────────────────────────────────────────────
+    // Todo slice recibe una red de gestión propia: cada VM la ve como ens3 y es
+    // por donde el orquestador la administra (los ens4+ son los enlaces que el
+    // usuario dibuja). No es un nodo del modelo — no está en `nodes` ni se
+    // puede editar — así que se calcula aquí a partir del conjunto de VMs.
+    //
+    // El switch se coloca centrado bajo la nube de VMs, a una distancia fija
+    // del borde inferior, para no cruzarse con la topología dibujada arriba.
+    const mgmtHub = nodes.length > 0 ? {
+        x: nodes.reduce((s, n) => s + n.x, 0) / nodes.length,
+        y: Math.max(...nodes.map(n => n.y)) + 130 * NODE_SCALE,
+    } : null;
 
     // ── Filter Images based on Target AZ ──────────────────────────────────────
     const availableImages = imageList.filter(img => {
@@ -440,7 +535,7 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                 {/* Controles de Zoom */}
                 <div style={{ display: "flex", alignItems: "center", gap: 4, marginRight: 4, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 8, padding: "2px" }}>
                     <button
-                        title="Acercar"
+                        title="Acercar" aria-label="Acercar"
                         onClick={() => {
                             const nextZoom = Math.min(3.0, zoomRef.current * 1.25);
                             if (svgRef.current) {
@@ -468,7 +563,7 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                         {Math.round(zoom * 100)}%
                     </span>
                     <button
-                        title="Alejar"
+                        title="Alejar" aria-label="Alejar"
                         onClick={() => {
                             const nextZoom = Math.max(0.3, zoomRef.current / 1.25);
                             if (svgRef.current) {
@@ -496,7 +591,7 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
 
                 {/* Restablecer Vista */}
                 <button
-                    title="Restablecer vista"
+                    title="Restablecer vista" aria-label="Restablecer vista"
                     onClick={() => { applyTransform(0, 0, 1); commitTransform(); }}
                     style={btnBase({ boxShadow: "none", fontSize: 11, padding: "5px 10px", color: T.textMuted, border: `1px solid ${T.border}`,
                         display: "flex", alignItems: "center", gap: 5 })}>
@@ -546,6 +641,34 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                     {/* ── All canvas content inside a panned group ── */}
                     <g ref={groupRef} transform={`translate(${pan.x},${pan.y}) scale(${zoom})`}>
 
+                        {/* ── Red de gestión (ens3) ──────────────────────────
+                            Va ANTES que enlaces y nodos para quedar por debajo:
+                            es infraestructura de fondo, no la topología que el
+                            usuario diseña. Los enlaces son punteados y de color
+                            atenuado justo para que no compitan con los ens4+. */}
+                        {showMgmt && mgmtHub && (
+                            <g style={{ pointerEvents: "none" }}>
+                                {nodes.map(n => (
+                                    <line key={`mgmt-${n.id}`}
+                                        x1={n.x} y1={n.y} x2={mgmtHub.x} y2={mgmtHub.y}
+                                        stroke={T.textFaint} strokeWidth="1.4"
+                                        strokeDasharray="4 5" opacity="0.55" strokeLinecap="round" />
+                                ))}
+                                <g transform={`translate(${mgmtHub.x},${mgmtHub.y}) scale(${NODE_SCALE})`}>
+                                    <CanvasSwitch ports={nodes.length} />
+                                    <text x="0" y="27" textAnchor="middle"
+                                        style={{ fontSize: 9, fontWeight: 800, fill: T.text }}>
+                                        Red de Gestión
+                                    </text>
+                                    <text x="0" y="37" textAnchor="middle"
+                                        style={{ fontSize: 7.5, fill: T.textMuted, fontFamily: "monospace" }}>
+                                        ens3 · {nodes.length} VM{nodes.length === 1 ? "" : "s"}
+                                    </text>
+                                </g>
+                            </g>
+                        )}
+
+
                         {/* Temp link line (world space) */}
                         {linkFromNode && (
                             <line x1={linkFromNode.x} y1={linkFromNode.y} x2={mouse.x} y2={mouse.y}
@@ -566,15 +689,25 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                             const iface = (ed.fromIface || ed.toIface)
                                 ? { fromIface: ed.fromIface, toIface: ed.toIface }
                                 : (ifaceMap[ed.id] || {});
-                            const fx = A.x + 0.28 * (B.x - A.x), fy = A.y + 0.28 * (B.y - A.y);
-                            const tx = A.x + 0.72 * (B.x - A.x), ty = A.y + 0.72 * (B.y - A.y);
+                            const f = labelAnchor(A, B);
+                            const t = labelAnchor(B, A);
                             return (
                                 <g key={ed.id} id={`edge-group-${ed.id}`}>
-                                    {/* Visible line */}
+                                    {/* Visible line.
+                                        Se mantiene recta a propósito: en un diagrama de red
+                                        la línea recta es la convención y además el arrastre
+                                        actualiza x1/y1/x2/y2 de forma imperativa (ver
+                                        updateEdgeCoords) — una curva obligaría a recalcular
+                                        el path en cada frame sin ganar legibilidad. */}
                                     <line x1={A.x} y1={A.y} x2={B.x} y2={B.y}
                                         data-edge-id={ed.id} data-from={ed.from} data-to={ed.to}
-                                        stroke={T.accentMid} strokeWidth="2.5" opacity="0.5" strokeLinecap="round"
-                                        style={{ pointerEvents: "none" }} />
+                                        stroke={flowing ? T.yellow : T.accentMid}
+                                        strokeWidth="2.5" opacity={0.75} strokeLinecap="round"
+                                        strokeDasharray={flowing ? "8 4" : undefined}
+                                        style={{
+                                            pointerEvents: "none",
+                                            animation: flowing ? "edgeFlow 0.6s linear infinite" : undefined,
+                                        }} />
                                     {/* Wide invisible hit area for delete — solo interactivo en modo diseño/edición */}
                                     <line x1={A.x} y1={A.y} x2={B.x} y2={B.y}
                                         data-edge-id={ed.id} data-from={ed.from} data-to={ed.to}
@@ -585,20 +718,22 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                                     <g id={`edge-labels-${ed.id}`} style={{ pointerEvents: "none" }}>
                                         {iface.fromIface && (
                                             <g>
-                                                <rect className="label-from-rect" x={fx - 17} y={fy - 8} width={34} height={14} rx={4}
-                                                    fill={T.accentLight} stroke={T.accent + "66"} strokeWidth={1} />
-                                                <text className="label-from-text" x={fx} y={fy + 0.5} textAnchor="middle" dominantBaseline="middle"
-                                                    style={{ fontSize: 7.5, fill: T.accent, fontFamily: "monospace", fontWeight: 800 }}>
+                                                <rect className="label-from-rect" x={f.x - LABEL_W / 2} y={f.y - LABEL_H / 2}
+                                                    width={LABEL_W} height={LABEL_H} rx={5}
+                                                    fill={T.surface} stroke={T.accent + "88"} strokeWidth={1.2} />
+                                                <text className="label-from-text" x={f.x} y={f.y} textAnchor="middle" dominantBaseline="middle"
+                                                    style={{ fontSize: LABEL_FS, fill: T.accent, fontFamily: "monospace", fontWeight: 800 }}>
                                                     {iface.fromIface}
                                                 </text>
                                             </g>
                                         )}
                                         {iface.toIface && (
                                             <g>
-                                                <rect className="label-to-rect" x={tx - 17} y={ty - 8} width={34} height={14} rx={4}
-                                                    fill={T.accentLight} stroke={T.accent + "66"} strokeWidth={1} />
-                                                <text className="label-to-text" x={tx} y={ty + 0.5} textAnchor="middle" dominantBaseline="middle"
-                                                    style={{ fontSize: 7.5, fill: T.accent, fontFamily: "monospace", fontWeight: 800 }}>
+                                                <rect className="label-to-rect" x={t.x - LABEL_W / 2} y={t.y - LABEL_H / 2}
+                                                    width={LABEL_W} height={LABEL_H} rx={5}
+                                                    fill={T.surface} stroke={T.accent + "88"} strokeWidth={1.2} />
+                                                <text className="label-to-text" x={t.x} y={t.y} textAnchor="middle" dominantBaseline="middle"
+                                                    style={{ fontSize: LABEL_FS, fill: T.accent, fontFamily: "monospace", fontWeight: 800 }}>
                                                     {iface.toIface}
                                                 </text>
                                             </g>
@@ -621,20 +756,43 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                             const isWindows = node.image?.toLowerCase().includes("win");
 
                             return (
-                                <g key={node.id} id={`node-${node.id}`} transform={`translate(${node.x},${node.y})`}
+                                <g key={node.id} id={`node-${node.id}`}
+                                    transform={`translate(${node.x},${node.y}) scale(${NODE_SCALE})`}
                                     style={{ pointerEvents: "none" }}>
                                     {/* Drop shadow (subtle Azure style) */}
                                     <rect x="-36" y="-30" width="72" height="60" rx="6"
                                         fill="rgba(0,120,212,0.08)" transform="translate(1.5,2.5)" />
-                                    {/* Card body */}
+                                    {/* Card body — el borde toma el color del estado del
+                                        slice, así un slice ACTIVO, uno PROVISIONANDO y uno
+                                        FALLIDO se distinguen de un vistazo. En el diseñador
+                                        (statusVis null) se queda con el borde neutro. */}
                                     <rect x="-36" y="-30" width="72" height="60" rx="6"
                                         fill={T.surface}
-                                        stroke={isLinkSrc ? T.accent : isEditing ? T.accentMid : isLinkTarget ? T.accentMid + "88" : T.border}
-                                        strokeWidth={isLinkSrc || isEditing ? 2 : 1.25} />
+                                        stroke={isLinkSrc ? T.accent : isEditing ? T.accentMid : isLinkTarget ? T.accentMid + "88" : statusVis ? statusVis.fg + "99" : T.border}
+                                        strokeWidth={isLinkSrc || isEditing ? 2 : statusVis ? 1.75 : 1.25} />
                                     
                                     {/* Accent top border highlight */}
                                     {(isLinkSrc || isEditing) && (
                                         <path d="M-30 -30 H30" stroke={T.accent} strokeWidth="2.5" strokeLinecap="round" />
+                                    )}
+
+                                    {/* Conectividad: nube hueca = NAT saliente,
+                                        nube maciza + IP = acceso externo entrante. */}
+                                    {node.internet_access === 1 && (
+                                        <CanvasNetBadge
+                                            external={!!node.external_ip}
+                                            ip={node.external_ip} />
+                                    )}
+
+                                    {/* Indicador de estado (esquina superior izquierda).
+                                        Espeja el badge de SO que va en la derecha. */}
+                                    {statusVis && (
+                                        <g transform="translate(-24,-20)">
+                                            <circle r="4.5" fill={statusVis.bg}
+                                                stroke={statusVis.fg} strokeWidth="1.2" />
+                                            <circle r="2" fill={statusVis.fg}
+                                                style={{ animation: statusVis.pulse ? "statusPulse 1.4s ease-in-out infinite" : undefined }} />
+                                        </g>
                                     )}
 
                                     {/* Icon — SVG foreignObject lets us embed AzureVm */}
@@ -684,6 +842,33 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                         })}
                     </g>
                 </svg>
+
+                {/* ── Toggle de la red de gestión ──────────────────────────
+                    Flotante y no en la barra de modo porque esa solo aparece
+                    en diseño/edición, y la red de gestión interesa sobre todo
+                    al mirar un slice ya desplegado. */}
+                {nodes.length > 0 && (
+                    <button
+                        onClick={() => setShowMgmt(v => !v)}
+                        aria-pressed={showMgmt}
+                        title="Mostrar u ocultar la red de gestión (ens3)"
+                        style={btnBase({
+                            position: "absolute", top: 12, right: 12, zIndex: 5,
+                            fontSize: 11, padding: "5px 11px",
+                            background: showMgmt ? T.accentLight : T.surface,
+                            color:      showMgmt ? T.accent      : T.textMuted,
+                            border: `1px solid ${showMgmt ? T.accent + "66" : T.border}`,
+                            display: "flex", alignItems: "center", gap: 6,
+                        })}>
+                        <svg width="15" height="9" viewBox="-33 -16 66 34">
+                            <rect x="-31" y="-14" width="62" height="30" rx="5"
+                                fill="none" stroke="currentColor" strokeWidth="3" />
+                            <path d="M-14 -5 H10 M6 -8.5 L10 -5 L6 -1.5 M14 3 H-10 M-6 -0.5 L-10 3 L-6 6.5"
+                                stroke="currentColor" strokeWidth="3" fill="none" strokeLinecap="round" />
+                        </svg>
+                        Red de Gestión
+                    </button>
+                )}
 
                 {/* ── Empty state hint (only in design mode) ── */}
                 {nodes.length === 0 && isDesignMode && (
@@ -736,6 +921,36 @@ export const Canvas = ({ nodes, edges, setNodes, setEdges, imageList, activeSlic
                             <span style={{ fontSize: 10, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>{l}</span>
                         </div>
                     ))}
+
+                    {/* Leyenda de las nubes — solo aparece si hay alguna VM con
+                        conectividad, para no ocupar sitio cuando no aplica. */}
+                    {nodes.some(n => n.internet_access === 1) && (
+                        <div style={{ display: "flex", alignItems: "center", gap: 14, marginLeft: "auto" }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                                <svg width="17" height="12" viewBox="-10 -8 20 14">
+                                    <g transform="scale(0.9)">
+                                        <rect x="-9" y="-1.5" width="18" height="7" rx="3.5" fill={T.surface} stroke={T.accentMid} strokeWidth="1.3" />
+                                        <circle cx="-4.5" cy="-2" r="4.5" fill={T.surface} stroke={T.accentMid} strokeWidth="1.3" />
+                                        <circle cx="2.5" cy="-1" r="5.5" fill={T.surface} stroke={T.accentMid} strokeWidth="1.3" />
+                                        <rect x="-7.5" y="-1" width="15" height="6" rx="3" fill={T.surface} />
+                                        <circle cx="-4.5" cy="-2" r="3.4" fill={T.surface} />
+                                        <circle cx="2.5" cy="-1" r="4.4" fill={T.surface} />
+                                    </g>
+                                </svg>
+                                <span style={{ fontSize: 10, color: T.textMuted }}>Salida a Internet (NAT)</span>
+                            </div>
+                            <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                                <svg width="17" height="12" viewBox="-10 -8 20 14">
+                                    <g transform="scale(0.9)">
+                                        <rect x="-9" y="-1.5" width="18" height="7" rx="3.5" fill={T.accent} stroke={T.accent} strokeWidth="1.3" />
+                                        <circle cx="-4.5" cy="-2" r="4.5" fill={T.accent} stroke={T.accent} strokeWidth="1.3" />
+                                        <circle cx="2.5" cy="-1" r="5.5" fill={T.accent} stroke={T.accent} strokeWidth="1.3" />
+                                    </g>
+                                </svg>
+                                <span style={{ fontSize: 10, color: T.textMuted }}>Acceso externo (IP VPN)</span>
+                            </div>
+                        </div>
+                    )}
                 </div>
             )}
         </div>

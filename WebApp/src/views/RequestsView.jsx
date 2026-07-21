@@ -6,7 +6,7 @@
  * REJECTED, editable por el alumno). El comentario es obligatorio al rechazar.
  */
 import { useState, useEffect } from "react";
-import { T, btnBase } from "../theme/tokens";
+import { T, btnBase, FONT_STACK } from "../theme/tokens";
 import { UserAvatar }  from "../components/ui/UserAvatar";
 import {
     ArrowLeft, X, Check, AlertTriangle, Inbox, Server, Cpu,
@@ -37,7 +37,7 @@ const ReviewModal = ({ request, action, onConfirm, onClose }) => {
                             "{request.slice_name}" — {request.owner_name}
                         </div>
                     </div>
-                    <button onClick={onClose} style={btnBase({ padding: 4, background: "transparent", boxShadow: "none", color: T.textMuted })}>
+                    <button onClick={onClose} aria-label="Cerrar" style={btnBase({ padding: 4, background: "transparent", boxShadow: "none", color: T.textMuted })}>
                         <X size={16} />
                     </button>
                 </div>
@@ -117,9 +117,9 @@ export const RequestsView = ({ user, onBack, onProfile, apiFetch, flash, onChang
     };
 
     return (
-        <div style={{ display: "flex", flexDirection: "column", height: "100vh", background: T.bg, fontFamily: "'DM Sans','Segoe UI',sans-serif", color: T.text }}>
+        <div style={{ display: "flex", flexDirection: "column", height: "100vh", background: T.bg, fontFamily: FONT_STACK, color: T.text }}>
             {/* Topbar */}
-            <div style={{ padding: "0 20px", height: 54, borderBottom: `1px solid ${T.border}`, background: T.surface, display: "flex", alignItems: "center", gap: 12, flexShrink: 0, boxShadow: "0 2px 8px rgba(20,50,22,0.05)" }}>
+            <div className="app-topbar" style={{ padding: "0 20px", height: 54, borderBottom: `1px solid ${T.border}`, background: T.surface, display: "flex", alignItems: "center", gap: 12, flexShrink: 0, boxShadow: "0 2px 8px rgba(0,0,0,0.05)" }}>
                 <button onClick={onBack}
                     style={btnBase({ padding: "6px 10px", fontSize: 11, background: T.surfaceElevated, color: T.textMuted, border: `1px solid ${T.border}`, boxShadow: "none", display: "flex", alignItems: "center", gap: 6 })}>
                     <ArrowLeft size={13} /> Volver

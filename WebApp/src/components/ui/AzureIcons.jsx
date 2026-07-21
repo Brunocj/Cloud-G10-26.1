@@ -1,4 +1,87 @@
 import React from "react";
+import { T } from "../../theme/tokens";
+
+/**
+ * CanvasNetBadge — indicador de conectividad de una VM DENTRO del lienzo.
+ *
+ * Devuelve un <g>, no un <svg>: se anida en el grupo del nodo del Canvas y por
+ * tanto va en coordenadas LOCALES del nodo (sin escalar; el scale() del padre
+ * ya lo agranda). Se dibuja arriba a la derecha para no chocar con el punto de
+ * estado (arriba izquierda) ni con el logo de SO (22,-18).
+ *
+ * Distingue los dos conceptos que el backend guarda por separado:
+ *   internet_access=1 → NAT saliente. Nube HUECA con enlace punteado.
+ *   external_ip       → además IP VPN entrante. Nube MACIZA con enlace sólido
+ *                       y la IP escrita encima.
+ * Nótese que external_ip implica internet_access (el SliceManager fuerza
+ * int_access=1 si hay ext_ip), así que la nube maciza representa ambos.
+ */
+export const CanvasNetBadge = ({ external = false, ip = null }) => {
+    const c    = external ? T.accent : T.accentMid;
+    const fill = external ? c : T.surface;
+    return (
+        <g style={{ pointerEvents: "none" }}>
+            {/* Enlace VM → nube */}
+            <line x1="23" y1="-27" x2="31" y2="-37"
+                stroke={c} strokeWidth="1.4" strokeLinecap="round"
+                strokeDasharray={external ? undefined : "2.5 2.5"} />
+            {/* Nube */}
+            <g transform="translate(36,-44)">
+                <rect x="-9" y="-1.5" width="18" height="7" rx="3.5"
+                    fill={fill} stroke={c} strokeWidth="1.3" />
+                <circle cx="-4.5" cy="-2" r="4.5" fill={fill} stroke={c} strokeWidth="1.3" />
+                <circle cx="2.5"  cy="-1" r="5.5" fill={fill} stroke={c} strokeWidth="1.3" />
+                {/* Relleno interior: tapa las costuras de los tres trazos */}
+                <rect x="-7.5" y="-1" width="15" height="6" rx="3" fill={fill} />
+                <circle cx="-4.5" cy="-2" r="3.4" fill={fill} />
+                <circle cx="2.5"  cy="-1" r="4.4" fill={fill} />
+            </g>
+            {/* IP VPN — solo si ya está asignada (no en modo "random") */}
+            {external && ip && ip !== "random" && (
+                <text x="36" y="-54" textAnchor="middle"
+                    style={{ fontSize: 7, fill: c, fontFamily: "monospace", fontWeight: 800 }}>
+                    {ip}
+                </text>
+            )}
+        </g>
+    );
+};
+
+/**
+ * CanvasSwitch — switch OVS de la red de gestión, DENTRO del lienzo SVG.
+ *
+ * Igual que CanvasNetBadge devuelve un <g> para poder anidarse en el SVG del
+ * Canvas. Se dibuja en coordenadas locales centradas en (0,0): ~64×34.
+ *
+ * Símbolo clásico de switch: caja con las flechas cruzadas bidireccionales
+ * arriba y una fila de LEDs de puerto abajo (uno por VM conectada, hasta 8).
+ */
+export const CanvasSwitch = ({ ports = 4 }) => (
+    <g style={{ pointerEvents: "none" }}>
+        {/* Sombra */}
+        <rect x="-31" y="-14" width="62" height="30" rx="5"
+            fill="rgba(0,0,0,0.10)" transform="translate(1.5,2.5)" />
+        {/* Cuerpo */}
+        <rect x="-31" y="-14" width="62" height="30" rx="5"
+            fill={T.surfaceElevated} stroke={T.accentMid} strokeWidth="1.6" />
+        {/* Franja superior de acento */}
+        <path d="M-26 -14 H26" stroke={T.accentMid} strokeWidth="2.5" strokeLinecap="round" />
+
+        {/* Flechas cruzadas — símbolo de conmutación */}
+        <g stroke={T.accent} strokeWidth="1.5" strokeLinecap="round" fill="none">
+            <path d="M-14 -5 H10" />
+            <path d="M6 -8.5 L10 -5 L6 -1.5" />
+            <path d="M14 3 H-10" />
+            <path d="M-6 -0.5 L-10 3 L-6 6.5" />
+        </g>
+
+        {/* LEDs de puerto */}
+        {Array.from({ length: Math.min(ports, 8) }).map((_, i, a) => (
+            <rect key={i} x={-4.5 * a.length + i * 9} y="10" width="6" height="3" rx="1"
+                fill={T.accent} opacity="0.75" />
+        ))}
+    </g>
+);
 
 /**
  * AzureVm - Azure-style Virtual Machine Icon (3D Isometric Blue Cube with monitor)

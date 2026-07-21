@@ -50,13 +50,16 @@ const TtlCountdown = ({ slice }) => {
 };
 
 export const SliceCard = ({ slice, active, onClick, onDestroy, onDeploy, onPublish, showOwner = false }) => (
+    // .slice-card: el realce al pasar el ratón vive en getGlobalCss. Antes esta
+    // tarjeta tenía `transition: all` pero ningún handler que cambiara nada, así
+    // que el elemento más clicado de la app no daba ninguna respuesta visual.
     <div
         onClick={onClick}
+        className="slice-card"
         style={{
             padding: "12px 14px", borderRadius: 10, cursor: "pointer",
             border: `1.5px solid ${active ? T.accent : T.border}`,
             background: active ? T.accentLight : T.surface,
-            transition: "all 0.15s",
             boxShadow: active ? `0 0 0 3px ${T.accent}18` : T.shadow,
         }}>
         {/* Name + badge + destroy btn */}

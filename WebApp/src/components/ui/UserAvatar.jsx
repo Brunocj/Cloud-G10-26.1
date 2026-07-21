@@ -74,7 +74,7 @@ export const UserAvatar = ({ user, onLogout, onProfile }) => {
                     position: "absolute", top: "calc(100% + 10px)", right: 0,
                     minWidth: 220, background: T.surface,
                     border: `1px solid ${T.border}`, borderRadius: 14,
-                    boxShadow: "0 12px 36px rgba(20,50,22,0.15), 0 4px 12px rgba(0,0,0,0.08)",
+                    boxShadow: "0 12px 36px rgba(0,0,0,0.15), 0 4px 12px rgba(0,0,0,0.08)",
                     zIndex: 5000, overflow: "hidden",
                     animation: "dropIn 0.18s ease",
                 }}>

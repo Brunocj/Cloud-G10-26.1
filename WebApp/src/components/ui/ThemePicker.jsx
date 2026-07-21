@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { THEMES, T, applyTheme } from "../../theme/tokens";
+import { THEMES, T, applyTheme, getCurrentTheme } from "../../theme/tokens";
 import { Palette } from "../ui/Icon";
 
 /**
@@ -8,9 +8,11 @@ import { Palette } from "../ui/Icon";
  */
 export const ThemePicker = ({ onThemeChange }) => {
     const [open,    setOpen]    = useState(false);
-    const [current, setCurrent] = useState(() => {
-        try { return localStorage.getItem("pucp_cloud_theme") || "light"; } catch { return "light"; }
-    });
+    // El id viene de tokens.js, que es quien realmente aplicó el tema al cargar.
+    // Leerlo aquí de localStorage con un default propio hacía que en el primer
+    // arranque (sin preferencia guardada) el picker marcara "Forest Light"
+    // mientras la app se veía en Azure Light.
+    const [current, setCurrent] = useState(getCurrentTheme);
     const ref = useRef();
 
     // Close on outside click
@@ -35,7 +37,7 @@ export const ThemePicker = ({ onThemeChange }) => {
             {/* Trigger button */}
             <button
                 onClick={() => setOpen(v => !v)}
-                title="Cambiar tema"
+                title="Cambiar tema" aria-label="Cambiar tema"
                 style={{
                     background: "none", border: `1px solid ${T.border}`,
                     borderRadius: 8, cursor: "pointer",

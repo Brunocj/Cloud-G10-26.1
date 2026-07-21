@@ -41,11 +41,16 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, editMode = fals
     const [f, setF]                 = useState(() => initForm(node));
     const [availableIps, setIps]    = useState([]);
     const [flavors, setFlavors]     = useState([]);
-    // Distingue "todavía no elegiste nada" (muestra el placeholder) de "elegiste
-    // Personalizado a propósito" (muestra esa opción) — ambos casos guardan
-    // flavor_id=null en el backend, así que esta distinción es solo de UI y se
-    // reinicia al abrir el editor de nuevo.
-    const [pickedCustom, setPickedCustom] = useState(false);
+    // Distingue "todavía no elegiste nada" de "elegiste Personalizado a
+    // propósito". La diferencia se puede recuperar del propio nodo:
+    //   flavor_id undefined → recién creado, mkNode ni siquiera pone la clave
+    //   flavor_id null      → applyFlavor(null) lo escribió: es personalizado
+    //   flavor_id number    → usa un flavor concreto
+    // JSON.stringify conserva el null y descarta el undefined, así que la
+    // distinción sobrevive al guardado y a la recarga. Antes esto arrancaba
+    // siempre en false y reabrir un nodo personalizado obligaba a volver a
+    // elegir «Personalizado» para desbloquear sus propios valores.
+    const [pickedCustom, setPickedCustom] = useState(() => node.flavor_id === null);
     const [telemetry,    setTelemetry]    = useState(null);   // null=no pedida, {loading}, o el resultado
     const u = (k, v) => setF(p => ({ ...p, [k]: v }));
 
@@ -82,7 +87,7 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, editMode = fals
     const selectedImage = availableImages?.find(i => i.id === f.image_id);
     const zoneIdNum = zoneId ? Number(zoneId) : null;
 
-    useEffect(() => { setF(initForm(node)); setActiveTab("props"); setPickedCustom(false); setTelemetry(null); }, [node.id]);
+    useEffect(() => { setF(initForm(node)); setActiveTab("props"); setPickedCustom(node.flavor_id === null); setTelemetry(null); }, [node.id]);
 
     useEffect(() => {
         if (f.internet_access !== 1 || !apiFetch) return;
@@ -114,6 +119,12 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, editMode = fals
 
     const selectedFlavor = flavors.find(x => x.id === f.flavor_id);
     const usingFlavor = !!f.flavor_id;
+
+    // Los campos de vCPU/RAM/Disco solo se editan tras elegir «Personalizado»
+    // de forma explícita. No basta con `!usingFlavor`: flavor_id es null tanto
+    // al elegir Personalizado como cuando aún no se ha elegido nada, y en ese
+    // segundo caso los campos quedaban editables antes de decidir nada.
+    const canEditResources = !isReadOnly && pickedCustom;
 
     const addRule    = () => setF(p => ({ ...p, firewall_rules: [...p.firewall_rules, mkRule()] }));
     const updateRule = (id, key, val) => setF(p => ({ ...p, firewall_rules: p.firewall_rules.map(r => r.id === id ? { ...r, [key]: val } : r) }));
@@ -157,7 +168,7 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, editMode = fals
                 display: "flex", flexDirection: "column",
                 background: T.surface, borderRadius: 14,
                 border: `1.5px solid ${T.accent}44`,
-                boxShadow: "0 8px 32px rgba(20,60,22,0.18)",
+                boxShadow: "0 8px 32px rgba(0,0,0,0.18)",
                 overflow: "hidden",
             }}>
 
@@ -177,7 +188,7 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, editMode = fals
                         {isReadOnly ? "Control de Nodo" : "Propiedades del Nodo"}
                     </span>
                 </div>
-                <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: T.textMuted, padding: "2px", display: "flex", alignItems: "center" }}>
+                <button onClick={onClose} aria-label="Cerrar" style={{ background: "none", border: "none", cursor: "pointer", color: T.textMuted, padding: "2px", display: "flex", alignItems: "center" }}>
                     <X size={16} />
                 </button>
             </div>
@@ -290,9 +301,9 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, editMode = fals
                                 {[["vcores","vCPU",1,16,1],["ram","RAM MB",128,16384,128],["disk","Disk GB",1,500,1]].map(([k,l,mn,mx,st]) => (
                                     <div key={k}>
                                         <div style={{ fontSize: 9, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 3 }}>{l}</div>
-                                        <input type="number" value={f[k]} min={mn} max={mx} step={st} disabled={isReadOnly || usingFlavor}
+                                        <input type="number" value={f[k]} min={mn} max={mx} step={st} disabled={!canEditResources}
                                             onChange={e => u(k, Number(e.target.value))}
-                                            style={{ ...inp, padding: "6px 4px", textAlign: "center", fontWeight: 800, color: T.accent, fontSize: 13, opacity: usingFlavor ? 0.65 : 1 }} />
+                                            style={{ ...inp, padding: "6px 4px", textAlign: "center", fontWeight: 800, color: T.accent, fontSize: 13, opacity: canEditResources ? 1 : 0.65 }} />
                                     </div>
                                 ))}
                             </div>
@@ -300,6 +311,14 @@ export const NodeEditor = ({ node, availableImages, sliceStatus, editMode = fals
                                 <div style={{ fontSize: 9, color: T.textFaint, marginTop: 7, lineHeight: 1.5, display: "flex", gap: 5 }}>
                                     <Info size={10} style={{ flexShrink: 0, marginTop: 1 }} />
                                     Recursos definidos por el flavor «{selectedFlavor?.name}». Elige «Personalizado» para editarlos manualmente.
+                                </div>
+                            )}
+                            {/* Sin este aviso, los campos aparecen en gris sin
+                                que nada explique por qué no se pueden tocar. */}
+                            {!usingFlavor && !pickedCustom && !isReadOnly && (
+                                <div style={{ fontSize: 9, color: T.textFaint, marginTop: 7, lineHeight: 1.5, display: "flex", gap: 5 }}>
+                                    <Info size={10} style={{ flexShrink: 0, marginTop: 1 }} />
+                                    Elige un flavor arriba, o «Personalizado» para introducir los recursos a mano.
                                 </div>
                             )}
                             {isDeployed && editMode && (

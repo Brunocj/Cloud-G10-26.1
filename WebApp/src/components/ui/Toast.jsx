@@ -1,15 +1,20 @@
 import { T } from "../../theme/tokens";
 import { CheckCircle, XCircle, AlertTriangle, Info } from "../ui/Icon";
 
-const TYPES = {
-    success: { bg: T.accentLight, border: T.accent,    color: T.accent,    Icon: CheckCircle   },
-    error:   { bg: T.redLight,    border: T.red,        color: T.red,       Icon: XCircle       },
-    warning: { bg: "#fff8e1",     border: "#f59f00",    color: "#b45309",   Icon: AlertTriangle },
+// OJO: tiene que ser una función, no un objeto a nivel de módulo. `applyTheme()`
+// MUTA el objeto T en vez de reemplazarlo, así que unas constantes evaluadas al
+// importar se quedarían congeladas con los colores del tema inicial y los toasts
+// no seguirían los cambios de tema.
+const getTypes = () => ({
+    success: { bg: T.accentLight,     border: T.accent, color: T.accent,    Icon: CheckCircle   },
+    error:   { bg: T.redLight,        border: T.red,    color: T.red,       Icon: XCircle       },
+    warning: { bg: T.yellowLight,     border: T.yellow, color: T.yellow,    Icon: AlertTriangle },
     info:    { bg: T.surfaceElevated, border: T.border, color: T.textMuted, Icon: Info          },
-};
+});
 
 export const Toast = ({ msg, type = "success" }) => {
-    const s = TYPES[type] ?? TYPES.success;
+    const types = getTypes();
+    const s = types[type] ?? types.success;
     const { Icon } = s;
     return (
         <div style={{

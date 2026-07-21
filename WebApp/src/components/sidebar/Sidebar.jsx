@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { T, btnBase } from "../../theme/tokens";
 import { Label }       from "../ui/Label";
 import { AzureVm }     from "../ui/AzureIcons";
@@ -15,6 +15,39 @@ import { FlavorPanel }    from "./FlavorPanel";
 
 // Statuses considered "active" — shown by default
 const ACTIVE_STATUSES = new Set(["ACTIVE", "PROVISIONING", "PENDING_APPROVAL", "REJECTED", "DRAFT"]);
+
+// ─── Medidas ajustables por arrastre ──────────────────────────────────────────
+// Ninguna de las dos se persiste a propósito: al recargar la barra vuelve a su
+// tamaño por defecto. Son ajustes de momento ("ahora quiero ver más slices"),
+// no una preferencia que el usuario quiera arrastrar entre sesiones.
+const SIDEBAR_MIN = 200;   // por debajo, los nombres de slice se truncan demasiado
+const SIDEBAR_MAX = 480;
+
+const NAV_MIN = 120;       // deja ver al menos "Crear Nuevo Slice" + un par más
+const NAV_MAX = 560;
+
+/**
+ * Ancho por defecto según el viewport. Vive en JS y no en una media query
+ * porque el usuario puede arrastrar el borde: una regla CSS con !important
+ * le ganaría al width inline y el arrastre no tendría efecto.
+ */
+const defaultSidebarWidth = () => {
+    const w = typeof window !== "undefined" ? window.innerWidth : 1920;
+    if (w <= 1100) return 200;
+    if (w <= 1366) return 232;
+    return 268;
+};
+
+/**
+ * Alto por defecto del bloque de navegación: como mucho el 45% de la barra.
+ * Con rol superAdmin son 10 botones que ocupan ~500px y empujaban "Mis Slices"
+ * fuera de la pantalla — se veía una sola tarjeta por muchos slices que hubiera.
+ * Ahora el bloque se recorta y hace scroll propio.
+ */
+const defaultNavHeight = () => {
+    const h = typeof window !== "undefined" ? window.innerHeight : 900;
+    return Math.round(Math.min(NAV_MAX, Math.max(NAV_MIN, h * 0.45)));
+};
 
 // Secondary action button — accent-colored border/text/icon, matches the cloud icon
 const SecondaryBtn = ({ onClick, icon: Icon, label }) => (
@@ -48,6 +81,86 @@ export const Sidebar = ({
     const canSeeProjects = user?.role === "admin" || user?.role === "superAdmin" || user?.role === "jefeProyecto";
     const [showArchived, setShowArchived] = useState(false);
 
+    // ── Ancho y alto arrastrables ────────────────────────────────────────────
+    // Ambos viven en un ref durante el arrastre (se escriben directo en el DOM)
+    // y solo se vuelcan a estado al soltar. Así arrastrar no dispara un
+    // re-render de toda la lista de slices en cada pixel.
+    const [width,     setWidth]     = useState(defaultSidebarWidth);
+    const [navHeight, setNavHeight] = useState(defaultNavHeight);
+
+    const asideRef = useRef(null);
+    const navRef   = useRef(null);
+    const widthRef = useRef(width);
+    const navRefPx = useRef(navHeight);
+    const dragRef  = useRef(null);   // { axis, start, startValue }
+    const [dragging, setDragging] = useState(null);   // "x" | "y" | null
+
+    const applyWidth = (w) => {
+        widthRef.current = w;
+        if (asideRef.current) asideRef.current.style.width = `${w}px`;
+    };
+    const applyNav = (h) => {
+        navRefPx.current = h;
+        if (navRef.current) navRef.current.style.height = `${h}px`;
+    };
+
+    // El eje se lee del data-axis del elemento en lugar de currificar el
+    // handler: una forma currificada se evaluaría en cada render, y el lint de
+    // react-hooks lo marca como acceso a refs durante el render.
+    const onHandleDown = (e) => {
+        e.preventDefault();
+        const axis = e.currentTarget.dataset.axis;
+        dragRef.current = axis === "x"
+            ? { axis, start: e.clientX, startValue: widthRef.current }
+            : { axis, start: e.clientY, startValue: navRefPx.current };
+        setDragging(axis);
+        e.currentTarget.setPointerCapture(e.pointerId);
+    };
+
+    const onHandleMove = (e) => {
+        const d = dragRef.current;
+        if (!d) return;
+        if (d.axis === "x") {
+            applyWidth(Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN,
+                d.startValue + e.clientX - d.start)));
+        } else {
+            // Techo dinámico: nunca dejar la lista de slices con menos de 120px
+            const room = (asideRef.current?.clientHeight ?? window.innerHeight) - 200;
+            applyNav(Math.min(Math.min(NAV_MAX, room), Math.max(NAV_MIN,
+                d.startValue + e.clientY - d.start)));
+        }
+    };
+
+    const onHandleUp = () => {
+        const d = dragRef.current;
+        if (!d) return;
+        dragRef.current = null;
+        setDragging(null);
+        if (d.axis === "x") setWidth(widthRef.current);
+        else                setNavHeight(navRefPx.current);
+    };
+
+    // Doble clic en un asa → volver al valor por defecto de esta pantalla
+    const resetWidth = useCallback(() => {
+        const d = defaultSidebarWidth(); applyWidth(d); setWidth(d);
+    }, []);
+    const resetNav = useCallback(() => {
+        const d = defaultNavHeight(); applyNav(d); setNavHeight(d);
+    }, []);
+
+    // Si la ventana se encoge, recortar para que la barra no se coma la
+    // pantalla ni el bloque de navegación deje sin sitio a los slices.
+    useEffect(() => {
+        const onResize = () => {
+            const capW = Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, window.innerWidth * 0.4));
+            if (widthRef.current > capW) { applyWidth(capW); setWidth(capW); }
+            const capH = Math.max(NAV_MIN, window.innerHeight - 200);
+            if (navRefPx.current > capH) { applyNav(capH); setNavHeight(capH); }
+        };
+        window.addEventListener("resize", onResize);
+        return () => window.removeEventListener("resize", onResize);
+    }, []);
+
     const sorted = [...slices].sort((a, b) => {
         const p = { ACTIVE: 0, PROVISIONING: 1, PENDING_APPROVAL: 2, DRAFT: 3, FAILED: 4, TERMINATED: 5 };
         return (p[a.status] ?? 6) - (p[b.status] ?? 6);
@@ -57,11 +170,36 @@ export const Sidebar = ({
     const archivedSlices = sorted.filter(s => !ACTIVE_STATUSES.has(s.status));
 
     return (
-        <div style={{
-            width: 268, background: T.surface, borderRight: `1px solid ${T.border}`,
+        <div ref={asideRef} className="app-sidebar" style={{
+            width, background: T.surface, borderRight: `1px solid ${T.border}`,
             display: "flex", flexDirection: "column", flexShrink: 0,
-            boxShadow: "2px 0 10px rgba(20,50,22,0.07)",
+            boxShadow: "2px 0 10px rgba(0,0,0,0.07)",
+            position: "relative",
         }}>
+            {/* Asa de redimensionado — franja sobre el borde derecho.
+                Se pinta por encima del contenido (zIndex) y ocupa 7px para que
+                sea agarrable sin tener que apuntar al borde de 1px. */}
+            <div
+                role="separator"
+                aria-orientation="vertical"
+                aria-label="Redimensionar barra lateral (doble clic para restablecer)"
+                title="Arrastra para redimensionar · doble clic para restablecer"
+                data-axis="x"
+                onPointerDown={onHandleDown}
+                onPointerMove={onHandleMove}
+                onPointerUp={onHandleUp}
+                onPointerCancel={onHandleUp}
+                onDoubleClick={resetWidth}
+                style={{
+                    position: "absolute", top: 0, right: -3, bottom: 0, width: 7,
+                    cursor: "col-resize", zIndex: 30,
+                    background: dragging === "x" ? T.accent : "transparent",
+                    opacity: dragging === "x" ? 0.35 : 1,
+                    transition: "background 0.15s",
+                }}
+                onMouseEnter={e => { if (!dragging) e.currentTarget.style.background = `${T.accent}55`; }}
+                onMouseLeave={e => { if (!dragging) e.currentTarget.style.background = "transparent"; }}
+            />
             {/* Logo */}
             <div style={{ padding: "16px 16px 14px", borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center", gap: 12 }}>
                 <div style={{ width: 38, height: 38, borderRadius: 10, background: T.accentLight, border: `1.5px solid ${T.accent}44`, display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -154,8 +292,15 @@ export const Sidebar = ({
             {/* ── BROWSE MODE ─────────────────────────────────────────────── */}
             {sidebarMode === "browse" && (
                 <>
-                    {/* Action buttons */}
-                    <div style={{ padding: "12px 14px", borderBottom: `1px solid ${T.border}`, display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 }}>
+                    {/* Action buttons — alto acotado y con scroll propio.
+                        Con superAdmin son 10 botones (~500px) que antes se
+                        quedaban fijos y empujaban "Mis Slices" fuera de la
+                        pantalla. El divisor de abajo permite repartir el
+                        espacio vertical entre los dos bloques. */}
+                    <div ref={navRef} style={{
+                        height: navHeight, overflowY: "auto", flexShrink: 0,
+                        padding: "12px 14px", display: "flex", flexDirection: "column", gap: 6,
+                    }}>
                         {/* Primary — Crear Nuevo Slice */}
                         <button onClick={onNewSlice}
                             style={btnBase({
@@ -211,6 +356,38 @@ export const Sidebar = ({
                         {isSuperAdmin && (
                             <SecondaryBtn onClick={onLogs} icon={Terminal} label="Logs de contenedores" />
                         )}
+                    </div>
+
+                    {/* Divisor arrastrable entre navegación y lista de slices.
+                        Sustituye al borde fijo que separaba los dos bloques. */}
+                    <div
+                        role="separator"
+                        aria-orientation="horizontal"
+                        aria-label="Ajustar el alto del menú de opciones (doble clic para restablecer)"
+                        title="Arrastra para repartir el espacio · doble clic para restablecer"
+                        data-axis="y"
+                        onPointerDown={onHandleDown}
+                        onPointerMove={onHandleMove}
+                        onPointerUp={onHandleUp}
+                        onPointerCancel={onHandleUp}
+                        onDoubleClick={resetNav}
+                        style={{
+                            height: 9, flexShrink: 0, cursor: "row-resize",
+                            borderTop: `1px solid ${T.border}`,
+                            borderBottom: `1px solid ${T.border}`,
+                            background: dragging === "y" ? `${T.accent}55` : T.surfaceElevated,
+                            display: "flex", alignItems: "center", justifyContent: "center",
+                            transition: "background 0.15s",
+                        }}
+                        onMouseEnter={e => { if (!dragging) e.currentTarget.style.background = `${T.accent}33`; }}
+                        onMouseLeave={e => { if (!dragging) e.currentTarget.style.background = T.surfaceElevated; }}
+                    >
+                        {/* Agarradera visual: tres puntos, para que se vea que se arrastra */}
+                        <svg width="22" height="3" aria-hidden="true">
+                            {[3, 11, 19].map(cx => (
+                                <circle key={cx} cx={cx} cy="1.5" r="1.5" fill={T.textFaint} />
+                            ))}
+                        </svg>
                     </div>
 
                     {/* Slice list */}

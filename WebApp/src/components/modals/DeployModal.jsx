@@ -89,17 +89,23 @@ export const DeployModal = ({ defaultName, nodes, edges, onDeploy, onBulkDeploy,
     // Reset bulk mode when project changes
     useEffect(() => { if (!canBulk) setBulkMode(false); }, [selectedProject]);
 
-    const canDeploy = !azConflict && nodes.length > 0 && name.trim() && motivo.trim() && projectsLoaded && !bulkDeploying;
+    // El motivo solo se exige a quien necesita aprobación de un tercero.
+    const canDeploy = !azConflict && nodes.length > 0 && name.trim()
+        && (isAdminGlobal || motivo.trim()) && projectsLoaded && !bulkDeploying;
 
     const handleSubmit = async () => {
         const projectId = selectedProject === NO_PROJECT ? null : Number(selectedProject);
         const effectiveTtl = unlimited ? 0 : ttlHours;   // 0 = persistente (sin expiración)
+        // `motivo: str` es obligatorio en el schema del SliceManager y admin puede
+        // dejarlo vacío, así que se sustituye por un texto legible en vez de ""
+        // para que la entrada de bitácora no quede sin justificación.
+        const motivoFinal = motivo.trim() || "Despliegue directo por administrador";
         if (bulkMode && onBulkDeploy) {
             setBulkDeploying(true);
-            await onBulkDeploy(name, selectedAzId, projectId, effectiveTtl, motivo.trim());
+            await onBulkDeploy(name, selectedAzId, projectId, effectiveTtl, motivoFinal);
             setBulkDeploying(false);
         } else {
-            onDeploy(name, selectedAzId, projectId, isDirect, effectiveTtl, motivo.trim());
+            onDeploy(name, selectedAzId, projectId, isDirect, effectiveTtl, motivoFinal);
         }
     };
 
@@ -189,16 +195,21 @@ export const DeployModal = ({ defaultName, nodes, edges, onDeploy, onBulkDeploy,
                         : `El slice se destruirá automáticamente ${ttlHours}h después de activarse.`}
                 </div>
 
-                {/* Motivo (obligatorio) */}
-                <Label>Motivo de la solicitud</Label>
+                {/* Motivo — obligatorio solo si la solicitud la aprueba alguien más.
+                    admin y superAdmin despliegan de forma directa (isAdminGlobal ⇒
+                    isDirect), así que no hay aprobador que lea el motivo: para
+                    ellos el campo queda como registro opcional en la bitácora. */}
+                <Label>{isAdminGlobal ? "Motivo (opcional)" : "Motivo de la solicitud"}</Label>
                 <textarea value={motivo} onChange={e => setMotivo(e.target.value)}
                     rows={2}
-                    placeholder='Ej. "Laboratorio 3 de Redes" o "Para mi Tesis"'
+                    placeholder={isAdminGlobal
+                        ? 'Opcional — queda registrado en la bitácora'
+                        : 'Ej. "Laboratorio 3 de Redes" o "Para mi Tesis"'}
                     style={{
-                        ...inp, marginBottom: motivo.trim() ? 12 : 4,
+                        ...inp, marginBottom: (isAdminGlobal || motivo.trim()) ? 12 : 4,
                         resize: "vertical", minHeight: 44, fontFamily: "inherit",
                     }} />
-                {!motivo.trim() && (
+                {!isAdminGlobal && !motivo.trim() && (
                     <div style={{ fontSize: 10, color: T.textFaint, marginBottom: 12 }}>
                         Campo obligatorio — visible para quien apruebe la solicitud.
                     </div>
