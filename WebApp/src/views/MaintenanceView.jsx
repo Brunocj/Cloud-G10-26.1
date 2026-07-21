@@ -17,6 +17,7 @@ import {
     ArrowLeft, Database, RefreshCw, AlertTriangle, CheckCircle,
     Trash2, ChevronDown, Clock, Loader,
 } from "../components/ui/Icon";
+import { useConfirm } from "../hooks/useConfirm";
 
 const CATEGORY_META = {
     orphan_vms: {
@@ -101,6 +102,7 @@ const CategoryCard = ({ meta, data, selected, onToggleSelect, expanded, onToggle
 
 // ─── MaintenanceView ───────────────────────────────────────────────────────────
 export const MaintenanceView = ({ user, onBack, onProfile, apiFetch, flash }) => {
+    const [askConfirm, confirmDialog] = useConfirm();
     const [scan, setScan]       = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError]     = useState(null);
@@ -145,14 +147,23 @@ export const MaintenanceView = ({ user, onBack, onProfile, apiFetch, flash }) =>
 
     const totalSelectedCount = [...selected].reduce((s, k) => s + (scan?.[k]?.count ?? 0), 0);
 
-    const runClean = async (dryRun) => {
+    // La confirmación se pide fuera de doClean: un modal de React no bloquea la
+    // ejecución como hacía window.confirm, así que el trabajo tiene que quedar
+    // en una función aparte que se invoca desde el callback de aceptar.
+    const runClean = (dryRun) => {
         if (selected.size === 0) return;
-        if (!dryRun) {
-            const msg = `Vas a aplicar la limpieza sobre ${totalSelectedCount} fila(s) en: `
+        if (dryRun) { doClean(true); return; }
+        askConfirm({
+            title: "Aplicar limpieza",
+            msg: `Vas a aplicar la limpieza sobre ${totalSelectedCount} fila(s) en: `
                 + [...selected].map(k => CATEGORY_META[k].label).join(", ")
-                + ".\n\nEsto NO toca infraestructura física (SSH/NATS), solo filas de la BD. ¿Continuar?";
-            if (!window.confirm(msg)) return;
-        }
+                + ". Esto NO toca infraestructura física (SSH/NATS), solo filas de la base de datos.",
+            confirmLabel: "Sí, aplicar",
+            onOk: () => doClean(false),
+        });
+    };
+
+    const doClean = async (dryRun) => {
         setApplying(true);
         try {
             const res = await apiFetch("/maintenance/clean", {
@@ -317,6 +328,7 @@ export const MaintenanceView = ({ user, onBack, onProfile, apiFetch, flash }) =>
                     </>
                 )}
             </div>
+            {confirmDialog}
         </div>
     );
 };

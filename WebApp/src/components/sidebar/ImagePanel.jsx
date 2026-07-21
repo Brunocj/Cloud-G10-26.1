@@ -1,9 +1,11 @@
 import { useState, useRef } from "react";
 import { T, btnBase, inp } from "../../theme/tokens";
 import { Label } from "../ui/Label";
+import { useConfirm } from "../../hooks/useConfirm";
 import { Upload, RefreshCcw, Trash2, CheckCircle, Circle, Lock, Package, Loader } from "../ui/Icon";
 
 export const ImagePanel = ({ fullImages, onRefresh, flash, refreshImageList, apiFetch, user }) => {
+    const [askConfirm, confirmDialog] = useConfirm();
     const [uploading,      setUploading]      = useState(false);
     const [gcRunning,      setGcRunning]      = useState(false);
     const [uploadForm,     setUploadForm]     = useState({ name: "", file: null, icon: null, isGeneral: false, azId: 1, cloudInit: true, defaultUsername: "", defaultPassword: "" });
@@ -76,16 +78,19 @@ export const ImagePanel = ({ fullImages, onRefresh, flash, refreshImageList, api
         if (abortRef.current) abortRef.current.abort();
     };
 
-    const handleDelete = async (img) => {
-        if (!window.confirm(`¿Eliminar la imagen '${img.name}'?`)) return;
-        try {
-            const res  = await apiFetch(`/slices/utils/images/${img.id}`, { method: "DELETE" });
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.detail || "Error al eliminar");
-            flash(data.message);
-            onRefresh();
-        } catch (e) { flash(e.message, "error"); }
-    };
+    const handleDelete = (img) => askConfirm({
+        title: "Eliminar imagen",
+        msg: `¿Eliminar la imagen «${img.name}»? Las VMs ya desplegadas con ella siguen funcionando.`,
+        onOk: async () => {
+            try {
+                const res  = await apiFetch(`/slices/utils/images/${img.id}`, { method: "DELETE" });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.detail || "Error al eliminar");
+                flash(data.message);
+                onRefresh();
+            } catch (e) { flash(e.message, "error"); }
+        },
+    });
 
     const handleIconUpload = async (img, file) => {
         if (!file) return;
@@ -315,6 +320,7 @@ export const ImagePanel = ({ fullImages, onRefresh, flash, refreshImageList, api
                     ))}
                 </div>
             </div>
+            {confirmDialog}
         </div>
     );
 };

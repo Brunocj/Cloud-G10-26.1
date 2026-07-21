@@ -3,6 +3,7 @@ import { T, inp } from "../../theme/tokens";
 import { Label } from "../ui/Label";
 import { AzureTemplate, AzureNetwork } from "../ui/AzureIcons";
 import { Trash2, Globe, Users, User } from "../ui/Icon";
+import { useConfirm } from "../../hooks/useConfirm";
 
 const SCOPE_META = {
     global:   { label: "Globales",       icon: Globe },
@@ -19,6 +20,7 @@ const TEMPLATES = [
 ];
 
 export const TemplatePicker = ({ apiFetch, onLoadTemplate, flash }) => {
+    const [askConfirm, confirmDialog] = useConfirm();
     const [counts, setCounts]     = useState({ linear: 4, ring: 5, mesh: 4, tree: 7, bus: 4 });
     const [dragging, setDragging] = useState(null);
     const [saved, setSaved]       = useState([]);
@@ -32,12 +34,17 @@ export const TemplatePicker = ({ apiFetch, onLoadTemplate, flash }) => {
     };
     useEffect(() => { loadSaved(); }, [apiFetch]);
 
-    const deleteTemplate = async (tpl, e) => {
+    const deleteTemplate = (tpl, e) => {
         e.stopPropagation();
-        if (!window.confirm(`¿Eliminar la plantilla "${tpl.name}"?`)) return;
-        const res = await apiFetch(`/slices/templates/${tpl.id}`, { method: "DELETE" });
-        if (res.ok) { flash?.(`Plantilla "${tpl.name}" eliminada`); loadSaved(); }
-        else flash?.("No se pudo eliminar la plantilla", "error");
+        askConfirm({
+            title: "Eliminar plantilla",
+            msg: `¿Eliminar la plantilla «${tpl.name}»? Los slices ya desplegados a partir de ella no se ven afectados.`,
+            onOk: async () => {
+                const res = await apiFetch(`/slices/templates/${tpl.id}`, { method: "DELETE" });
+                if (res.ok) { flash?.(`Plantilla "${tpl.name}" eliminada`); loadSaved(); }
+                else flash?.("No se pudo eliminar la plantilla", "error");
+            },
+        });
     };
 
     // Agrupar por alcance en el orden del TDR: proyecto → globales → personales
@@ -151,6 +158,7 @@ export const TemplatePicker = ({ apiFetch, onLoadTemplate, flash }) => {
                     </div>
                 ))}
             </div>
+            {confirmDialog}
         </div>
     );
 };

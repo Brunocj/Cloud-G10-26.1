@@ -14,6 +14,7 @@
  */
 import { useState, useEffect, useRef } from "react";
 import { T, btnBase, inp, FONT_STACK } from "../theme/tokens";
+import { useConfirm } from "../hooks/useConfirm";
 import { ThemePicker }  from "../components/ui/ThemePicker";
 import { UserAvatar }   from "../components/ui/UserAvatar";
 import {
@@ -277,6 +278,7 @@ const WorkerCard = ({ w, m, revealed, onToggleReveal, onEdit, onDelete }) => {
 
 // ─── InfraMonitorView (Infraestructura unificada) ─────────────────────────────
 export const InfraMonitorView = ({ user, logout, reTheme, themeRev, onBack, onProfile, apiFetch, flash }) => {
+    const [askConfirm, confirmDialog] = useConfirm();
     // Métricas en vivo (Observabilidad)
     const [workersData, setWorkersData] = useState(null);
     const [status,      setStatus]      = useState(null);
@@ -361,13 +363,17 @@ export const InfraMonitorView = ({ user, logout, reTheme, themeRev, onBack, onPr
         } catch { return { ok: false, message: "Error de conexión con el servidor" }; }
     };
 
-    const deleteWorker = async (w) => {
-        if (!window.confirm(`¿Desmatricular el worker "${w.name}"? Esta acción no destruye la máquina física.`)) return;
-        const res = await apiFetch(`/infra/workers/${w.id}`, { method: "DELETE" });
-        const data = await res.json().catch(() => ({}));
-        if (res.ok) { flash(data.message); loadInfra(); }
-        else flash(data.detail || "No se pudo eliminar", "error");
-    };
+    const deleteWorker = (w) => askConfirm({
+        title: "Desmatricular worker",
+        msg: `¿Desmatricular el worker «${w.name}»? Deja de estar disponible para nuevos despliegues. Esta acción NO destruye la máquina física.`,
+        confirmLabel: "Sí, desmatricular",
+        onOk: async () => {
+            const res = await apiFetch(`/infra/workers/${w.id}`, { method: "DELETE" });
+            const data = await res.json().catch(() => ({}));
+            if (res.ok) { flash(data.message); loadInfra(); }
+            else flash(data.detail || "No se pudo eliminar", "error");
+        },
+    });
 
     const addZone = async () => {
         if (!newZone.trim()) return;
@@ -377,13 +383,16 @@ export const InfraMonitorView = ({ user, logout, reTheme, themeRev, onBack, onPr
         else flash(data.detail || "No se pudo crear la zona", "error");
     };
 
-    const deleteZone = async (z) => {
-        if (!window.confirm(`¿Eliminar la zona "${z.name}"?`)) return;
-        const res = await apiFetch(`/infra/zones/${z.id}`, { method: "DELETE" });
-        const data = await res.json().catch(() => ({}));
-        if (res.ok) { flash(data.message); loadInfra(); }
-        else flash(data.detail || "No se pudo eliminar", "error");
-    };
+    const deleteZone = (z) => askConfirm({
+        title: "Eliminar zona de disponibilidad",
+        msg: `¿Eliminar la zona «${z.name}»? Los workers que tenga asignados quedarán sin zona.`,
+        onOk: async () => {
+            const res = await apiFetch(`/infra/zones/${z.id}`, { method: "DELETE" });
+            const data = await res.json().catch(() => ({}));
+            if (res.ok) { flash(data.message); loadInfra(); }
+            else flash(data.detail || "No se pudo eliminar", "error");
+        },
+    });
 
     // ── Join inventario ↔ métricas (metrics.worker_id === infra.id) ───────────
     const metrics = workersData?.workers ?? [];
@@ -606,6 +615,7 @@ export const InfraMonitorView = ({ user, logout, reTheme, themeRev, onBack, onPr
                     onClose={() => setEditing(null)}
                 />
             )}
+            {confirmDialog}
         </div>
     );
 };

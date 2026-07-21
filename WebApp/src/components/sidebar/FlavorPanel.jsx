@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { T, btnBase, inp } from "../../theme/tokens";
 import { Label } from "../ui/Label";
 import { Plus, Save, Trash2, Cpu, MemoryStick, HardDrive, Globe, Users, Lock, Loader } from "../ui/Icon";
+import { useConfirm } from "../../hooks/useConfirm";
 
 const VISIBILITY_META = {
     global:  { icon: Globe, label: "Global",   color: "#ff8200" },
@@ -12,6 +13,7 @@ const VISIBILITY_META = {
 const emptyForm = { name: "", vcpus: 1, ram_mb: 1024, disk_gb: 10, visibility: "private", project_id: "" };
 
 export const FlavorPanel = ({ apiFetch, user, flash }) => {
+    const [askConfirm, confirmDialog] = useConfirm();
     const [flavors,   setFlavors]   = useState([]);
     const [loading,   setLoading]   = useState(true);
     const [projects,  setProjects]  = useState([]); // proyectos donde el usuario puede crear flavors 'project'
@@ -70,14 +72,18 @@ export const FlavorPanel = ({ apiFetch, user, flash }) => {
     };
 
     const deleteFlavor = (fl) => {
-        if (!apiFetch || !window.confirm(`¿Eliminar el flavor '${fl.name}'? Las VMs que ya lo usaron conservan sus recursos.`)) return;
-        apiFetch(`/slices/utils/flavors/${fl.id}`, { method: "DELETE" })
-            .then(r => { if (!r.ok) return r.json().then(e => Promise.reject(e)); return r.json(); })
-            .then(data => {
-                setFlavors(prev => prev.filter(x => x.id !== fl.id));
-                flash(data.message);
-            })
-            .catch(e => flash(e?.detail || "No se pudo eliminar el flavor.", "error"));
+        if (!apiFetch) return;
+        askConfirm({
+            title: "Eliminar flavor",
+            msg: `¿Eliminar el flavor «${fl.name}»? Las VMs que ya lo usaron conservan sus recursos.`,
+            onOk: () => apiFetch(`/slices/utils/flavors/${fl.id}`, { method: "DELETE" })
+                .then(r => { if (!r.ok) return r.json().then(e => Promise.reject(e)); return r.json(); })
+                .then(data => {
+                    setFlavors(prev => prev.filter(x => x.id !== fl.id));
+                    flash(data.message);
+                })
+                .catch(e => flash(e?.detail || "No se pudo eliminar el flavor.", "error")),
+        });
     };
 
     return (
@@ -198,6 +204,7 @@ export const FlavorPanel = ({ apiFetch, user, flash }) => {
                     })}
                 </div>
             </div>
+            {confirmDialog}
         </div>
     );
 };

@@ -65,6 +65,7 @@ export {
     Edit3,
 
     // Files / Data
+    MessageSquare,
     ClipboardList,
     FileText,
     FolderOpen,

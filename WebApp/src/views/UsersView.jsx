@@ -6,6 +6,7 @@ import {
     ArrowLeft, Plus, User as UserIcon, X, Crown,
     Search, AlertTriangle, ShieldCheck,
 } from "../components/ui/Icon";
+import { PromptModal } from "../components/modals/PromptModal";
 
 const ROLE_LABELS = {
     usuario:      "Usuario",
@@ -281,6 +282,7 @@ const CsvImportModal = ({ onConfirm, onClose }) => {
 
 // ─── UsersView ────────────────────────────────────────────────────────────────
 export const UsersView = ({ user, logout, reTheme, themeRev, onBack, onProfile, apiFetch, flash }) => {
+    const [rejecting, setRejecting] = useState(null);   // usuario cuyo rechazo se está motivando
     const [users, setUsers] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
@@ -328,12 +330,18 @@ export const UsersView = ({ user, logout, reTheme, themeRev, onBack, onProfile, 
     };
 
     // Aprobación / rechazo de cuentas auto-registradas (REQ-AD-01)
-    const changeState = async (u, action) => {
-        let reason = null;
+    // El rechazo pide un motivo que se envía por correo. Antes era un
+    // window.prompt, que además permitía aceptar con el campo vacío y mandaba
+    // el correo sin justificación: PromptModal lo exige (required).
+    const changeState = (u, action) => {
         if (action === "reject") {
-            reason = window.prompt(`Motivo del rechazo de la cuenta de "${u.username}" (se le enviará por correo):`);
-            if (reason === null) return;   // canceló
+            setRejecting(u);
+            return;
         }
+        doChangeState(u, action, null);
+    };
+
+    const doChangeState = async (u, action, reason) => {
         const res = await apiFetch(`/users/${u.id}/state`, {
             method: "PATCH", body: JSON.stringify({ action, reason }),
         });
@@ -489,6 +497,18 @@ export const UsersView = ({ user, logout, reTheme, themeRev, onBack, onProfile, 
                         return data;
                     }}
                     onClose={() => setImporting(false)}
+                />
+            )}
+
+            {rejecting && (
+                <PromptModal
+                    title="Rechazar cuenta"
+                    msg={`Motivo del rechazo de la cuenta de «${rejecting.username}». Se le enviará por correo.`}
+                    placeholder="Ej. El código PUCP no corresponde a un alumno activo"
+                    confirmLabel="Rechazar cuenta"
+                    required
+                    onOk={(reason) => { const u = rejecting; setRejecting(null); doChangeState(u, "reject", reason); }}
+                    onCancel={() => setRejecting(null)}
                 />
             )}
 
