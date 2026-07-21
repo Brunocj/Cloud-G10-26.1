@@ -62,15 +62,23 @@ async def destroy_deployed_slice(db: Session, db_slice: Slice) -> bool:
     Devuelve True si la orden fue publicada correctamente.
     El caller es responsable de la autorización y de decidir si el slice
     está realmente desplegado (no DRAFT/PENDING).
+
+    Es reentrante: si ya hay un `pending_destroy` (reintento del watchdog o del
+    Kill Switch sobre un destroy colgado) se conserva el `previous_status`
+    original y se lleva la cuenta de intentos. Sin eso, un reintento guardaría
+    `previous_status = "TERMINATING"` y el slice nunca podría volver a ACTIVE.
     """
     slice_id = db_slice.id
-    previous_status = db_slice.status
 
     s_json = db_slice.slice_json
     if isinstance(s_json, str):
         s_json = json.loads(s_json)
     if not s_json:
         s_json = {}
+
+    prior_destroy   = s_json.get("pending_destroy") or {}
+    previous_status = prior_destroy.get("previous_status") or db_slice.status
+    attempt         = int(prior_destroy.get("attempts") or 0) + 1
 
     # Re-inyectar claves SSH frescas desde BD. Se elige un worker DE LA ZONA del
     # slice y con ssh_key_path válido (no el primero de la tabla, que podría ser
@@ -126,6 +134,7 @@ async def destroy_deployed_slice(db: Session, db_slice: Slice) -> bool:
     s_json["pending_destroy"] = {
         "previous_status": previous_status,
         "requested_at":    datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "attempts":        attempt,
     }
     db_slice.slice_json = dict(s_json)
     db_slice.status = "TERMINATING"

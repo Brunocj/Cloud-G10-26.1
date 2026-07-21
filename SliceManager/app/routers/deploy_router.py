@@ -10,6 +10,7 @@ from app.nats_producer import nats_producer
 from app.routers.project_router import can_deploy_directly, user_can_choose_project
 from app.services.notification_hub import notification_hub
 from app.services.slice_destroyer import destroy_deployed_slice
+from app.services.stuck_ops_scheduler import destroy_is_stale
 from app.services.permissions import can_operate_slice
 from app.services.audit import audit
 import os
@@ -402,6 +403,12 @@ async def request_destroy(
     if db_slice.status == "TERMINATED":
         raise HTTPException(status_code=400, detail="El slice ya está destruido.")
     if db_slice.status == "TERMINATING":
+        if destroy_is_stale(db_slice.slice_json):
+            raise HTTPException(
+                status_code=409,
+                detail="La destrucción de este slice no recibió confirmación. El sistema la "
+                       "está reintentando automáticamente; si vuelve a ACTIVE podrás repetirla.",
+            )
         raise HTTPException(status_code=409, detail="Ya hay una destrucción en curso para este slice.")
 
     # ── Autorización de negocio ──────────────────────────────────────
@@ -768,7 +775,11 @@ async def force_destroy(
         raise HTTPException(status_code=404, detail="Slice no encontrado")
     if db_slice.status == "TERMINATED":
         raise HTTPException(status_code=400, detail="El slice ya está destruido.")
-    if db_slice.status == "TERMINATING":
+    # Un TERMINATING reciente es una destrucción legítima en curso. Pero si ya
+    # superó el timeout del watchdog, la confirmación se perdió y el slice está
+    # atascado: acá el Kill Switch republica la orden en vez de rebotar con 409
+    # y dejar al admin sin salida (el watchdog haría lo mismo, pero más tarde).
+    if db_slice.status == "TERMINATING" and not destroy_is_stale(db_slice.slice_json):
         raise HTTPException(status_code=409, detail="Ya hay una destrucción en curso para este slice.")
 
     # Solo roles con poder de intervención sobre slices ajenos

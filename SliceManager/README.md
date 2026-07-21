@@ -194,11 +194,31 @@ deploy_router.py
         └─ Al confirmar slice.result (nats_listener):
              ├─ éxito → libera VLANs/IPs, status → TERMINATED
              └─ error → revierte al estado anterior (reintentable) / FAILED
+
+Si la confirmación NUNCA llega (QM caído a mitad de la saga, payload inválido,
+resultado publicado con el SliceManager abajo), el slice quedaría en TERMINATING
+para siempre. De eso se encarga stuck_ops_scheduler.py:
+    ├─ pasados STUCK_OP_TIMEOUT_MINUTES → republica slice.destroy
+    │   (hasta STUCK_DESTROY_MAX_ATTEMPTS intentos)
+    └─ agotados los intentos → vuelve al estado previo y notifica al dueño
+        (sin liberar VLANs/IPs: la infra puede seguir viva → limpieza manual)
 ```
 
 > El destroy **espera la confirmación real** de la limpieza física antes de liberar
 > VLANs/IPs (estado `TERMINATING`). Antes se liberaba al publicar el mensaje, lo que
 > podía dejar la BD diciendo "libre" mientras la infraestructura seguía viva.
+
+> Ningún camino marca `TERMINATED` ni libera recursos por *timeout*: sin confirmación
+> no se sabe si la VLAN sigue configurada en un worker, y reutilizarla causaría una
+> colisión de Capa 2 entre slices.
+
+**Variables de entorno del vigía** (`stuck_ops_scheduler`):
+
+| Variable | Default | Descripción |
+|---|---|---|
+| `STUCK_OP_CHECK_INTERVAL_SECONDS` | `60` | Cada cuánto revisa operaciones colgadas |
+| `STUCK_OP_TIMEOUT_MINUTES` | `10` | Antigüedad a partir de la cual una operación se da por colgada |
+| `STUCK_DESTROY_MAX_ATTEMPTS` | `3` | Intentos totales de destroy antes de revertir |
 
 ---
 
